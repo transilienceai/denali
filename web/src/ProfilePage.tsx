@@ -15,6 +15,8 @@ import {
   Camera,
   Check,
   Clock3,
+  Copy,
+  FileUp,
   KeyRound,
   LoaderCircle,
   LogOut,
@@ -23,6 +25,7 @@ import {
   Save,
   ShieldCheck,
   Trash2,
+  UserPlus,
   UserRound,
   Users,
 } from "lucide-react";
@@ -33,6 +36,8 @@ import {
   type ChangeEvent,
   type FormEvent,
 } from "react";
+import { api, type OrganizationRole } from "./api";
+import { MAX_BULK_INVITES, parseBulkEmails } from "./profileMembers";
 
 type ProfileSection = "account" | "organization" | "members";
 type Notice = { kind: "success" | "error"; message: string };
@@ -548,6 +553,7 @@ type PaginatedCollection<T> = {
 };
 type PaginatedMembers = PaginatedCollection<OrganizationMembershipResource>;
 type PaginatedInvitations = PaginatedCollection<OrganizationInvitationResource>;
+type MemberAccessMode = "invite" | "bulk" | "create";
 
 function MembersSection({
   organization,
@@ -565,8 +571,20 @@ function MembersSection({
   onNotice: (notice: Notice) => void;
 }) {
   const [email, setEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("org:member");
-  const [inviting, setInviting] = useState(false);
+  const [accessMode, setAccessMode] = useState<MemberAccessMode>("invite");
+  const [inviteRole, setInviteRole] = useState<OrganizationRole>("org:member");
+  const [bulkEmails, setBulkEmails] = useState("");
+  const [createEmail, setCreateEmail] = useState("");
+  const [createFirstName, setCreateFirstName] = useState("");
+  const [createLastName, setCreateLastName] = useState("");
+  const [createPassword, setCreatePassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [submittingAccess, setSubmittingAccess] = useState(false);
+  const [createdCredentials, setCreatedCredentials] = useState<{
+    email: string;
+    password: string;
+    userId: string;
+  } | null>(null);
   const [memberAction, setMemberAction] = useState<string | null>(null);
   const [invitationAction, setInvitationAction] = useState<string | null>(null);
 
@@ -580,16 +598,131 @@ function MembersSection({
       onNotice({ kind: "error", message: "Enter a valid email address." });
       return;
     }
-    setInviting(true);
+    setSubmittingAccess(true);
     try {
-      await organization!.inviteMember({ emailAddress: targetEmail, role: inviteRole });
+      const result = await api.inviteOrganizationMembers([targetEmail], inviteRole);
+      if (result.failed) throw new Error(result.results[0]?.error ?? "Clerk rejected the invitation");
       setEmail("");
       await invitations?.revalidate?.();
       onNotice({ kind: "success", message: `Invitation sent to ${targetEmail}.` });
     } catch (error) {
       onNotice({ kind: "error", message: errorMessage(error, "Unable to send invitation") });
     } finally {
-      setInviting(false);
+      setSubmittingAccess(false);
+    }
+  }
+
+  async function inviteBulk(event: FormEvent) {
+    event.preventDefault();
+    if (!isAdmin) return;
+    const parsed = parseBulkEmails(bulkEmails);
+    if (parsed.invalid.length) {
+      onNotice({
+        kind: "error",
+        message: `Remove ${parsed.invalid.length} invalid email address${parsed.invalid.length === 1 ? "" : "es"}.`,
+      });
+      return;
+    }
+    if (!parsed.emails.length) {
+      onNotice({ kind: "error", message: "Add at least one email address." });
+      return;
+    }
+    if (parsed.emails.length > MAX_BULK_INVITES) {
+      onNotice({ kind: "error", message: `Send no more than ${MAX_BULK_INVITES} invitations at once.` });
+      return;
+    }
+    setSubmittingAccess(true);
+    try {
+      const result = await api.inviteOrganizationMembers(parsed.emails, inviteRole);
+      if (result.sent) {
+        setBulkEmails(result.failed ? result.results.filter((item) => item.status === "failed").map((item) => item.email).join("\n") : "");
+        await invitations?.revalidate?.();
+      }
+      onNotice({
+        kind: result.failed ? "error" : "success",
+        message: result.failed
+          ? `${result.sent} invitation${result.sent === 1 ? "" : "s"} sent; ${result.failed} failed and remain in the list.`
+          : `${result.sent} invitation${result.sent === 1 ? "" : "s"} sent.`,
+      });
+    } catch (error) {
+      onNotice({ kind: "error", message: errorMessage(error, "Unable to send invitations") });
+    } finally {
+      setSubmittingAccess(false);
+    }
+  }
+
+  async function createUser(event: FormEvent) {
+    event.preventDefault();
+    if (!isAdmin) return;
+    const targetEmail = createEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) {
+      onNotice({ kind: "error", message: "Enter a valid email address." });
+      return;
+    }
+    if (createPassword.length < 8) {
+      onNotice({ kind: "error", message: "The password must contain at least 8 characters." });
+      return;
+    }
+    if (createPassword !== confirmPassword) {
+      onNotice({ kind: "error", message: "The passwords do not match." });
+      return;
+    }
+    setSubmittingAccess(true);
+    const passwordForClerk = createPassword;
+    try {
+      const result = await api.createOrganizationUser({
+        email: targetEmail,
+        password: passwordForClerk,
+        first_name: createFirstName.trim() || undefined,
+        last_name: createLastName.trim() || undefined,
+        role: inviteRole,
+      });
+      setCreatedCredentials({
+        email: result.email,
+        password: passwordForClerk,
+        userId: result.user_id,
+      });
+      setCreateEmail("");
+      setCreateFirstName("");
+      setCreateLastName("");
+      setCreatePassword("");
+      setConfirmPassword("");
+      await memberships?.revalidate?.();
+      onNotice({ kind: "success", message: `${result.email} was created and added to the organization.` });
+    } catch (error) {
+      onNotice({ kind: "error", message: errorMessage(error, "Unable to create user") });
+    } finally {
+      setSubmittingAccess(false);
+    }
+  }
+
+  function changeAccessMode(mode: MemberAccessMode) {
+    setAccessMode(mode);
+    setCreatedCredentials(null);
+    setCreatePassword("");
+    setConfirmPassword("");
+  }
+
+  async function loadBulkFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 256 * 1024) {
+      onNotice({ kind: "error", message: "Use a CSV or text file smaller than 256 KB." });
+      return;
+    }
+    setBulkEmails(await file.text());
+  }
+
+  async function copyCredentials() {
+    if (!createdCredentials) return;
+    try {
+      await navigator.clipboard.writeText(
+        `Email: ${createdCredentials.email}\nPassword: ${createdCredentials.password}\nClerk user ID: ${createdCredentials.userId}`,
+      );
+      onNotice({ kind: "success", message: "Credentials copied. Share them through a secure channel." });
+    } catch (error) {
+      onNotice({ kind: "error", message: errorMessage(error, "Unable to copy credentials") });
     }
   }
 
@@ -646,11 +779,55 @@ function MembersSection({
         <header><div><span>Workspace access</span><h3>Members</h3></div><Users /></header>
         {!isAdmin && <div className="profile-permission-note"><ShieldCheck />Member management is available to organization admins.</div>}
         {isAdmin && (
-          <form className="profile-invite-form" onSubmit={invite}>
-            <label><span>Email address</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="teammate@company.com" /></label>
-            <label><span>Role</span><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}><option value="org:member">Member · read only</option><option value="org:admin">Admin · can manage</option></select></label>
-            <button className="primary-action" disabled={inviting}><Mail />{inviting ? "Sending…" : "Send invitation"}</button>
-          </form>
+          <div className="profile-member-access">
+            <div className="profile-access-tabs" role="tablist" aria-label="Add organization members">
+              <button type="button" role="tab" aria-selected={accessMode === "invite"} className={accessMode === "invite" ? "active" : ""} onClick={() => changeAccessMode("invite")}><Mail />Invite one</button>
+              <button type="button" role="tab" aria-selected={accessMode === "bulk"} className={accessMode === "bulk" ? "active" : ""} onClick={() => changeAccessMode("bulk")}><Users />Bulk invite</button>
+              <button type="button" role="tab" aria-selected={accessMode === "create"} className={accessMode === "create" ? "active" : ""} onClick={() => changeAccessMode("create")}><UserPlus />Create user</button>
+            </div>
+
+            {accessMode === "invite" && (
+              <form className="profile-invite-form" onSubmit={invite}>
+                <label><span>Email address</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="teammate@company.com" /></label>
+                <RoleSelect value={inviteRole} onChange={setInviteRole} />
+                <button className="primary-action" disabled={submittingAccess}><Mail />{submittingAccess ? "Sending…" : "Send invitation"}</button>
+              </form>
+            )}
+
+            {accessMode === "bulk" && (
+              <form className="profile-access-form" onSubmit={inviteBulk}>
+                <label className="profile-field-wide"><span>Email addresses</span><textarea rows={5} value={bulkEmails} onChange={(event) => setBulkEmails(event.target.value)} placeholder={"one@company.com\ntwo@company.com\nthree@company.com"} /><small>Separate with lines, commas, or semicolons. Up to {MAX_BULK_INVITES} unique addresses.</small></label>
+                <div className="profile-access-actions">
+                  <RoleSelect value={inviteRole} onChange={setInviteRole} />
+                  <label className="secondary-action profile-file-action"><FileUp />Import CSV or text<input type="file" accept=".csv,.txt,text/csv,text/plain" onChange={(event) => void loadBulkFile(event)} /></label>
+                  <button className="primary-action" disabled={submittingAccess}><Mail />{submittingAccess ? "Sending…" : "Send invitations"}</button>
+                </div>
+              </form>
+            )}
+
+            {accessMode === "create" && (
+              <form className="profile-access-form" onSubmit={createUser} autoComplete="off">
+                <div className="profile-form-grid">
+                  <label><span>Email address</span><input type="email" autoComplete="off" value={createEmail} onChange={(event) => setCreateEmail(event.target.value)} placeholder="new.user@company.com" /></label>
+                  <RoleSelect value={inviteRole} onChange={setInviteRole} />
+                  <label><span>First name</span><input value={createFirstName} onChange={(event) => setCreateFirstName(event.target.value)} /></label>
+                  <label><span>Last name</span><input value={createLastName} onChange={(event) => setCreateLastName(event.target.value)} /></label>
+                  <label><span>Initial password</span><input type="password" autoComplete="new-password" value={createPassword} onChange={(event) => setCreatePassword(event.target.value)} minLength={8} /></label>
+                  <label><span>Confirm password</span><input type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={8} /></label>
+                </div>
+                <div className="profile-sensitive-note"><KeyRound /><span>Denali forwards this password to Clerk once and never stores it. Share it securely and ask the user to change it after signing in.</span></div>
+                <button className="primary-action profile-create-user" disabled={submittingAccess}><UserPlus />{submittingAccess ? "Creating…" : "Create user"}</button>
+              </form>
+            )}
+
+            {accessMode === "create" && createdCredentials && (
+              <div className="profile-credential-result" role="status">
+                <div><span>Credentials ready</span><strong>{createdCredentials.email}</strong><code>{createdCredentials.password}</code><small>Clerk ID: {createdCredentials.userId}</small></div>
+                <button type="button" className="secondary-action" onClick={() => void copyCredentials()}><Copy />Copy credentials</button>
+                <button type="button" className="profile-row-action" onClick={() => setCreatedCredentials(null)}>Clear</button>
+              </div>
+            )}
+          </div>
         )}
 
         {memberships?.isLoading ? <div className="profile-inline-loading"><LoaderCircle className="spin" />Loading members…</div> : (
@@ -700,5 +877,23 @@ function MembersSection({
         {invitations?.hasNextPage && <button className="profile-load-more" onClick={() => invitations.fetchNext?.()} disabled={invitations.isFetching}>Load more invitations</button>}
       </section>
     </div>
+  );
+}
+
+function RoleSelect({
+  value,
+  onChange,
+}: {
+  value: OrganizationRole;
+  onChange: (role: OrganizationRole) => void;
+}) {
+  return (
+    <label>
+      <span>Role</span>
+      <select value={value} onChange={(event) => onChange(event.target.value as OrganizationRole)}>
+        <option value="org:member">Member · read only</option>
+        <option value="org:admin">Admin · can manage</option>
+      </select>
+    </label>
   );
 }

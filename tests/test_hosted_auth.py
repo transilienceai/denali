@@ -15,6 +15,7 @@ from denali.api.auth import (
     AuthorizationError,
     ClerkAuthenticator,
 )
+from denali.api.clerk_admin import ClerkAdminError
 
 ASSET_ID = "11111111-1111-4111-8111-111111111111"
 TENANTS = {
@@ -61,12 +62,66 @@ class TenantRepository:
         return {"id": asset_id, "governance_status": status, "owner": owner, "notes": notes}
 
 
-def _client(repository: TenantRepository) -> TestClient:
+class FakeClerkOrganizationAdmin:
+    def __init__(self) -> None:
+        self.invites: list[dict[str, str]] = []
+        self.users: list[dict[str, str | None]] = []
+
+    def invite_member(
+        self,
+        *,
+        organization_id: str,
+        inviter_user_id: str,
+        email: str,
+        role: str,
+    ) -> str:
+        if email == "rejected@example.com":
+            raise ClerkAdminError("invitation_rejected")
+        self.invites.append(
+            {
+                "organization_id": organization_id,
+                "inviter_user_id": inviter_user_id,
+                "email": email,
+                "role": role,
+            }
+        )
+        return f"invitation_{len(self.invites)}"
+
+    def create_user_and_membership(
+        self,
+        *,
+        organization_id: str,
+        email: str,
+        password: str,
+        first_name: str | None,
+        last_name: str | None,
+        role: str,
+    ) -> str:
+        if email == "existing@example.com":
+            raise ClerkAdminError("user_rejected")
+        self.users.append(
+            {
+                "organization_id": organization_id,
+                "email": email,
+                "password": password,
+                "first_name": first_name,
+                "last_name": last_name,
+                "role": role,
+            }
+        )
+        return "user_created"
+
+
+def _client(
+    repository: TenantRepository,
+    clerk_organization_admin: FakeClerkOrganizationAdmin | None = None,
+) -> TestClient:
     return TestClient(
         create_app(
             repository=repository,  # type: ignore[arg-type]
             auth_mode="clerk",
             authenticator=HeaderAuthenticator(),
+            clerk_organization_admin=clerk_organization_admin,
             migrate_on_start=False,
         )
     )
@@ -127,6 +182,125 @@ def test_members_can_read_but_only_admins_can_mutate() -> None:
     assert denied.status_code == 403
     assert allowed.status_code == 200
     assert repository.governance_updates == 1
+
+
+def test_bulk_invites_use_the_authenticated_organization_and_require_admin() -> None:
+    repository = TenantRepository()
+    clerk_admin = FakeClerkOrganizationAdmin()
+    body = {
+        "emails": [" FIRST@example.com ", "first@example.com", "rejected@example.com"],
+        "role": "org:member",
+    }
+    with _client(repository, clerk_admin) as client:
+        denied = client.post(
+            "/v1/profile/organization/invitations/bulk",
+            headers={"Authorization": "Bearer alpha-member"},
+            json=body,
+        )
+        response = client.post(
+            "/v1/profile/organization/invitations/bulk",
+            headers={"Authorization": "Bearer alpha-admin"},
+            json=body,
+        )
+
+    assert denied.status_code == 403
+    assert response.status_code == 200
+    assert response.json() == {
+        "sent": 1,
+        "failed": 1,
+        "results": [
+            {
+                "email": "first@example.com",
+                "status": "sent",
+                "invitation_id": "invitation_1",
+            },
+            {
+                "email": "rejected@example.com",
+                "status": "failed",
+                "error": "Clerk rejected this invitation",
+            },
+        ],
+    }
+    assert clerk_admin.invites == [
+        {
+            "organization_id": "org_alpha",
+            "inviter_user_id": "user_alpha",
+            "email": "first@example.com",
+            "role": "org:member",
+        }
+    ]
+
+
+def test_direct_user_creation_keeps_password_out_of_the_response() -> None:
+    repository = TenantRepository()
+    clerk_admin = FakeClerkOrganizationAdmin()
+    password = "Only-for-Clerk-123!"
+    with _client(repository, clerk_admin) as client:
+        response = client.post(
+            "/v1/profile/organization/users",
+            headers={"Authorization": "Bearer beta-admin"},
+            json={
+                "email": " NEW.USER@example.com ",
+                "password": password,
+                "first_name": " New ",
+                "last_name": " User ",
+                "role": "org:admin",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json() == {
+        "user_id": "user_created",
+        "email": "new.user@example.com",
+        "role": "org:admin",
+    }
+    assert password not in response.text
+    assert clerk_admin.users == [
+        {
+            "organization_id": "org_beta",
+            "email": "new.user@example.com",
+            "password": password,
+            "first_name": "New",
+            "last_name": "User",
+            "role": "org:admin",
+        }
+    ]
+
+
+def test_profile_member_endpoints_reject_invalid_input_and_sanitize_clerk_errors() -> None:
+    repository = TenantRepository()
+    clerk_admin = FakeClerkOrganizationAdmin()
+    with _client(repository, clerk_admin) as client:
+        invalid = client.post(
+            "/v1/profile/organization/invitations/bulk",
+            headers={"Authorization": "Bearer alpha-admin"},
+            json={"emails": ["not-an-email"], "role": "org:member"},
+        )
+        rejected = client.post(
+            "/v1/profile/organization/users",
+            headers={"Authorization": "Bearer alpha-admin"},
+            json={
+                "email": "existing@example.com",
+                "password": "Safe-password-123!",
+                "role": "org:member",
+            },
+        )
+        short_password = client.post(
+            "/v1/profile/organization/users",
+            headers={"Authorization": "Bearer alpha-admin"},
+            json={
+                "email": "short@example.com",
+                "password": "secret",
+                "role": "org:member",
+            },
+        )
+
+    assert invalid.status_code == 422
+    assert rejected.status_code == 502
+    assert "Safe-password-123!" not in rejected.text
+    assert "Clerk could not create the user" in rejected.json()["detail"]
+    assert short_password.status_code == 422
+    assert "secret" not in short_password.text
 
 
 def test_clerk_authenticator_passes_authorized_parties_and_rejects_pending_sessions(
