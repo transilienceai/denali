@@ -33,6 +33,11 @@ from denali.api.auth import (
     ClerkAuthenticator,
     RequestAuthenticator,
 )
+from denali.api.clerk_admin import (
+    ClerkAdminError,
+    ClerkBackendOrganizationAdmin,
+    ClerkOrganizationAdmin,
+)
 from denali.api.validation import run_durable_validation_job
 from denali.connections import (
     AWS_COVERAGE_AUTOMATIC,
@@ -388,6 +393,26 @@ class GitHubConnectionCreate(BaseModel):
     )
 
 
+OrganizationRole = Literal["org:member", "org:admin"]
+
+
+class BulkOrganizationInvite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    emails: list[str] = Field(min_length=1, max_length=50)
+    role: OrganizationRole = "org:member"
+
+
+class OrganizationUserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+    password: str
+    first_name: str | None = Field(default=None, max_length=100)
+    last_name: str | None = Field(default=None, max_length=100)
+    role: OrganizationRole = "org:member"
+
+
 ConnectionCreate = Annotated[
     AwsConnectionCreate | AzureConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate,
     Field(discriminator="provider"),
@@ -415,6 +440,7 @@ def create_app(
     tenant_id: str | None = None,
     auth_mode: Literal["local", "clerk"] | None = None,
     authenticator: RequestAuthenticator | None = None,
+    clerk_organization_admin: ClerkOrganizationAdmin | None = None,
     validation_dispatcher: Callable[[str], str | None] | None = None,
     migrate_on_start: bool = True,
 ) -> FastAPI:
@@ -426,6 +452,13 @@ def create_app(
     configured_authenticator = authenticator or (
         ClerkAuthenticator.from_environment() if configured_auth_mode == "clerk" else None
     )
+    configured_clerk_organization_admin = clerk_organization_admin
+    if (
+        configured_clerk_organization_admin is None
+        and configured_auth_mode == "clerk"
+        and os.environ.get("CLERK_SECRET_KEY")
+    ):
+        configured_clerk_organization_admin = ClerkBackendOrganizationAdmin.from_environment()
     configured_launcher = cloudformation_launcher or _cloudformation_launcher_from_environment()
     configured_azure_launcher = azure_setup_launcher or _azure_setup_launcher_from_environment()
     configured_gcp_provisioner = (
@@ -464,6 +497,7 @@ def create_app(
         app.state.tenant_id = configured_tenant
         app.state.auth_mode = configured_auth_mode
         app.state.authenticator = configured_authenticator
+        app.state.clerk_organization_admin = configured_clerk_organization_admin
         app.state.validation_dispatcher = validation_dispatcher
         app.state.connection_validator = connection_validator or AwsConnectionValidator()
         app.state.azure_connection_validator = (
@@ -876,6 +910,72 @@ def create_app(
             "role": identity.role,
             "can_write": identity.can_write,
         }
+
+    @app.post("/v1/profile/organization/invitations/bulk")
+    def invite_organization_members(
+        request: Request, invitation: BulkOrganizationInvite
+    ) -> dict[str, Any]:
+        _context(request)
+        identity, clerk_admin = _clerk_admin_context(request)
+        emails = _normalized_emails(invitation.emails)
+        results: list[dict[str, Any]] = []
+        for email in emails:
+            try:
+                invitation_id = clerk_admin.invite_member(
+                    organization_id=identity.organization_id,
+                    inviter_user_id=identity.user_id,
+                    email=email,
+                    role=invitation.role,
+                )
+                results.append(
+                    {"email": email, "status": "sent", "invitation_id": invitation_id}
+                )
+            except ClerkAdminError:
+                results.append(
+                    {
+                        "email": email,
+                        "status": "failed",
+                        "error": "Clerk rejected this invitation",
+                    }
+                )
+        sent = sum(result["status"] == "sent" for result in results)
+        return {"sent": sent, "failed": len(results) - sent, "results": results}
+
+    @app.post("/v1/profile/organization/users", status_code=201)
+    def create_organization_user(
+        request: Request, account: OrganizationUserCreate
+    ) -> dict[str, str]:
+        _context(request)
+        identity, clerk_admin = _clerk_admin_context(request)
+        email = _normalized_emails([account.email])[0]
+        if not 8 <= len(account.password) <= 128:
+            raise HTTPException(
+                status_code=422, detail="password must contain between 8 and 128 characters"
+            )
+        first_name = _optional_clean_text(account.first_name)
+        last_name = _optional_clean_text(account.last_name)
+        try:
+            user_id = clerk_admin.create_user_and_membership(
+                organization_id=identity.organization_id,
+                email=email,
+                password=account.password,
+                first_name=first_name,
+                last_name=last_name,
+                role=account.role,
+            )
+        except ClerkAdminError as error:
+            details = {
+                "user_rejected": (
+                    "Clerk could not create the user; check whether the account already exists "
+                    "and whether the password meets the Clerk instance policy"
+                ),
+                "membership_rejected": "Clerk could not add the new user to this organization",
+            }
+            raise HTTPException(
+                status_code=502,
+                detail=details.get(str(error), "Clerk user provisioning failed"),
+            ) from error
+        return {"user_id": user_id, "email": email, "role": account.role}
 
     @app.get("/v1/connections")
     def list_connections(request: Request) -> dict[str, Any]:
@@ -2061,6 +2161,42 @@ def _context(request: Request) -> tuple[InventoryReader, str]:
             raise HTTPException(status_code=401, detail="authentication required")
         return repository, str(tenant_id)
     return repository, request.app.state.tenant_id
+
+
+def _clerk_admin_context(
+    request: Request,
+) -> tuple[AuthContext, ClerkOrganizationAdmin]:
+    if request.app.state.auth_mode != "clerk":
+        raise HTTPException(
+            status_code=503, detail="Clerk organization administration is unavailable"
+        )
+    identity: AuthContext = request.state.denali_auth
+    clerk_admin = request.app.state.clerk_organization_admin
+    if clerk_admin is None:
+        raise HTTPException(
+            status_code=503, detail="Clerk organization administration is unavailable"
+        )
+    return identity, clerk_admin
+
+
+def _normalized_emails(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        email = raw.strip().lower()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 320:
+            raise HTTPException(status_code=422, detail="every email must be a valid address")
+        if email not in seen:
+            normalized.append(email)
+            seen.add(email)
+    return normalized
+
+
+def _optional_clean_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _context_for_tenant(request: Request, tenant_id: str) -> tuple[InventoryReader, str]:

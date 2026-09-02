@@ -122,6 +122,32 @@ Set `DENALI_GITHUB_CALLBACK_URL`, `DENALI_AZURE_CONSENT_REDIRECT_URI`, `DENALI_W
 `CLERK_AUTHORIZED_PARTIES`, and `DENALI_CORS_ORIGINS` to the final values. The browser normally
 uses the same-origin proxy; CORS remains restricted for diagnostics and controlled direct calls.
 
+### Isolated Vercel preview environment
+
+Do not point a Vercel preview using Clerk development keys at `denali-production`. Create an
+isolated hosted development stack named `denali-dev`:
+
+1. Create a Neon branch and empty database named `denali-dev`, owned by a dedicated
+   `denali_dev_owner` role. Collect pooled and direct DSNs that explicitly select the
+   `denali-dev` database and that role; do not reuse the production owner DSN.
+2. Create a Modal environment named `denali-dev`, then create a Secret named `denali-dev` inside
+   it with those DSNs, the Clerk development `sk_test_...` key and matching development JWKS PEM,
+   and the exact stable Vercel preview origin in `CLERK_AUTHORIZED_PARTIES`, `DENALI_WEB_URL`, and
+   `DENALI_CORS_ORIGINS`.
+3. Deploy and migrate the separate Modal application with the checked-in helper:
+
+   ```bash
+   scripts/deploy_modal_dev.sh
+   ```
+
+4. Set Vercel Preview `VITE_CLERK_PUBLISHABLE_KEY` to the matching Clerk development
+   publishable key and Preview `MODAL_API_ORIGIN` to the resulting `denali-dev` Modal API origin.
+   Redeploy the preview.
+
+Clerk users and Organizations are instance-specific. Create development-only test Organizations
+and memberships; do not expect production identities or Organization IDs to exist in development.
+Keep all Production-scoped Vercel variables and the `denali-production` Modal Secret unchanged.
+
 ## 5. Acceptance and operations
 
 For two separate Clerk organizations, verify:

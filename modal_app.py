@@ -7,7 +7,7 @@ from pathlib import Path
 
 import modal
 
-APP_NAME = "denali-production"
+APP_NAME = os.environ.get("DENALI_MODAL_APP_NAME", "denali-production")
 SECRET_NAME = os.environ.get("DENALI_MODAL_SECRET_NAME", "denali-production")
 
 image = (

@@ -177,12 +177,30 @@ build and publish, while `/api/*` remains intentionally unusable. Record Vercel'
 use it to configure Clerk and Modal, deploy Modal, then replace the placeholder with the real
 Modal origin and redeploy Vercel.
 
-- [x] Add both values for Production and Preview; `MODAL_API_ORIGIN` is also configured for
-  Development. Add the Clerk publishable key to Development only if that target will be used.
+- [x] Add the production values to Vercel Production.
+- [x] Add the Clerk development publishable key and the isolated `denali-dev` Modal origin to
+  Vercel Preview. Never point a development Clerk preview at `denali-production`.
+- [x] `MODAL_API_ORIGIN` is configured for Vercel Development. Add the Clerk publishable key to
+  Development only if that target will be used.
 - [x] Deploy the project and attach `denali.transilience.cloud`.
 - [ ] Verify an authenticated refresh and SPA navigation. Unauthenticated `/` and
   `/api/healthz` are verified.
 - [x] Confirm Vercel contains only the public Clerk publishable key and Modal origin.
+
+Development preview deployment recorded on 2026-09-02:
+
+- Modal environment, app, and Secret: `denali-dev`;
+- Modal API origin: `https://transilience-denali-dev--denali-dev-api.modal.run`;
+- Neon branch and database: `denali-dev`, owned by `denali_dev_owner`;
+- Vercel branch alias:
+  `https://denali-git-codex-custom-clerk-profile-transilience-a55654db.vercel.app`;
+- database migrations: 12, latest `012_tenant_connection_constraints.sql`;
+- authenticated Account, Organization, Members, active-Organization context, and same-origin API
+  routing verified from the hosted preview.
+- Profile member administration is implemented through admin-only Modal API routes: single and
+  bulk Clerk invitations plus direct Clerk user creation. Direct creation requires password
+  sign-in to be enabled in the matching Clerk development/production instance; Denali does not
+  store or return the initial password.
 
 ### 7. Reconcile the final URL
 

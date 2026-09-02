@@ -40,6 +40,23 @@ mutates the schema.
 Clerk owns sign-in, invitations, membership, Organization switching, and the `org:admin` and
 `org:member` roles. Denali owns authorization and data isolation.
 
+Denali's custom profile page uses the Clerk frontend components for the signed-in user's account,
+Organization switching, and existing membership resources. Privileged member onboarding crosses
+the same-origin API boundary instead of exposing the Clerk secret in Vercel:
+
+- `POST /v1/profile/organization/invitations/bulk` sends at most 50 normalized, unique invitations
+  and returns a per-address result so partial failure can be retried.
+- `POST /v1/profile/organization/users` creates a Clerk user and adds it to the active Organization.
+  The initial password is accepted only as transient request material, forwarded to Clerk, and is
+  never persisted, logged, or returned by the Denali API. If membership creation fails after user
+  creation, the backend attempts to delete the just-created Clerk user.
+
+Both routes require `org:admin`. They derive the Organization and inviter from the verified Clerk
+session; neither request accepts a tenant or Organization identifier. Direct creation also
+requires password sign-in to be enabled and the supplied password to satisfy the selected Clerk
+instance's policy. The UI can retain the submitted password in browser memory long enough for the
+admin to copy it once, then clears it when the result or workflow is dismissed.
+
 On the first approved authenticated request, the API maps the active Clerk Organization ID to one
 random Denali tenant UUID in the `tenant` table. This mapping is permanent. All existing tenant
 foreign keys and predicates continue to use the Denali UUID; Clerk identifiers do not become
@@ -95,6 +112,24 @@ pattern.
 
 ## Configuration and secret ownership
 
+Hosted preview and production are isolated security environments:
+
+| Vercel target | Clerk instance | Modal environment | Modal app/Secret | Neon environment |
+| --- | --- | --- | --- | --- |
+| Production | Production | `denali-prod` | `denali-production` | Production |
+| Preview | Development | `denali-dev` | `denali-dev` | `denali-dev` branch/database |
+
+A default `*.vercel.app` preview uses the Clerk development publishable key and proxies `/api/*`
+to the `denali-dev` Modal origin. That Modal deployment verifies with the matching development
+Secret and reads only the isolated Neon development environment. Production Modal never accepts
+development Clerk tokens, and preview builds never connect to production Neon.
+
+Preview deployment URLs may change per Vercel deployment. Use the stable branch alias for Clerk
+redirect/origin configuration when one is available, and keep the Preview `MODAL_API_ORIGIN`
+pointed at the stable `denali-dev` Modal API origin. If the branch alias changes, update the Clerk
+development instance allowlist plus `CLERK_AUTHORIZED_PARTIES`, `DENALI_WEB_URL`, and
+`DENALI_CORS_ORIGINS` in the `denali-dev` Modal Secret together, then redeploy `denali-dev`.
+
 Vercel receives only:
 
 | Variable | Purpose | Secret |
@@ -138,9 +173,11 @@ The Modal application contains separate functions for the ASGI API, database mig
 status, configuration status, and validation worker. The pilot keeps a warm API container, but
 correctness must not depend on its lifetime or on requests reaching the same container.
 
-`DENALI_MODAL_REGION` and `DENALI_MODAL_SECRET_NAME` are deploy-shell configuration because Modal
-resolves image/function declarations before runtime Secrets are attached. They must be set in the
-deployment environment when the region or Secret name differs from the source defaults.
+`DENALI_MODAL_REGION`, `DENALI_MODAL_APP_NAME`, and `DENALI_MODAL_SECRET_NAME` are deploy-shell
+configuration because Modal resolves image/function declarations before runtime Secrets are
+attached. They must be set in the deployment environment when the region, app name, or Secret name
+differs from the production source defaults. The preview deployment sets both names to
+`denali-dev`.
 
 Local Compose mode remains supported for development with one configured tenant and no Clerk
 authorization. Local mode is not a production topology and must not weaken hosted defaults.
