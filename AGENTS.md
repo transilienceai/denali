@@ -78,8 +78,12 @@ or provider onboarding.
   never tokens, authorization headers, DSNs, secrets, callback codes, or provider payloads.
 - Preserve local Compose mode for development. Hosted-only changes must not require Clerk or Modal
   for the local test suite unless the test explicitly covers hosted behavior.
-- `DENALI_MODAL_APP_NAME` and `DENALI_MODAL_SECRET_NAME` are deploy-shell settings. Production
-  defaults to `denali-production`; hosted preview deployments set both to `denali-dev`.
+- `DENALI_MODAL_APP_NAME`, `DENALI_MODAL_SECRET_NAME`, and
+  `DENALI_MODAL_PROVIDER_SECRET_NAME` are deploy-shell settings. Every environment mounts exactly
+  one core Secret and one provider Secret so Modal's local and remote dependency graphs remain
+  identical. Production uses `custom-secret` plus `denali-github-provider`; hosted preview uses
+  `denali-dev` plus an environment-local provider Secret of the same name. Provider Secrets must
+  not duplicate or override core Clerk/Neon keys.
 
 ## Required verification
 
