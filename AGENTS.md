@@ -17,6 +17,10 @@ or provider onboarding.
   session, or client-controlled header.
 - The API is the authorization boundary. `org:member` is read-only and `org:admin` may mutate.
   Frontend role checks are presentation only.
+- Organization invitations and direct Clerk user creation go through authenticated, admin-only
+  FastAPI routes using the server-resolved active Organization. Never accept an Organization ID
+  for these operations from the browser. Bulk invitations must remain bounded and return
+  per-address outcomes without logging addresses.
 - The root redirect, `/healthz`, API documentation, and documented provider callbacks are the
   intentional public routes. New `/v1/*` routes require verified Clerk authentication and an
   active Organization by default unless a reviewed callback protocol supplies equivalent
@@ -42,6 +46,10 @@ or provider onboarding.
 - Backend, database, and provider integration secrets belong in Modal Secrets. Never put
   `CLERK_SECRET_KEY`, a database DSN, provider secret, token, or private key in a `VITE_*`
   variable, Vercel build output, logs, fixtures, screenshots, or the repository.
+- A password supplied for admin-created Clerk users is transient request material. Forward it to
+  Clerk once; never log it, persist it, include it in an API response, job, error detail, or
+  telemetry. If Clerk user creation succeeds but Organization membership fails, delete that
+  just-created Clerk user as a consistency rollback.
 - Modal Secrets contain Denali-operated integration identity and configuration, not one set of
   customer cloud credentials per tenant.
 - Tenant cloud access is keyless or installation/consent based: AWS assume-role with external ID,

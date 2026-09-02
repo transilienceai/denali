@@ -197,6 +197,10 @@ Development preview deployment recorded on 2026-09-02:
 - database migrations: 12, latest `012_tenant_connection_constraints.sql`;
 - authenticated Account, Organization, Members, active-Organization context, and same-origin API
   routing verified from the hosted preview.
+- Profile member administration is implemented through admin-only Modal API routes: single and
+  bulk Clerk invitations plus direct Clerk user creation. Direct creation requires password
+  sign-in to be enabled in the matching Clerk development/production instance; Denali does not
+  store or return the initial password.
 
 ### 7. Reconcile the final URL
 
