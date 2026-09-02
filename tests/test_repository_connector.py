@@ -81,6 +81,50 @@ def test_typescript_bedrock_model_configuration_is_declared_without_executing_co
     assert all(item.evidence.locator.startswith("repo://") for item in models)
     assert "never-store-this" not in str(batch)
     assert {item.state for item in batch.coverage} == {CoverageState.COMPLETE}
+    agent = next(item for item in batch.assets if item.asset.kind is AssetKind.AI_AGENT)
+    assert agent.asset.natural_key == "app:typescript_agent:agent"
+    assert {
+        item.target.natural_key
+        for item in batch.relationships
+        if item.source == agent.asset and item.kind is RelationshipKind.USES
+    } == {item.asset.natural_key for item in models}
+
+
+def test_vertex_rest_fallback_and_declared_action_capabilities_are_discovered(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "server.mjs").write_text(
+        "const model = process.env.VERTEX_MODEL_ID || 'gemini-2.5-flash';\n"
+        "const endpoint = `https://us-central1-aiplatform.googleapis.com/v1/${model}`;\n"
+        "await fetch(endpoint, { method: 'POST' });\n"
+    )
+    (tmp_path / "actions.ts").write_text(
+        "this.call('chat.postMessage', payload);\n"
+        "new PutObjectCommand({ Bucket: bucket, Key: key });\n"
+        "await this.call(`/users/${this.box()}/messages/${encodeURIComponent(draftId)}/send`, "
+        "{ method: 'POST' });\n"
+    )
+
+    batch = RepositoryConnector(
+        tmp_path, repository_name="github.com/acme/summit"
+    ).collect()
+
+    model = next(item for item in batch.assets if item.asset.kind is AssetKind.AI_MODEL)
+    agent = next(item for item in batch.assets if item.asset.kind is AssetKind.AI_AGENT)
+    tools = [item for item in batch.assets if item.asset.kind is AssetKind.AI_TOOL]
+    assert model.asset.natural_key == "gcp:vertex:model:gemini-2.5-flash"
+    assert agent.asset.natural_key == "app:summit:agent"
+    assert {item.display_name for item in tools} == {
+        "Post Slack message",
+        "Write proposal artifact",
+        "Send Microsoft 365 email",
+    }
+    assert all(item.assertion_type is AssertionType.DECLARED for item in tools)
+    assert not any(
+        item.assertion_type is AssertionType.OBSERVED
+        for item in batch.relationships
+        if item.source == agent.asset and item.kind is RelationshipKind.CAN_INVOKE
+    )
 
 
 def test_low_level_mcp_server_and_tools_use_one_canonical_namespace(tmp_path: Path) -> None:

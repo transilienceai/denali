@@ -51,6 +51,16 @@ evidence without touching cloud resources; the verification command fails closed
 rebuilt tenant drifts from the story. The Overview page exposes both applications before the
 presenter enters the detailed code-to-cloud evidence view.
 
+## Hosted read-only demo access — planned
+
+After the Clerk-protected deployment at `denali.transilience.cloud` is operational, add a
+**View the demo** path for visitors who are not ready to create an account. The public path
+must open a read-only, resettable Golden Path snapshot rather than bypass authentication into
+an operator tenant. It must expose no connection credentials, onboarding actions, mutation
+controls, or customer evidence; the UI must visibly identify the workspace as a demo. Build
+this as a separate authorization mode and tenant boundary, then add browser acceptance for
+direct links, Back/Forward navigation, session transitions, and attempted mutations.
+
 ## Acceptance rules for every step
 
 - A runtime target is eligible only when independently and actively observed.

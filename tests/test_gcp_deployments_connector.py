@@ -18,7 +18,10 @@ PROJECT = "denali-test"
 
 def run_asset(*, name: str, ai: bool) -> dict[str, Any]:
     environment = (
-        [{"name": "VERTEX_MODEL_ID", "value": "secret-model-value"}]
+        [
+            {"name": "VERTEX_MODEL_ID", "value": "gemini-2.5-flash"},
+            {"name": "API_TOKEN", "value": "secret-model-value"},
+        ]
         if ai
         else [{"name": "LOG_LEVEL", "value": "debug"}]
     )
@@ -195,12 +198,22 @@ def test_collects_bounded_gcp_deployments_without_environment_values() -> None:
         "@sha256:abc"
     )
     assert run_workload.attributes["model_configuration_keys"] == ["VERTEX_MODEL_ID"]
+    assert run_workload.attributes["model_configuration"] == {
+        "VERTEX_MODEL_ID": "gemini-2.5-flash"
+    }
     serialized = repr(batch)
     assert "secret-model-value" not in serialized
     assert "do-not-persist" not in serialized
     assert {item.kind for item in batch.relationships} == {
         RelationshipKind.HOSTED_ON,
         RelationshipKind.RUNS_AS,
+        RelationshipKind.USES,
+    }
+    model = next(item for item in batch.assets if item.asset.kind is AssetKind.AI_MODEL)
+    assert model.asset.natural_key == "gcp:vertex:model:gemini-2.5-flash"
+    assert model.attributes == {
+        "provider": "gcp_vertex_ai",
+        "model_id": "gemini-2.5-flash",
     }
 
 
@@ -245,6 +258,7 @@ def test_exact_resource_name_boundary_excludes_other_project_services() -> None:
 
     assert {item.display_name for item in batch.assets} == {
         "Summit",
+        "gemini-2.5-flash",
         f"summit@{PROJECT}.iam.gserviceaccount.com",
     }
     run_coverage = next(
@@ -365,6 +379,7 @@ def test_connection_collector_uses_selected_project_number_and_persists_batch() 
     assert len(sink.batches) == 1
     assert {item.display_name for item in sink.batches[0].assets} == {
         "Summit",
+        "gemini-2.5-flash",
         f"denali-ai@{PROJECT}.iam.gserviceaccount.com",
     }
     assert result["state"] == "complete"

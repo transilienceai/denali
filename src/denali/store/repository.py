@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from denali.detections import (
     evaluate_repeated_failed_ai_signins,
     evaluate_unreviewed_ai_consent,
+    evaluate_unreviewed_model_invocation,
 )
 from denali.domain import (
     ActivityBatch,
@@ -42,6 +43,7 @@ from denali.domain import (
 from denali.issues import (
     aggregate_issue_evaluation_state,
     evaluate_agent_sensitive_write,
+    evaluate_deployed_bedrock_governance_gap,
     evaluate_unreviewed_ai_consent_then_use,
 )
 
@@ -604,12 +606,18 @@ class PostgresInventoryRepository:
                     tenant_id,
                     ("entra_ai_directory_audits", "entra_ai_application_inventory"),
                 )
+                model_activity_coverage = self._detection_coverage_state(
+                    connection, tenant_id, ("vertex_cloud_audit_activity",)
+                )
                 evaluations = (
                     evaluate_repeated_failed_ai_signins(
                         snapshot, coverage_state=sign_in_coverage
                     ),
                     evaluate_unreviewed_ai_consent(
                         snapshot, coverage_state=consent_coverage
+                    ),
+                    evaluate_unreviewed_model_invocation(
+                        snapshot, coverage_state=model_activity_coverage
                     ),
                 )
                 for evaluation in evaluations:
@@ -1161,6 +1169,7 @@ class PostgresInventoryRepository:
                 )
                 evaluations = (
                     evaluate_agent_sensitive_write(snapshot),
+                    evaluate_deployed_bedrock_governance_gap(snapshot),
                     evaluate_unreviewed_ai_consent_then_use(
                         runtime_detections,
                         detection_snapshot.activities,
@@ -1531,6 +1540,8 @@ class PostgresInventoryRepository:
                        repository.id AS repository_id,
                        repository.natural_key AS repository_natural_key,
                        repository_view.display_name AS repository_name,
+                       agent.item AS agent,
+                       COALESCE(tools.items, '[]'::jsonb) AS tools,
                        COALESCE(models.items, '[]'::jsonb) AS models,
                        identity.item AS identity,
                        COALESCE(code_findings.items, '[]'::jsonb) AS code_findings,
@@ -1566,24 +1577,131 @@ class PostgresInventoryRepository:
                     ORDER BY {_ASSERTION_RANK_SQL} DESC, aa.last_seen_at DESC LIMIT 1
                 ) repository_view ON true
                 LEFT JOIN LATERAL (
-                    SELECT jsonb_agg(jsonb_build_object(
-                        'id', model.id, 'natural_key', model.natural_key,
-                        'display_name', model_view.display_name,
-                        'assertion_type', rel.assertion_type,
-                        'confidence', rel.confidence
-                    ) ORDER BY model_view.display_name) AS items
+                    SELECT source.id AS agent_id,
+                           jsonb_build_object(
+                               'id', source.id, 'natural_key', source.natural_key,
+                               'display_name', source_view.display_name,
+                               'assertion_type', rel.assertion_type,
+                               'confidence', rel.confidence
+                           ) AS item
                     FROM relationship_assertion rel
-                    JOIN asset model ON model.id = rel.target_asset_id
-                      AND model.tenant_id = rel.tenant_id
+                    JOIN asset source ON source.id = rel.source_asset_id
+                      AND source.tenant_id = rel.tenant_id
                     JOIN LATERAL (
-                        SELECT aa.display_name FROM asset_assertion aa
-                        WHERE aa.tenant_id = model.tenant_id AND aa.asset_id = model.id
+                        SELECT aa.display_name
+                        FROM asset_assertion aa
+                        WHERE aa.tenant_id = source.tenant_id
+                          AND aa.asset_id = source.id
                           AND aa.withdrawn_at IS NULL
                         ORDER BY {_ASSERTION_RANK_SQL} DESC, aa.last_seen_at DESC LIMIT 1
-                    ) model_view ON true
+                    ) source_view ON true
                     WHERE rel.tenant_id = deployment.tenant_id
-                      AND rel.source_asset_id = workload.id AND rel.kind = 'uses'
-                      AND rel.withdrawn_at IS NULL AND model.kind = 'ai_model'
+                      AND rel.target_asset_id = repository.id
+                      AND rel.kind = 'defined_in'
+                      AND rel.withdrawn_at IS NULL
+                      AND source.kind = 'ai_agent'
+                    ORDER BY rel.confidence DESC LIMIT 1
+                ) agent ON true
+                LEFT JOIN LATERAL (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'id', tool.id,
+                        'natural_key', tool.natural_key,
+                        'display_name', tool_view.display_name,
+                        'assertion_type', tool_rel.assertion_type,
+                        'confidence', tool_rel.confidence,
+                        'provider', tool_view.attributes->>'provider',
+                        'operation', tool_view.attributes->>'operation',
+                        'execution_status', COALESCE(
+                            tool_view.attributes->>'execution_status', 'not_observed'
+                        ),
+                        'actions', COALESCE(actions.items, '[]'::jsonb)
+                    ) ORDER BY tool_view.display_name) AS items
+                    FROM relationship_assertion tool_rel
+                    JOIN asset tool ON tool.id = tool_rel.target_asset_id
+                      AND tool.tenant_id = tool_rel.tenant_id
+                    JOIN LATERAL (
+                        SELECT aa.display_name, aa.attributes
+                        FROM asset_assertion aa
+                        WHERE aa.tenant_id = tool.tenant_id AND aa.asset_id = tool.id
+                          AND aa.withdrawn_at IS NULL
+                        ORDER BY {_ASSERTION_RANK_SQL} DESC, aa.last_seen_at DESC LIMIT 1
+                    ) tool_view ON true
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_agg(jsonb_build_object(
+                            'relationship_id', action_rel.id,
+                            'kind', action_rel.kind,
+                            'assertion_type', action_rel.assertion_type,
+                            'confidence', action_rel.confidence,
+                            'operation', action_rel.attributes->>'operation',
+                            'target_id', target.id,
+                            'target_kind', target.kind,
+                            'target_natural_key', target.natural_key,
+                            'target_name', target_view.display_name,
+                            'execution_status', COALESCE(
+                                action_rel.attributes->>'execution_status', 'not_observed'
+                            )
+                        ) ORDER BY action_rel.kind, target_view.display_name) AS items
+                        FROM relationship_assertion action_rel
+                        JOIN asset target ON target.id = action_rel.target_asset_id
+                          AND target.tenant_id = action_rel.tenant_id
+                        JOIN LATERAL (
+                            SELECT aa.display_name
+                            FROM asset_assertion aa
+                            WHERE aa.tenant_id = target.tenant_id
+                              AND aa.asset_id = target.id
+                              AND aa.withdrawn_at IS NULL
+                            ORDER BY {_ASSERTION_RANK_SQL} DESC, aa.last_seen_at DESC LIMIT 1
+                        ) target_view ON true
+                        WHERE action_rel.tenant_id = deployment.tenant_id
+                          AND action_rel.source_asset_id = tool.id
+                          AND action_rel.kind IN ('can_read', 'can_write', 'can_invoke')
+                          AND action_rel.withdrawn_at IS NULL
+                    ) actions ON true
+                    WHERE tool_rel.tenant_id = deployment.tenant_id
+                      AND tool_rel.source_asset_id = agent.agent_id
+                      AND tool_rel.kind = 'can_invoke'
+                      AND tool_rel.withdrawn_at IS NULL
+                      AND tool.kind = 'ai_tool'
+                ) tools ON true
+                LEFT JOIN LATERAL (
+                    SELECT jsonb_agg(selected.item ORDER BY
+                        selected.source_rank, selected.display_name) AS items
+                    FROM (
+                        SELECT DISTINCT ON (model.id)
+                            jsonb_build_object(
+                                'id', model.id, 'natural_key', model.natural_key,
+                                'display_name', model_view.display_name,
+                                'assertion_type', rel.assertion_type,
+                                'confidence', rel.confidence,
+                                'relationship_source', CASE
+                                    WHEN rel.source_asset_id = workload.id
+                                        THEN 'workload'
+                                    ELSE 'agent'
+                                END
+                            ) AS item,
+                            CASE WHEN rel.source_asset_id = workload.id THEN 0 ELSE 1 END
+                                AS source_rank,
+                            model_view.display_name
+                        FROM relationship_assertion rel
+                        JOIN asset model ON model.id = rel.target_asset_id
+                          AND model.tenant_id = rel.tenant_id
+                        JOIN LATERAL (
+                            SELECT aa.display_name FROM asset_assertion aa
+                            WHERE aa.tenant_id = model.tenant_id
+                              AND aa.asset_id = model.id
+                              AND aa.withdrawn_at IS NULL
+                            ORDER BY {_ASSERTION_RANK_SQL} DESC,
+                                     aa.last_seen_at DESC LIMIT 1
+                        ) model_view ON true
+                        WHERE rel.tenant_id = deployment.tenant_id
+                          AND rel.source_asset_id IN (workload.id, agent.agent_id)
+                          AND rel.kind = 'uses'
+                          AND rel.withdrawn_at IS NULL
+                          AND model.kind = 'ai_model'
+                        ORDER BY model.id,
+                            CASE WHEN rel.source_asset_id = workload.id THEN 0 ELSE 1 END,
+                            rel.confidence DESC
+                    ) selected
                 ) models ON true
                 LEFT JOIN LATERAL (
                     SELECT jsonb_build_object(
@@ -2917,7 +3035,7 @@ class PostgresInventoryRepository:
                    attributes, evidence
             FROM activity_event
             WHERE tenant_id = %s::uuid
-              AND category IN ('ai_app_sign_in', 'admin_change')
+              AND category IN ('ai_app_sign_in', 'admin_change', 'model_invocation')
               AND attributes->>'fixture' IS DISTINCT FROM 'true'
             ORDER BY occurred_at, id
             """,
@@ -2931,7 +3049,7 @@ class PostgresInventoryRepository:
             JOIN activity_event event
               ON event.tenant_id = entity.tenant_id AND event.id = entity.activity_id
             WHERE entity.tenant_id = %s::uuid
-              AND event.category IN ('ai_app_sign_in', 'admin_change')
+              AND event.category IN ('ai_app_sign_in', 'admin_change', 'model_invocation')
               AND event.attributes->>'fixture' IS DISTINCT FROM 'true'
             ORDER BY entity.activity_id, entity.position
             """,
@@ -3104,7 +3222,7 @@ class PostgresInventoryRepository:
         relationship_rows = connection.execute(
             """
             SELECT r.id, r.source_asset_id, r.target_asset_id, r.kind, r.category,
-                   r.assertion_type, r.confidence
+                   r.assertion_type, r.confidence, r.attributes
             FROM relationship_assertion r
             JOIN asset source ON source.id = r.source_asset_id
             JOIN asset target ON target.id = r.target_asset_id
@@ -3159,6 +3277,7 @@ class PostgresInventoryRepository:
                     category=row["category"],
                     assertion_type=row["assertion_type"],
                     confidence=row["confidence"],
+                    attributes=dict(row["attributes"]),
                 )
                 for row in relationship_rows
             ),

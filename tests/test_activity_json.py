@@ -1,4 +1,5 @@
 from denali.connectors.activity_json import ActivityJsonConnector
+from denali.domain import AssetKind, AssetRef
 
 
 def test_workspace_expands_every_event_in_one_report_record() -> None:
@@ -136,3 +137,45 @@ def test_vertex_bad_sibling_is_visible_as_partial_coverage() -> None:
     )
     assert len(batch.activities) == 1
     assert batch.coverage[0].state.value == "partial"
+
+
+def test_vertex_publisher_model_and_service_account_use_exact_inventory_keys() -> None:
+    batch = ActivityJsonConnector().collect(
+        {
+            "entries": [
+                {
+                    "insertId": "vertex-model-1",
+                    "timestamp": "2026-09-01T12:00:00Z",
+                    "protoPayload": {
+                        "methodName": (
+                            "google.cloud.aiplatform.v1.PredictionService.GenerateContent"
+                        ),
+                        "resourceName": (
+                            "projects/vertex-api/locations/us-central1/publishers/"
+                            "google/models/gemini-2.5-flash"
+                        ),
+                        "authenticationInfo": {
+                            "principalEmail": (
+                                "summit@vertex-api.iam.gserviceaccount.com"
+                            )
+                        },
+                    },
+                }
+            ]
+        },
+        format_name="gcp-vertex-audit",
+        connection_id="vertex",
+        run_id="run-1",
+        scope_key="project-vertex-api",
+        source_locator="file:///vertex.json",
+    )
+
+    activity = batch.activities[0]
+    by_role = {entity.role.value: entity for entity in activity.entities}
+    assert by_role["actor"].asset == AssetRef(
+        AssetKind.IDENTITY,
+        "gcp:service-account:summit@vertex-api.iam.gserviceaccount.com",
+    )
+    assert by_role["model"].asset == AssetRef(
+        AssetKind.AI_MODEL, "gcp:vertex:model:gemini-2.5-flash"
+    )

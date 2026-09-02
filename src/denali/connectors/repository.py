@@ -100,6 +100,11 @@ _AZURE_ENV_DEPLOYMENT_RE = re.compile(
 _BEDROCK_MODEL_ENV_LITERAL_RE = re.compile(
     r"\b([A-Z][A-Z0-9_]*MODEL_ID)\s*(?::|=)\s*([\"'])([^\"'\r\n]{1,300})\2"
 )
+_VERTEX_MODEL_ENV_FALLBACK_RE = re.compile(
+    r"\b(?:const|let|var)\s+model\s*=\s*process\.env\."
+    r"(?:VERTEX_MODEL_ID|GEMINI_MODEL_ID|GOOGLE_MODEL_ID)\s*\|\|\s*"
+    r"([\"'])(?P<model>[A-Za-z0-9][A-Za-z0-9._:-]{0,254})\1"
+)
 _TOOL_REFERENCE_RE = re.compile(r"\b([a-z][a-z0-9_-]{2,})__([a-z][a-z0-9_]{2,})\b")
 _SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|secret|password)\b(\s*[:=]\s*)"
@@ -121,6 +126,70 @@ class ToolDeclaration:
     name: str
     description: str
     line: int
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilitySpec:
+    pattern: re.Pattern[str]
+    tool_key: str
+    tool_name: str
+    provider: str
+    operation: str
+    target_kind: AssetKind
+    target_key: str
+    target_name: str
+    target_attributes: dict[str, Any]
+    action: RelationshipKind
+
+
+_CAPABILITY_SPECS = (
+    CapabilitySpec(
+        re.compile(r"\bthis\.call\(\s*['\"]chat\.postMessage['\"]"),
+        "slack_post_message", "Post Slack message", "slack", "chat.postMessage",
+        AssetKind.APPLICATION_ENDPOINT, "saas:slack:api", "Slack API",
+        {"provider": "slack", "endpoint_class": "saas_api"}, RelationshipKind.CAN_WRITE,
+    ),
+    CapabilitySpec(
+        re.compile(r"\bthis\.call\(\s*['\"]canvases\.(?:create|edit)['\"]"),
+        "slack_canvas_write", "Write Slack canvas", "slack", "canvases.create/edit",
+        AssetKind.APPLICATION_ENDPOINT, "saas:slack:api", "Slack API",
+        {"provider": "slack", "endpoint_class": "saas_api"}, RelationshipKind.CAN_WRITE,
+    ),
+    CapabilitySpec(
+        re.compile(r"https://api\.hubapi\.com/crm/v3/objects/deals"),
+        "hubspot_deal_write", "Write HubSpot deal", "hubspot", "crm.deals.write",
+        AssetKind.AI_DATASTORE, "saas:hubspot:crm:deals", "HubSpot deals",
+        {"provider": "hubspot", "classification": "business_data"}, RelationshipKind.CAN_WRITE,
+    ),
+    CapabilitySpec(
+        re.compile(r"\bnew\s+PutObjectCommand\s*\("),
+        "s3_put_object", "Write proposal artifact", "aws", "s3:PutObject",
+        AssetKind.AI_DATASTORE, "aws:s3:configured-bucket", "Configured S3 bucket",
+        {"provider": "aws", "service": "s3", "classification": "business_data"},
+        RelationshipKind.CAN_WRITE,
+    ),
+    CapabilitySpec(
+        re.compile(r"\bnew\s+GetObjectCommand\s*\("),
+        "s3_get_object", "Read proposal artifact", "aws", "s3:GetObject",
+        AssetKind.AI_DATASTORE, "aws:s3:configured-bucket", "Configured S3 bucket",
+        {"provider": "aws", "service": "s3", "classification": "business_data"},
+        RelationshipKind.CAN_READ,
+    ),
+    CapabilitySpec(
+        re.compile(r"\bnew\s+InvokeCommand\s*\("),
+        "lambda_invoke", "Invoke AWS Lambda", "aws", "lambda:InvokeFunction",
+        AssetKind.CLOUD_RESOURCE, "aws:lambda:configured-function", "Configured Lambda function",
+        {"provider": "aws", "service": "lambda", "resource_binding": "runtime_configuration"},
+        RelationshipKind.CAN_INVOKE,
+    ),
+    CapabilitySpec(
+        re.compile(r"/messages/\$\{encodeURIComponent\(draftId\)\}/send"),
+        "graph_send_mail", "Send Microsoft 365 email", "microsoft_graph", "mail.send",
+        AssetKind.APPLICATION_ENDPOINT, "saas:microsoft-graph:mail", "Microsoft Graph Mail",
+        {"provider": "microsoft_graph", "endpoint_class": "mail_api"},
+        RelationshipKind.CAN_WRITE,
+    ),
+)
 
 
 class CanonicalIdentityCollision(ValueError):
@@ -155,7 +224,7 @@ class RepositoryConnector:
         )
         self.revision = f"{self.commit}+dirty" if self.dirty else self.commit
         self.repository_name = repository_name or _canonical_repository(self.remote, self.root)
-        self.app_id = _normalize_name(app_id or self.root.name)
+        self.app_id = _normalize_name(app_id or self.repository_name.rsplit("/", 1)[-1])
         self.source_type = source_type
         self.source_locator = source_locator or f"file://{self.root}"
 
@@ -223,6 +292,9 @@ class RepositoryConnector:
                 except CanonicalIdentityCollision as error:
                     warnings.append(f"{relative}: {error}")
             self._discover_models(text, relative, observed_at, repo_ref, assets, relationships)
+            self._discover_capabilities(
+                text, relative, observed_at, repo_ref, assets, relationships
+            )
 
         for config_file in _mcp_config_files(self.root):
             relative = config_file.relative_to(self.root).as_posix()
@@ -345,6 +417,45 @@ class RepositoryConnector:
                     observed_at,
                     "bedrock_model_environment",
                 )
+                self._link_agent_to_source_and_model(
+                    assets, relationships, repo_ref, model_ref, site, observed_at
+                )
+
+        if "aiplatform.googleapis.com" in text:
+            for match in _VERTEX_MODEL_ENV_FALLBACK_RE.finditer(text):
+                model_id = match.group("model")
+                line = text[: match.start()].count("\n") + 1
+                site = _site(text, relative, line)
+                model_ref = AssetRef(AssetKind.AI_MODEL, f"gcp:vertex:model:{model_id}")
+                self._add_asset(
+                    assets,
+                    model_ref,
+                    model_id,
+                    AssertionType.DECLARED,
+                    1.0,
+                    site,
+                    observed_at,
+                    {
+                        "provider": "gcp_vertex_ai",
+                        "model_id": model_id,
+                        "configuration_key": "VERTEX_MODEL_ID",
+                    },
+                    "vertex_model_environment_fallback",
+                )
+                self._add_relationship(
+                    relationships,
+                    repo_ref,
+                    model_ref,
+                    RelationshipKind.USES,
+                    AssertionType.DECLARED,
+                    1.0,
+                    site,
+                    observed_at,
+                    "vertex_model_environment_fallback",
+                )
+                self._link_agent_to_source_and_model(
+                    assets, relationships, repo_ref, model_ref, site, observed_at
+                )
 
         providers: dict[str, tuple[str, ...]] = {}
         for marker, provider, model_fields in _PROVIDER_SIGNALS:
@@ -425,6 +536,156 @@ class RepositoryConnector:
                             observed_at,
                             "model_configuration",
                         )
+                        self._link_agent_to_source_and_model(
+                            assets, relationships, repo_ref, model_ref, site, observed_at
+                        )
+
+    def _discover_capabilities(
+        self,
+        text: str,
+        relative: str,
+        observed_at: datetime,
+        repo_ref: AssetRef,
+        assets: dict[AssetRef, AssetAssertion],
+        relationships: dict[
+            tuple[AssetRef, AssetRef, RelationshipKind, AssertionType], RelationshipAssertion
+        ],
+    ) -> None:
+        for spec in _CAPABILITY_SPECS:
+            match = spec.pattern.search(text)
+            if match is None:
+                continue
+            line = text[: match.start()].count("\n") + 1
+            site = _site(text, relative, line)
+            agent_ref = self._ensure_agent(
+                assets, relationships, repo_ref, site, observed_at
+            )
+            tool_ref = AssetRef(AssetKind.AI_TOOL, f"app:{self.app_id}:tool:{spec.tool_key}")
+            target_ref = AssetRef(
+                spec.target_kind, f"app:{self.app_id}:target:{spec.target_key}"
+            )
+            self._add_asset(
+                assets,
+                tool_ref,
+                spec.tool_name,
+                AssertionType.DECLARED,
+                1.0,
+                site,
+                observed_at,
+                {
+                    "provider": spec.provider,
+                    "operation": spec.operation,
+                    "source_path": relative,
+                    "execution_status": "not_observed",
+                },
+                "source_capability_call",
+            )
+            self._add_asset(
+                assets,
+                target_ref,
+                spec.target_name,
+                AssertionType.DECLARED,
+                1.0,
+                site,
+                observed_at,
+                {**spec.target_attributes, "execution_status": "not_observed"},
+                "source_capability_target",
+            )
+            self._add_relationship(
+                relationships,
+                agent_ref,
+                tool_ref,
+                RelationshipKind.CAN_INVOKE,
+                AssertionType.DECLARED,
+                1.0,
+                site,
+                observed_at,
+                "source_capability_call",
+                {"execution_status": "not_observed"},
+            )
+            self._add_relationship(
+                relationships,
+                tool_ref,
+                target_ref,
+                spec.action,
+                AssertionType.DECLARED,
+                1.0,
+                site,
+                observed_at,
+                "source_capability_call",
+                {
+                    "provider": spec.provider,
+                    "operation": spec.operation,
+                    "execution_status": "not_observed",
+                },
+            )
+
+    def _link_agent_to_source_and_model(
+        self,
+        assets: dict[AssetRef, AssetAssertion],
+        relationships: dict[
+            tuple[AssetRef, AssetRef, RelationshipKind, AssertionType], RelationshipAssertion
+        ],
+        repo_ref: AssetRef,
+        model_ref: AssetRef,
+        site: SourceSite,
+        observed_at: datetime,
+    ) -> None:
+        agent_ref = self._ensure_agent(
+            assets, relationships, repo_ref, site, observed_at
+        )
+        self._add_relationship(
+            relationships,
+            agent_ref,
+            model_ref,
+            RelationshipKind.USES,
+            AssertionType.DECLARED,
+            1.0,
+            site,
+            observed_at,
+            "source_model_use",
+        )
+
+    def _ensure_agent(
+        self,
+        assets: dict[AssetRef, AssetAssertion],
+        relationships: dict[
+            tuple[AssetRef, AssetRef, RelationshipKind, AssertionType], RelationshipAssertion
+        ],
+        repo_ref: AssetRef,
+        site: SourceSite,
+        observed_at: datetime,
+    ) -> AssetRef:
+        agent_ref = AssetRef(AssetKind.AI_AGENT, f"app:{self.app_id}:agent")
+        repository_slug = self.repository_name.rsplit("/", 1)[-1].replace("-", " ").title()
+        agent_display_name = (
+            repository_slug
+            if repository_slug.casefold().endswith(" agent")
+            else f"{repository_slug} Agent"
+        )
+        self._add_asset(
+            assets,
+            agent_ref,
+            agent_display_name,
+            AssertionType.DECLARED,
+            1.0,
+            site,
+            observed_at,
+            {"repository": self.repository_name, "source_path": site.path},
+            "source_ai_agent",
+        )
+        self._add_relationship(
+            relationships,
+            agent_ref,
+            repo_ref,
+            RelationshipKind.DEFINED_IN,
+            AssertionType.DECLARED,
+            1.0,
+            site,
+            observed_at,
+            "source_ai_agent",
+        )
+        return agent_ref
 
     def _discover_mcp_python(
         self,

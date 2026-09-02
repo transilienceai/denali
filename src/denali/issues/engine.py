@@ -29,6 +29,11 @@ CONSENT_THEN_USE_RULE_UID = "DENALI-ISSUE-SHADOW-AI-CONSENT-USE-001"
 CONSENT_DETECTION_RULE_UID = "DENALI-RUNTIME-ENTRA-CONSENT-001"
 IDENTITY_SIGNAL = "identity.overprivileged"
 TOOL_SIGNAL = "tool.write_without_confirmation"
+DEPLOYED_BEDROCK_RULE_UID = "DENALI-ISSUE-DEPLOYED-BEDROCK-GOVERNANCE-001"
+REPOSITORY_GUARDRAIL_SIGNAL = (
+    "repository.bedrock_managed_guardrail_not_requested"
+)
+BEDROCK_SCOPE_SIGNAL = "identity.bedrock_model_family_wildcard"
 ELIGIBLE_ASSERTIONS = {"observed", "externally_verified"}
 MIN_CONFIDENCE = 0.8
 
@@ -312,6 +317,191 @@ def evaluate_agent_sensitive_write(
         incomplete_candidates=incomplete,
         ambiguous_resource_references=ambiguous,
         detail=detail,
+    )
+
+
+def evaluate_deployed_bedrock_governance_gap(
+    snapshot: CorrelationSnapshot,
+    *,
+    evaluated_at: datetime | None = None,
+) -> IssueEvaluation:
+    """Correlate an included unguarded Bedrock call with broad runtime authority.
+
+    The exact deployment join and reachable-source set prove only artifact inclusion.
+    Observed workload configuration and role identity independently prove the runtime
+    context; the rule does not claim that the source call was executed.
+    """
+
+    now = evaluated_at or datetime.now(UTC)
+    assets_by_id = {asset.id: asset for asset in snapshot.assets}
+    deployments = tuple(
+        relationship
+        for relationship in snapshot.relationships
+        if relationship.kind == "deployed_by"
+        and relationship.assertion_type == "inferred"
+        and relationship.confidence == 1.0
+        and relationship.attributes.get("correlation") == "deterministic"
+    )
+    observed_relationships = tuple(
+        relationship
+        for relationship in snapshot.relationships
+        if relationship.assertion_type in ELIGIBLE_ASSERTIONS
+        and relationship.confidence >= MIN_CONFIDENCE
+    )
+    runs_as_by_workload: dict[str, list[CorrelationRelationship]] = defaultdict(list)
+    models_by_workload: dict[str, list[CorrelationRelationship]] = defaultdict(list)
+    for relationship in observed_relationships:
+        if relationship.kind == "runs_as":
+            runs_as_by_workload[relationship.source_id].append(relationship)
+        elif relationship.kind == "uses":
+            models_by_workload[relationship.source_id].append(relationship)
+
+    repository_findings = _active_signal_findings(
+        snapshot.findings, REPOSITORY_GUARDRAIL_SIGNAL
+    )
+    identity_findings = _active_signal_findings(snapshot.findings, BEDROCK_SCOPE_SIGNAL)
+    candidates: dict[str, IssueCandidate] = {}
+    incomplete = 0
+
+    for deployment in deployments:
+        workload = assets_by_id.get(deployment.source_id)
+        repository = assets_by_id.get(deployment.target_id)
+        if (
+            workload is None
+            or workload.kind != "ai_workload"
+            or repository is None
+            or repository.kind != "code_repository"
+        ):
+            continue
+        reachable_paths = {
+            str(path) for path in deployment.attributes.get("reachable_source_paths", ())
+        }
+        included_findings = tuple(
+            finding
+            for finding in repository_findings
+            if finding.attributes.get("repository") == repository.natural_key
+            and finding.attributes.get("source_path") in reachable_paths
+        )
+        if not included_findings:
+            continue
+        for runs_as in runs_as_by_workload.get(workload.id, ()):
+            identity = assets_by_id.get(runs_as.target_id)
+            if identity is None or identity.kind != "identity":
+                continue
+            matching_identity_findings = tuple(
+                finding
+                for finding in identity_findings
+                if identity.natural_key in finding.resource_uids
+            )
+            if not matching_identity_findings:
+                continue
+            model_edges = tuple(
+                edge
+                for edge in models_by_workload.get(workload.id, ())
+                if (model := assets_by_id.get(edge.target_id)) is not None
+                and model.kind == "ai_model"
+                and model.natural_key.startswith("aws:bedrock:model:")
+            )
+            if not model_edges:
+                incomplete += 1
+                continue
+            for model_edge in model_edges:
+                model = assets_by_id[model_edge.target_id]
+                for code_finding in included_findings:
+                    for identity_finding in matching_identity_findings:
+                        identity_material = "|".join(
+                            (
+                                DEPLOYED_BEDROCK_RULE_UID,
+                                workload.natural_key,
+                                identity.natural_key,
+                                model.natural_key,
+                                code_finding.source_uid,
+                            )
+                        )
+                        correlation_key = hashlib.sha256(
+                            identity_material.encode()
+                        ).hexdigest()
+                        candidate = IssueCandidate(
+                            correlation_key=correlation_key,
+                            rule_uid=DEPLOYED_BEDROCK_RULE_UID,
+                            title=(
+                                f"{workload.display_name} can invoke {model.display_name} "
+                                "without a managed guardrail under broader family permission"
+                            ),
+                            description=(
+                                f"The exact deployment correlation includes the Bedrock call "
+                                f"at {code_finding.attributes.get('source_path')}:"
+                                f"{code_finding.attributes.get('source_line')}. That call does "
+                                f"not request an AWS managed guardrail. The observed workload "
+                                f"runs as {identity.display_name}, whose effective policy permits "
+                                "a broader Anthropic model family than the configured model "
+                                f"{model.display_name}."
+                            ),
+                            risk=(
+                                "A compromised workload or unintended configuration change can "
+                                "select another permitted model while the included call site "
+                                "does not itself request provider-managed filtering. Artifact "
+                                "inclusion does not prove that the call executed."
+                            ),
+                            remediation=(
+                                "Restrict the execution role to the exact approved Bedrock model "
+                                "resources and pass an approved guardrail identifier and version "
+                                "at the included call site. Recollect source and AWS evidence, "
+                                "then rerun issue evaluation."
+                            ),
+                            severity=FindingSeverity.HIGH,
+                            confidence=min(
+                                deployment.confidence,
+                                runs_as.confidence,
+                                model_edge.confidence,
+                                workload.confidence,
+                                repository.confidence,
+                                identity.confidence,
+                                model.confidence,
+                            ),
+                            findings=(
+                                IssueFindingLink(
+                                    code_finding.id, "included_unguarded_bedrock_call"
+                                ),
+                                IssueFindingLink(
+                                    identity_finding.id, "broad_model_family_permission"
+                                ),
+                            ),
+                            path_nodes=(
+                                IssuePathNode(repository.id, 0, "source_repository"),
+                                IssuePathNode(workload.id, 1, "deployed_workload"),
+                                IssuePathNode(identity.id, 2, "execution_identity"),
+                                IssuePathNode(model.id, 3, "configured_model"),
+                            ),
+                            path_edges=(
+                                IssuePathEdge(deployment.id, 0),
+                                IssuePathEdge(runs_as.id, 1),
+                                IssuePathEdge(model_edge.id, 2),
+                            ),
+                            attributes={
+                                "correlation": "deterministic_code_to_cloud",
+                                "path_status": "confirmed",
+                                "source_path": code_finding.attributes.get("source_path"),
+                                "source_line": code_finding.attributes.get("source_line"),
+                                "artifact_identity_status": deployment.attributes.get(
+                                    "artifact_identity_status"
+                                ),
+                                "source_execution_status": "not_observed",
+                            },
+                        )
+                        candidates[correlation_key] = candidate
+
+    return IssueEvaluation(
+        rule_uid=DEPLOYED_BEDROCK_RULE_UID,
+        state=CoverageState.UNKNOWN if incomplete else CoverageState.COMPLETE,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates.values(), key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} deployed workload candidates lacked an observed Bedrock model"
+            if incomplete
+            else None
+        ),
     )
 
 

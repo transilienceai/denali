@@ -558,6 +558,30 @@ export type CodeToCloudContext = {
   confidence: number;
 };
 
+export type CodeToCloudModel = CodeToCloudContext & {
+  relationship_source: "workload" | "agent";
+};
+
+export type CodeToCloudAction = {
+  relationship_id: string;
+  kind: "can_read" | "can_write" | "can_invoke";
+  assertion_type: string;
+  confidence: number;
+  operation: string | null;
+  target_id: string;
+  target_kind: string;
+  target_natural_key: string;
+  target_name: string;
+  execution_status: string;
+};
+
+export type CodeToCloudTool = CodeToCloudContext & {
+  provider: string | null;
+  operation: string | null;
+  execution_status: string;
+  actions: CodeToCloudAction[];
+};
+
 export type CodeToCloudFinding = {
   id: string;
   title: string;
@@ -615,7 +639,9 @@ export type CodeToCloudDeployment = {
   repository_id: string;
   repository_natural_key: string;
   repository_name: string;
-  models: CodeToCloudContext[];
+  agent: CodeToCloudContext | null;
+  tools: CodeToCloudTool[];
+  models: CodeToCloudModel[];
   identity: CodeToCloudContext | null;
   code_findings: CodeToCloudFinding[];
   vulnerability_coverage: CodeToCloudVulnerabilityCoverage | null;

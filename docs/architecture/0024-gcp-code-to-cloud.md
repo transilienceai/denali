@@ -42,10 +42,13 @@ at least one bounded signal:
   such as `VERTEX_MODEL_ID`.
 
 Environment values, secret references, arbitrary annotations, and full provider responses
-are never persisted. Evidence retains only resource identity, project/location, immutable
-UID when present, revision, update time, classification method, and matching configuration
-key names. Runtime service-account identity and `RUNS_AS` relationships are observed
-separately.
+are never persisted. The sole value exception is a syntactically constrained model identifier
+under an explicit allowlist of non-secret keys (`VERTEX_MODEL_ID`, `GEMINI_MODEL_ID`, and
+`GOOGLE_MODEL_ID`). That bounded value creates an observed `ai_model` asset and a workload
+`USES` relationship. Evidence otherwise retains only resource identity, project/location,
+immutable UID when present, revision, update time, classification method, and matching
+configuration key names. Runtime service-account identity and `RUNS_AS` relationships are
+observed separately.
 
 ## Source identity contracts
 

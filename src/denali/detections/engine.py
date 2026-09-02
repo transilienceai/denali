@@ -20,6 +20,7 @@ from denali.domain import (
 
 ENTRA_FAILURE_RULE_UID = "DENALI-RUNTIME-ENTRA-FAILURES-001"
 ENTRA_CONSENT_RULE_UID = "DENALI-RUNTIME-ENTRA-CONSENT-001"
+UNREVIEWED_MODEL_RULE_UID = "DENALI-RUNTIME-UNREVIEWED-MODEL-001"
 FAILURE_THRESHOLD = 3
 FAILURE_WINDOW = timedelta(hours=24)
 CONSENT_OPERATIONS = (
@@ -220,6 +221,93 @@ def evaluate_unreviewed_ai_consent(
         incomplete_candidates=incomplete,
         detail=(
             f"{incomplete} consent observations lacked an exact actor/application link"
+            if incomplete
+            else None
+        ),
+    )
+
+
+def evaluate_unreviewed_model_invocation(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect successful invocation of an exact model still awaiting governance review."""
+
+    now = evaluated_at or datetime.now(UTC)
+    assets = {asset.id: asset for asset in snapshot.assets}
+    grouped: dict[str, list[DetectionActivity]] = defaultdict(list)
+    incomplete = 0
+    for activity in snapshot.activities:
+        if activity.category != "model_invocation" or activity.outcome != "success":
+            continue
+        model_entity = _one_entity(activity, "model")
+        model = assets.get(model_entity.asset_id) if model_entity else None
+        if model is None or model.kind != "ai_model":
+            incomplete += 1
+            continue
+        if model.lifecycle_state != "active" or model.governance_status != "unreviewed":
+            continue
+        grouped[model.id].append(activity)
+
+    candidates: list[RuntimeDetectionCandidate] = []
+    for model_id, activities in grouped.items():
+        activities.sort(key=lambda item: (item.occurred_at, item.id))
+        model = assets[model_id]
+        actors = sorted(
+            {
+                entity.display_name or entity.external_uid
+                for activity in activities
+                for entity in activity.entities
+                if entity.role == "actor"
+            }
+        )
+        candidates.append(
+            RuntimeDetectionCandidate(
+                correlation_key=_key(UNREVIEWED_MODEL_RULE_UID, model.natural_key),
+                rule_uid=UNREVIEWED_MODEL_RULE_UID,
+                title=f"Unreviewed model {model.display_name} was invoked",
+                description=(
+                    f"Runtime telemetry recorded {len(activities)} successful invocation(s) "
+                    f"of the exact model {model.display_name} while its governance status "
+                    "remained unreviewed."
+                ),
+                risk=(
+                    "An actively used model may process organizational data before model "
+                    "ownership, allowed use, retention expectations, and provider terms have "
+                    "been reviewed. This detection does not claim the invocation was harmful."
+                ),
+                investigation_guidance=(
+                    "Confirm the workload owner and approved use case, review the linked runtime "
+                    "event metadata and execution identity, then approve or reject the model "
+                    "through the governance workflow."
+                ),
+                severity=FindingSeverity.MEDIUM,
+                confidence=1.0,
+                first_seen_at=activities[0].occurred_at,
+                last_seen_at=activities[-1].occurred_at,
+                activities=tuple(
+                    DetectionActivityLink(activity.id, "successful_model_invocation")
+                    for activity in activities
+                ),
+                assets=(DetectionAssetLink(model.id, "unreviewed_ai_model"),),
+                attributes={
+                    "model_natural_key": model.natural_key,
+                    "invocation_count": len(activities),
+                    "actors": actors,
+                    "governance_status": model.governance_status,
+                },
+            )
+        )
+    return RuntimeDetectionEvaluation(
+        rule_uid=UNREVIEWED_MODEL_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} model invocation observations lacked one exact model asset link"
             if incomplete
             else None
         ),

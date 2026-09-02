@@ -46,6 +46,10 @@ MAX_PAGES_PER_TYPE = 100
 PAGE_SIZE = 1_000
 
 _MODEL_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*MODEL_ID$")
+_SAFE_MODEL_VALUE_KEYS = frozenset(
+    {"VERTEX_MODEL_ID", "GEMINI_MODEL_ID", "GOOGLE_MODEL_ID"}
+)
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
 _RESOURCE_NAMES = {
     CLOUD_RUN_ASSET_TYPE: re.compile(
         r"^//run\.googleapis\.com/projects/(?P<project>[^/]+)/locations/"
@@ -364,6 +368,47 @@ class GcpDeploymentConnector:
                         relationship_plane,
                         workload_assertion.evidence,
                     )
+                for configuration_key, model_id in parsed["model_configuration"].items():
+                    model_ref = AssetRef(
+                        AssetKind.AI_MODEL, f"gcp:vertex:model:{model_id}"
+                    )
+                    model_evidence = Evidence(
+                        source_type="gcp_cloud_asset_inventory",
+                        locator=(
+                            f"gcp://cloudasset/"
+                            f"{parsed['natural_key'].removeprefix('//')}"
+                        ),
+                        observed_at=observed_at,
+                        payload={
+                            "model_id": model_id,
+                            "configuration_key": configuration_key,
+                            "classification": "allow_listed_model_configuration",
+                            "workload": parsed["natural_key"],
+                        },
+                    )
+                    assets.setdefault(
+                        (model_ref, inventory_plane),
+                        AssetAssertion(
+                            asset=model_ref,
+                            coverage_plane=inventory_plane,
+                            display_name=model_id,
+                            assertion_type=AssertionType.OBSERVED,
+                            confidence=1.0,
+                            evidence=model_evidence,
+                            attributes={
+                                "provider": "gcp_vertex_ai",
+                                "model_id": model_id,
+                            },
+                        ),
+                    )
+                    self._add_relationship(
+                        relationships,
+                        workload_ref,
+                        model_ref,
+                        RelationshipKind.USES,
+                        relationship_plane,
+                        model_evidence,
+                    )
 
             state = CoverageState.PARTIAL if warnings else CoverageState.COMPLETE
             summary = (
@@ -477,9 +522,11 @@ def _parse_asset(
             "endpoint": data.get("endpoint"),
             "images": [],
             "model_configuration_keys": [],
+            "model_configuration": {},
             "classification": [],
         }
     labels = data.get("labels") if isinstance(data.get("labels"), dict) else {}
+    model_configuration = _model_configuration(data, asset_type)
     model_keys = _model_configuration_keys(data, asset_type)
     classification = []
     if str(labels.get("denali_ai_workload", "")).lower() == "true":
@@ -520,6 +567,7 @@ def _parse_asset(
         "endpoint": data.get("uri") or service_config.get("uri") or data.get("url"),
         "images": images,
         "model_configuration_keys": model_keys,
+        "model_configuration": model_configuration,
         "classification": classification,
     }
 
@@ -539,6 +587,7 @@ def _asset_assertions(
         "update_time": parsed["update_time"],
         "ai_classification": parsed["classification"],
         "model_configuration_keys": parsed["model_configuration_keys"],
+        "model_configuration": parsed["model_configuration"],
     }
     evidence = Evidence(
         source_type="gcp_cloud_asset_inventory",
@@ -559,6 +608,7 @@ def _asset_assertions(
         "service_account": parsed["service_account"],
         "endpoint": parsed["endpoint"],
         "model_configuration_keys": parsed["model_configuration_keys"],
+        "model_configuration": parsed["model_configuration"],
         "ai_classification": parsed["classification"],
     }
     cloud_assertion = AssetAssertion(
@@ -646,6 +696,38 @@ def _model_configuration_keys(data: dict[str, Any], asset_type: str) -> list[str
     else:
         keys = set()
     return sorted(item for item in keys if isinstance(item, str) and _MODEL_KEY_RE.fullmatch(item))
+
+
+def _model_configuration(data: dict[str, Any], asset_type: str) -> dict[str, str]:
+    """Retain only explicit, non-secret model identifiers from supported runtimes."""
+
+    entries: list[tuple[Any, Any]] = []
+    if asset_type == CLOUD_RUN_ASSET_TYPE:
+        template = data.get("template")
+        containers = template.get("containers", []) if isinstance(template, dict) else []
+        entries = [
+            (item.get("name"), item.get("value"))
+            for container in containers
+            if isinstance(container, dict)
+            for item in container.get("env", [])
+            if isinstance(item, dict)
+        ]
+    elif asset_type == CLOUD_FUNCTION_ASSET_TYPE:
+        service_config = data.get("serviceConfig")
+        environment = (
+            service_config.get("environmentVariables", {})
+            if isinstance(service_config, dict)
+            else {}
+        )
+        if isinstance(environment, dict):
+            entries = list(environment.items())
+    return {
+        key: value
+        for key, value in sorted(entries)
+        if key in _SAFE_MODEL_VALUE_KEYS
+        and isinstance(value, str)
+        and _MODEL_ID_RE.fullmatch(value)
+    }
 
 
 def _normalize_cloud_run_data(

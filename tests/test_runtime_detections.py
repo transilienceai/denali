@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from denali.detections import (
     evaluate_repeated_failed_ai_signins,
     evaluate_unreviewed_ai_consent,
+    evaluate_unreviewed_model_invocation,
 )
 from denali.domain import (
     CoverageState,
@@ -161,3 +162,62 @@ def test_missing_exact_application_link_is_reported_not_inferred() -> None:
     assert evaluation.candidates == ()
     assert evaluation.incomplete_candidates == 1
     assert evaluation.state is CoverageState.PARTIAL
+
+
+def test_successful_invocation_of_exact_unreviewed_model_creates_detection() -> None:
+    model = DetectionAsset(
+        id="model-1",
+        kind="ai_model",
+        natural_key="gcp:vertex:model:gemini-2.5-flash",
+        display_name="gemini-2.5-flash",
+        governance_status="unreviewed",
+        lifecycle_state="active",
+    )
+    invocation = DetectionActivity(
+        id="vertex-1",
+        category="model_invocation",
+        outcome="success",
+        title="Generate content",
+        occurred_at=NOW,
+        entities=(
+            DetectionActivityEntity(
+                "actor", "summit@example.com", "Summit service account"
+            ),
+            DetectionActivityEntity(
+                "model", model.natural_key, model.display_name, model.id
+            ),
+        ),
+    )
+
+    evaluation = evaluate_unreviewed_model_invocation(
+        DetectionSnapshot((invocation,), (model,)),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert evaluation.state is CoverageState.COMPLETE
+    assert len(evaluation.candidates) == 1
+    candidate = evaluation.candidates[0]
+    assert candidate.title == "Unreviewed model gemini-2.5-flash was invoked"
+    assert candidate.assets[0].asset_id == model.id
+    assert candidate.activities[0].activity_id == invocation.id
+
+
+def test_unreviewed_model_rule_requires_exact_model_link() -> None:
+    invocation = DetectionActivity(
+        id="vertex-1",
+        category="model_invocation",
+        outcome="success",
+        title="Generate content",
+        occurred_at=NOW,
+        entities=(DetectionActivityEntity("model", "gemini-2.5-flash"),),
+    )
+
+    evaluation = evaluate_unreviewed_model_invocation(
+        DetectionSnapshot((invocation,), ()),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert evaluation.candidates == ()
+    assert evaluation.incomplete_candidates == 1

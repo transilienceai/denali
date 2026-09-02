@@ -14,6 +14,7 @@ from denali.domain import (
 from denali.issues.engine import (
     aggregate_issue_evaluation_state,
     evaluate_agent_sensitive_write,
+    evaluate_deployed_bedrock_governance_gap,
     evaluate_unreviewed_ai_consent_then_use,
 )
 
@@ -44,15 +45,18 @@ def relationship(
     kind: str,
     *,
     assertion_type: str = "externally_verified",
+    category: str = "capability",
+    **attributes,
 ) -> CorrelationRelationship:
     return CorrelationRelationship(
         id=identifier,
         source_id=source,
         target_id=target,
         kind=kind,
-        category="capability",
+        category=category,
         assertion_type=assertion_type,
         confidence=1.0,
+        attributes=attributes,
     )
 
 
@@ -172,6 +176,120 @@ def test_inferred_inventory_node_is_not_treated_as_a_confirmed_path() -> None:
 
     assert evaluation.candidates == ()
     assert evaluation.state is CoverageState.UNKNOWN
+
+
+def deployed_bedrock_snapshot(*, included: bool = True) -> CorrelationSnapshot:
+    repository = asset(
+        "repo", "code_repository", "github.com/acme/anna", assertion_type="observed"
+    )
+    workload = asset(
+        "workload",
+        "ai_workload",
+        "arn:aws:lambda:us-east-1:123:function:anna",
+        assertion_type="observed",
+    )
+    identity = asset(
+        "role",
+        "identity",
+        "arn:aws:iam::123:role/anna",
+        assertion_type="observed",
+    )
+    model = asset(
+        "model",
+        "ai_model",
+        "aws:bedrock:model:anthropic.claude",
+        assertion_type="observed",
+    )
+    code_finding = CorrelationFinding(
+        id="code-finding",
+        source_uid="code-finding-source",
+        rule_uid="DENALI-REPO-AI-GRD-001",
+        title="Guardrail missing",
+        severity=FindingSeverity.MEDIUM,
+        state="open",
+        evaluation_result="fail",
+        resource_uids=("repo://call-site",),
+        attributes={
+            "denali_signal": "repository.bedrock_managed_guardrail_not_requested",
+            "repository": repository.natural_key,
+            "source_path": "src/bedrock.ts",
+            "source_line": 42,
+        },
+    )
+    identity_finding = CorrelationFinding(
+        id="identity-finding",
+        source_uid="identity-finding-source",
+        rule_uid="DENALI-AWS-AI-IAM-001",
+        title="Broad model family",
+        severity=FindingSeverity.MEDIUM,
+        state="open",
+        evaluation_result="fail",
+        resource_uids=(identity.natural_key,),
+        attributes={"denali_signal": "identity.bedrock_model_family_wildcard"},
+    )
+    reachable_paths = ["src/bedrock.ts"] if included else ["src/handler.ts"]
+    return CorrelationSnapshot(
+        assets=(repository, workload, identity, model),
+        relationships=(
+            relationship(
+                "deployment",
+                workload.id,
+                repository.id,
+                "deployed_by",
+                assertion_type="inferred",
+                category="topology",
+                correlation="deterministic",
+                reachable_source_paths=reachable_paths,
+                artifact_identity_status="matched",
+            ),
+            relationship(
+                "runs-as",
+                workload.id,
+                identity.id,
+                "runs_as",
+                assertion_type="observed",
+            ),
+            relationship(
+                "uses-model",
+                workload.id,
+                model.id,
+                "uses",
+                assertion_type="observed",
+                category="topology",
+            ),
+        ),
+        findings=(code_finding, identity_finding),
+    )
+
+
+def test_deployed_bedrock_gap_requires_exact_included_source_and_runtime_context() -> None:
+    evaluation = evaluate_deployed_bedrock_governance_gap(
+        deployed_bedrock_snapshot(), evaluated_at=datetime.now(UTC)
+    )
+
+    assert evaluation.state is CoverageState.COMPLETE
+    assert len(evaluation.candidates) == 1
+    issue = evaluation.candidates[0]
+    assert issue.severity is FindingSeverity.HIGH
+    assert [item.relationship_id for item in issue.path_edges] == [
+        "deployment",
+        "runs-as",
+        "uses-model",
+    ]
+    assert {item.finding_id for item in issue.findings} == {
+        "code-finding",
+        "identity-finding",
+    }
+    assert issue.attributes["source_execution_status"] == "not_observed"
+
+
+def test_deployed_bedrock_gap_does_not_assign_repository_only_finding() -> None:
+    evaluation = evaluate_deployed_bedrock_governance_gap(
+        deployed_bedrock_snapshot(included=False), evaluated_at=datetime.now(UTC)
+    )
+
+    assert evaluation.state is CoverageState.COMPLETE
+    assert evaluation.candidates == ()
 
 
 def test_unreviewed_high_impact_consent_followed_by_exact_use_confirms_issue() -> None:

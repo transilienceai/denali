@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,9 @@ FORMATS = (
     "gcp-vertex-audit",
     "google-workspace-gemini",
     "entra-ai-signin",
+)
+_VERTEX_MODEL_RESOURCE_RE = re.compile(
+    r"^projects/[^/]+/locations/[^/]+/publishers/google/models/(?P<model>[^/:]+)"
 )
 
 
@@ -270,10 +274,33 @@ def _vertex(
         else ActivityCategory.OTHER
     )
     status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
-    entities = (
-        _entity(ActivityEntityRole.ACTOR, actor, actor),
-        _entity(ActivityEntityRole.RESOURCE, resource, resource),
+    actor_entity = (
+        _entity(
+            ActivityEntityRole.ACTOR,
+            actor,
+            actor,
+            AssetKind.IDENTITY,
+            f"gcp:service-account:{actor}",
+        )
+        if actor.endswith(".iam.gserviceaccount.com")
+        else _entity(ActivityEntityRole.ACTOR, actor, actor)
     )
+    entities: list[ActivityEntity] = [
+        actor_entity,
+        _entity(ActivityEntityRole.RESOURCE, resource, resource),
+    ]
+    model_match = _VERTEX_MODEL_RESOURCE_RE.match(resource)
+    if model_match:
+        model_id = model_match.group("model")
+        entities.append(
+            _entity(
+                ActivityEntityRole.MODEL,
+                model_id,
+                model_id,
+                AssetKind.AI_MODEL,
+                f"gcp:vertex:model:{model_id}",
+            )
+        )
     return ActivityRecord(
         source_uid=str(record.get("insertId") or digest),
         category=category,
@@ -284,7 +311,7 @@ def _vertex(
         outcome=ActivityOutcome.FAILURE if status.get("code") else ActivityOutcome.SUCCESS,
         provider="gcp_vertex_ai",
         region=_label(record, "location"),
-        entities=entities,
+        entities=tuple(entities),
         evidence=_evidence("gcp_cloud_logging", locator, observed_at, digest, name),
         attributes={"status_code": status.get("code")} if status.get("code") else {},
     )

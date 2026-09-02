@@ -1510,7 +1510,7 @@ function CodeToCloud({
     <section className="lineage-metric-grid">
       <div className="lineage-metric"><span className="lineage-metric-icon repository"><Code2 /></span><div><small>Repositories</small><strong>{repositoryCount}</strong><em>Source-controlled systems</em></div></div>
       <div className="lineage-metric"><span className="lineage-metric-icon workload"><Activity /></span><div><small>Deployed workloads</small><strong>{deployments.length}</strong><em>Observed in cloud control planes</em></div></div>
-      <div className="lineage-metric"><span className="lineage-metric-icon model"><BrainCircuit /></span><div><small>Runtime models</small><strong>{modelCount}</strong><em>Observed workload configuration</em></div></div>
+      <div className="lineage-metric"><span className="lineage-metric-icon model"><BrainCircuit /></span><div><small>Related models</small><strong>{modelCount}</strong><em>Observed runtime + declared source</em></div></div>
       <div className="lineage-metric"><span className="lineage-metric-icon identity"><Fingerprint /></span><div><small>Execution identities</small><strong>{deployments.filter((item) => item.identity).length}</strong><em>Independently observed roles</em></div></div>
     </section>
 
@@ -1576,15 +1576,19 @@ function DeploymentCard({
     </header>
 
     <div className="lineage-flow" aria-label={`Deployment path from ${deployment.repository_name} to ${deployment.workload_name}`}>
-      <LineageNode icon={Code2} color="slate" label="Source repository" title={deployment.repository_name} detail={sourcePath ? `${sourcePath}${sourceLine ? `:${sourceLine}` : ""}` : deployment.repository_natural_key} onClick={() => onOpenAsset(deployment.repository_id)} />
+      {deployment.agent
+        ? <LineageNode icon={Bot} color="coral" label="Agent from code" title={deployment.agent.display_name} detail={`${deployment.repository_name} · ${sourcePath ? `${sourcePath}${sourceLine ? `:${sourceLine}` : ""}` : "source observed"}`} onClick={() => onOpenAsset(deployment.agent!.id)} />
+        : <LineageNode icon={Code2} color="slate" label="Source repository" title={deployment.repository_name} detail={sourcePath ? `${sourcePath}${sourceLine ? `:${sourceLine}` : ""}` : deployment.repository_natural_key} onClick={() => onOpenAsset(deployment.repository_id)} />}
       <span className="lineage-arrow"><span>DEPLOYS</span><ChevronRight /></span>
       <LineageNode icon={Activity} color="coral" label={titleCase(service)} title={deployment.workload_name} detail={logicalId ?? deployment.workload_natural_key} onClick={() => onOpenAsset(deployment.workload_id)} />
-      <span className="lineage-arrow"><span>USES</span><ChevronRight /></span>
-      <div className="lineage-node-group">
-        {deployment.models.map((model) => <LineageNode key={model.id} icon={BrainCircuit} color="violet" label="Runtime model" title={model.display_name} detail={`${titleCase(model.assertion_type)} · ${Math.round(model.confidence * 100)}%`} onClick={() => onOpenAsset(model.id)} compact />)}
-      </div>
       <span className="lineage-arrow"><span>RUNS AS</span><ChevronRight /></span>
       {deployment.identity ? <LineageNode icon={Fingerprint} color="violet" label="Execution identity" title={deployment.identity.display_name} detail={`${titleCase(deployment.identity.assertion_type)} · ${Math.round(deployment.identity.confidence * 100)}%`} onClick={() => onOpenAsset(deployment.identity!.id)} /> : <div className="lineage-node unknown"><span className="asset-icon slate"><CircleHelp /></span><span><small>Execution identity</small><strong>Not observed</strong><code>Coverage remains explicit</code></span></div>}
+      <span className="lineage-arrow"><span>CALLS</span><ChevronRight /></span>
+      <div className="lineage-node-group">
+        {deployment.models.length > 0
+          ? deployment.models.map((model) => <LineageNode key={model.id} icon={BrainCircuit} color="violet" label={model.relationship_source === "workload" ? "Runtime model" : "Model from code"} title={model.display_name} detail={`${titleCase(model.assertion_type)} · ${Math.round(model.confidence * 100)}%`} onClick={() => onOpenAsset(model.id)} compact />)
+          : <div className="lineage-node unknown"><span className="asset-icon slate"><CircleHelp /></span><span><small>Runtime model</small><strong>Not observed</strong><code>No exact workload model edge</code></span></div>}
+      </div>
     </div>
 
     <div className="deployment-evidence-grid">
@@ -1592,6 +1596,16 @@ function DeploymentCard({
       <div><span>Observed runtime</span><strong>{[cloudScope, location].filter(Boolean).join(" · ") || "Cloud control plane"}</strong><small>{logicalId ?? deployment.workload_natural_key}</small></div>
       <div><span>Evidence class</span><strong>{titleCase(deployment.assertion_type)} · {Math.round(deployment.confidence * 100)}%</strong><small>Independent code and control-plane observations</small></div>
     </div>
+
+    {(deployment.tools ?? []).length > 0 ? <div className="declared-action-surface">
+      <div className="declared-action-head"><Zap /><div><strong>Declared tool and action surface</strong><span>Static source call sites show what the agent is coded to invoke. These declarations are not presented as proof that an action executed.</span></div><b>NOT OBSERVED</b></div>
+      <div className="declared-action-grid">
+        {deployment.tools.map((tool) => <div className="declared-action" key={tool.id}>
+          <button onClick={() => onOpenAsset(tool.id)}><span className="asset-icon amber"><Zap /></span><span><small>{tool.provider ? titleCase(tool.provider) : "Declared tool"}</small><strong>{tool.display_name}</strong><code>{tool.operation ?? tool.natural_key}</code></span><ChevronRight /></button>
+          {tool.actions.map((action) => <button className="declared-action-target" key={action.relationship_id} onClick={() => onOpenAsset(action.target_id)}><span>{titleCase(action.kind)}</span><strong>{action.target_name}</strong><small>{action.operation ?? titleCase(action.target_kind)} · declared</small></button>)}
+        </div>)}
+      </div>
+    </div> : null}
 
     <div className="deployment-provenance">
       {artifactIdentityStatus === "matched" ? <div className="provenance-callout matched"><PackageCheck /><div><strong>Deployment artifact identity matched</strong><span>The live CDK asset locator exactly matches asset <code>{deploymentAssetId ?? "recorded in the manifest"}</code>{manifestPath ? <> in <code>{manifestPath}</code></> : null}. This compares artifact identity—not runtime execution.</span></div></div> : <div className="provenance-callout unknown"><CircleHelp /><div><strong>Deployment artifact identity {artifactIdentityStatus === "not_matched" ? "not matched locally" : "not evaluated"}</strong><span>{artifactIdentityStatus === "not_matched" ? "No exact live locator was found in the inspected local CDK manifests. This is not proof of deployment drift." : "Denali lacks either an exact live deployment locator or a local CDK asset manifest for comparison."}</span></div></div>}
@@ -1786,6 +1800,17 @@ function ShadowAiPage({
     });
     return result;
   }, [coverage, selectedConnection]);
+  const hasEntraBoundary = coverage.some(
+    (item) => item.connector_id === "denali.entra_ai",
+  );
+
+  if (!hasEntraBoundary) {
+    return <div className="page-stack shadow-ai-page">
+      <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>Shadow AI is outside this Golden Path.</h2><p>This workspace currently contains two code-to-cloud applications in AWS and Google Cloud. It has no declared Microsoft Entra evidence boundary.</p></div><div className="result-count"><strong>N/A</strong><span>Entra application coverage</span></div></section>
+      <section className="panel applicability-boundary"><CircleHelp /><div><span className="eyebrow">NOT APPLICABLE</span><h3>No Microsoft Entra tenant is connected</h3><p>Denali will not turn missing Entra collection into four reassuring zeroes. Connect an Entra tenant when workforce AI application discovery belongs in the demo; until then, this page is explicitly out of scope.</p></div></section>
+      <section className="shadow-principle"><ShieldCheck /><div><strong>The rest of the Golden Path remains valid.</strong><span>Anna and Summit continue to demonstrate source, deployment, identity, model, component, posture, and runtime evidence without an unrelated SaaS application fixture.</span></div></section>
+    </div>;
+  }
 
   return <div className="page-stack shadow-ai-page">
     <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>See the AI your workforce has connected.</h2><p>Microsoft Entra applications, consent, permissions, and observed use—catalog matches for review, never risk verdicts by themselves.</p></div><div className="result-count"><strong>{applications.length}</strong><span>catalog-matched AI applications</span><small>{categories.length} application categories</small></div></section>

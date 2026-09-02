@@ -1,5 +1,5 @@
 version: 1
-name: anna-aws-and-summit-gcp
+name: anna-aws-summit-gcp-and-entra-discovery
 connections:
   - id: 6fafaba8-d019-4978-a6ee-70f7a0022de8
     provider: github
@@ -49,15 +49,12 @@ expected:
       repository: github.com/kkmookhey/denali-gemini-demo
 forbidden_connectors:
   - denali.demo
-  - denali.entra_ai
-  - denali.grype
   - denali.kubernetes
-  - denali.syft
 budgets:
-  assets: 40
+  assets: 60
   findings: 12
   issues: 12
-  activities: 20
-  vulnerabilities: 0
+  activities: 5
+  vulnerabilities: 3
   detections: 5
-  collection_runs: 30
+  collection_runs: 40

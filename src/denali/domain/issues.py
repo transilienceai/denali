@@ -45,6 +45,10 @@ class CorrelationRelationship:
     category: str
     assertion_type: str
     confidence: float
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
 
 
 @dataclass(frozen=True, slots=True)
