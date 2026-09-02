@@ -138,9 +138,10 @@ The Modal application contains separate functions for the ASGI API, database mig
 status, configuration status, and validation worker. The pilot keeps a warm API container, but
 correctness must not depend on its lifetime or on requests reaching the same container.
 
-`DENALI_MODAL_REGION` and `DENALI_MODAL_SECRET_NAME` are deploy-shell configuration because Modal
-resolves image/function declarations before runtime Secrets are attached. They must be set in the
-deployment environment when the region or Secret name differs from the source defaults.
+`DENALI_MODAL_REGION`, `DENALI_MODAL_SECRET_NAME`, and the optional
+`DENALI_MODAL_PROVIDER_SECRET_NAME` are deploy-shell configuration because Modal resolves
+image/function declarations before runtime Secrets are attached. They must be set in the
+deployment environment when the region or Secret names differ from the source defaults.
 
 Local Compose mode remains supported for development with one configured tenant and no Clerk
 authorization. Local mode is not a production topology and must not weaken hosted defaults.

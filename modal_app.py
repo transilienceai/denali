@@ -9,6 +9,7 @@ import modal
 
 APP_NAME = "denali-production"
 SECRET_NAME = os.environ.get("DENALI_MODAL_SECRET_NAME", "denali-production")
+PROVIDER_SECRET_NAME = os.environ.get("DENALI_MODAL_PROVIDER_SECRET_NAME", "").strip()
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -17,7 +18,13 @@ image = (
     .add_local_dir("src", remote_path="/opt/denali/src", copy=True)
     .run_commands("pip install '/opt/denali[api,aws,azure,gcp,github,hosted]'")
 )
-secret = modal.Secret.from_name(SECRET_NAME)
+provider_secret = (
+    modal.Secret.from_name(PROVIDER_SECRET_NAME)
+    if PROVIDER_SECRET_NAME
+    else modal.Secret.from_dict({})
+)
+core_secret = modal.Secret.from_name(SECRET_NAME)
+runtime_secrets = [core_secret, provider_secret]
 app = modal.App(APP_NAME)
 
 
@@ -60,7 +67,7 @@ def _validators():
 
 @app.function(
     image=image,
-    secrets=[secret],
+    secrets=runtime_secrets,
     timeout=2400,
     retries=0,
     **_region_options(),
@@ -87,7 +94,7 @@ def _dispatch_validation(job_id: str) -> str:
 
 @app.function(
     image=image,
-    secrets=[secret],
+    secrets=runtime_secrets,
     min_containers=1,
     scaledown_window=600,
     timeout=300,
@@ -107,7 +114,7 @@ def api():
 
 @app.function(
     image=image,
-    secrets=[secret],
+    secrets=[core_secret],
     timeout=600,
     **_region_options(),
 )
@@ -120,7 +127,7 @@ def migrate_database() -> None:
 
 @app.function(
     image=image,
-    secrets=[secret],
+    secrets=[core_secret],
     timeout=60,
     **_region_options(),
 )
@@ -141,7 +148,7 @@ def database_status() -> None:
 
 @app.function(
     image=image,
-    secrets=[secret],
+    secrets=runtime_secrets,
     timeout=60,
     **_region_options(),
 )

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AI_APPLICATION_DISCOVERY_LABEL,
   PAGE_PATHS,
   closeDrawerTransition,
   drawerTabTransition,
@@ -13,6 +14,11 @@ import {
   withoutDrawer,
   type Page,
 } from "../src/navigation.ts";
+
+test("AI application discovery uses precise product language without breaking its deep link", () => {
+  assert.equal(AI_APPLICATION_DISCOVERY_LABEL, "AI application discovery");
+  assert.equal(PAGE_PATHS.shadowAi, "/shadow-ai");
+});
 
 test("inventory navigation accepts resource kinds but never serializes click events", () => {
   assert.equal(navigationUrl("inventory", inventoryQuery("ai_workload")), "/inventory?kind=ai_workload");

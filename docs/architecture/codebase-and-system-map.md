@@ -271,10 +271,9 @@ Browser Back/Forward, pasted deep links, refresh, drawer close, and connection c
 preserve the canonical URL contract. New backend routes normally require a typed client method,
 role classification, tenant-scoped repository behavior, and tests.
 
-The current navigation label **Shadow AI** means “AI application discovery requiring review.” A
-catalog match alone does not prove an application is unauthorized or used. Product language should
-move toward **AI application discovery**, reserving “Shadow AI” for observed use that violates an
-explicit policy.
+The **AI application discovery** surface presents catalog matches that require review. A catalog
+match alone does not prove an application is unauthorized or used. “Shadow AI” is reserved for
+observed use that violates an explicit policy.
 
 ## Golden Path demonstration
 
@@ -381,7 +380,6 @@ separately.
 - Clerk still uses a development instance for the pilot.
 - The Neon runtime role is not yet split to least privilege and restore operations are untested.
 - Entra sign-in logs depend on tenant licensing and retention; coverage must remain explicit.
-- “Shadow AI” is currently broader product language than the evidence supports.
 - The local Golden Path is reproducible by manifest and documented collection order, but not yet a
   one-command, secret-free hosted demo snapshot.
 - The production web build currently emits a chunk-size warning at approximately 527 KB minified;

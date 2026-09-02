@@ -62,18 +62,27 @@ query continues to use the UUID tenant predicate. Members can read; only admins 
 
 ## 3. Configure and deploy Modal
 
-Create one Modal secret containing the variables relevant to the deployment from `.env.example`.
-The source default name is `denali-production`; set `DENALI_MODAL_SECRET_NAME` in the deploy shell
-when the environment uses another name. At minimum it needs:
+Create a core Modal secret containing the database, Clerk, and canonical-origin variables relevant
+to the deployment from `.env.example`. The source default name is `denali-production`; set
+`DENALI_MODAL_SECRET_NAME` in the deploy shell when the environment uses another name. At minimum
+it needs:
 
 - `DENALI_DSN`, `DENALI_MIGRATION_DSN`, and `DENALI_WEB_URL`;
 - `CLERK_SECRET_KEY`, `CLERK_JWT_KEY`, and `CLERK_AUTHORIZED_PARTIES`;
-- provider variables for every onboarding capability being enabled.
+- provider variables for every onboarding capability being enabled when a separate
+  provider-operator Secret is not used.
+
+Provider variables may instead live in a separate provider-operator Secret. This avoids replacing
+an existing core Secret when providers are enabled incrementally. Keep that Secret limited to the
+Denali-operated provider identities and configuration, set `DENALI_MODAL_PROVIDER_SECRET_NAME` in
+the deploy shell, and attach both Secrets by deploying `modal_app.py`. Do not duplicate core keys
+in the provider Secret.
 
 `DENALI_MODAL_REGION` is evaluated by the local Modal CLI while it builds the deployment, so
 export it in the deploy shell (or CI environment); it is not read from the runtime secret.
-Set `DENALI_MODAL_SECRET_NAME` in the same deploy environment when using a differently named
-Modal secret.
+Set `DENALI_MODAL_SECRET_NAME` in the same deploy environment when using a differently named core
+Secret. Set `DENALI_MODAL_PROVIDER_SECRET_NAME` there when using the optional provider-operator
+Secret; both names are resolved before runtime Secrets are attached.
 
 Deploy after migrating:
 

@@ -41,11 +41,12 @@ source-to-runtime proof. The most useful demo sequence is:
    lineage—not a verdict by itself.
 5. Open **Sources** or **Connections** to show the exact two-repository, one AWS Region, and
    one GCP project/resource boundaries.
-6. Show **Shadow AI**: two catalog-matched Entra enterprise applications are awaiting review.
+6. Show **AI application discovery**: two catalog-matched Entra enterprise applications are
+   awaiting review.
    Permission counts are observed zeroes under complete grant and app-role coverage; sign-in
    activity is unavailable under the tenant's license and is labelled partial, while the
-   30-day directory-audit query completed with no matching changes. The current page name means
-   “AI application discovery”; it does not classify either row as unauthorized or prove use.
+   30-day directory-audit query completed with no matching changes. The page does not classify
+   either row as unauthorized or prove use.
 7. Finish with the evidence boundary: the two source-to-cloud applications, two Entra AI
    application matches, six findings, three vulnerabilities, two correlated issues, one real
    Vertex model invocation, one evidence-linked runtime detection, and no fixture or

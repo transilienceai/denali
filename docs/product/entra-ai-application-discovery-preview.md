@@ -1,4 +1,4 @@
-# Entra Shadow AI preview
+# Entra AI application discovery preview
 
 The first live Microsoft slice answers three narrow questions with attributable
 evidence:
