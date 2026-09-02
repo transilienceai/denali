@@ -1,0 +1,84 @@
+name: Deploy Modal production
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Full commit SHA already merged to main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: denali-modal-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.3-alpine3.20
+        env:
+          POSTGRES_DB: denali_test
+          POSTGRES_USER: denali
+          POSTGRES_PASSWORD: denali-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U denali -d denali_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DENALI_TEST_DSN: postgresql://denali:denali-test@127.0.0.1:5432/denali_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+      - name: Require the exact merged commit
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e '.[api,aws,azure,gcp,github,hosted,dev]'
+      - run: ruff check .
+      - run: pytest -q
+      - run: python -m py_compile modal_app.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://denali.transilience.cloud
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install 'modal>=1.1,<2'
+      - name: Deploy the verified production revision
+        run: scripts/deploy_modal_prod.sh --confirm-production

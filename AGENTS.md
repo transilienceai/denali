@@ -5,6 +5,27 @@ These instructions apply to the entire repository. Read
 before changing authentication, tenancy, API routing, persistence, background work, deployment,
 or provider onboarding.
 
+## Non-negotiable delivery workflow
+
+- Never commit or push directly to `main`. Before editing, fetch `origin` and create a focused
+  branch from `origin/main`; agent-created branches use `codex/<short-topic>`.
+- Every change reaches `main` through a pull request. Keep commits reviewable, push the feature
+  branch, open or update its PR, and wait for required checks. Do not merge the PR unless the user
+  explicitly asks for the merge; creating or updating a PR is not permission to merge it.
+- Never force-push `main`, delete `main`, bypass a required check, dismiss a review, or weaken a
+  repository rule to make a change pass. Fix the change or report the blocker.
+- Production deployment is a separate, post-merge operation. Never deploy backend code from a
+  feature branch, dirty worktree, unreviewed commit, or Vercel preview. Use the protected GitHub
+  Actions production workflow from the exact merged `main` SHA.
+- Do not run `scripts/deploy_modal_prod.sh` as an ordinary development step. The script requires
+  an explicit production flag and validates its source revision. Local emergency use is allowed
+  only from clean, current `main` after the PR is merged and the user explicitly requests it.
+- Vercel Preview belongs to `denali-dev`; Vercel Production is produced from merged `main` only.
+  A preview result is evidence for a PR, never authorization to deploy Modal production.
+- Follow [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+  [`docs/development/change-and-release-process.md`](docs/development/change-and-release-process.md)
+  for the executable branch, PR, verification, deployment, rollback, and handoff sequence.
+
 ## Architecture that must remain true
 
 - The hosted request path is browser -> Vercel -> same-origin `/api/*` rewrite -> Modal FastAPI
