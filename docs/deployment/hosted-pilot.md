@@ -62,23 +62,34 @@ query continues to use the UUID tenant predicate. Members can read; only admins 
 
 ## 3. Configure and deploy Modal
 
-Create one Modal secret containing the variables relevant to the deployment from `.env.example`.
-The source default name is `denali-production`; set `DENALI_MODAL_SECRET_NAME` in the deploy shell
-when the environment uses another name. At minimum it needs:
+Create a core Modal Secret containing the Clerk, Neon, and web variables relevant to the
+deployment from `.env.example`. The source default name is `denali-production`; set
+`DENALI_MODAL_SECRET_NAME` in the deploy shell when the environment uses another name. At minimum
+the core Secret needs:
 
 - `DENALI_DSN`, `DENALI_MIGRATION_DSN`, and `DENALI_WEB_URL`;
 - `CLERK_SECRET_KEY`, `CLERK_JWT_KEY`, and `CLERK_AUTHORIZED_PARTIES`;
-- provider variables for every onboarding capability being enabled.
+
+Provider credentials remain in one separate, environment-local Modal Secret. Set
+`DENALI_MODAL_PROVIDER_SECRET_NAME` in the deploy shell to mount it alongside the core Secret.
+The provider Secret is applied after the core Secret, so it must not duplicate core keys.
+Production uses:
+
+```bash
+export DENALI_MODAL_SECRET_NAME=custom-secret
+export DENALI_MODAL_PROVIDER_SECRET_NAME=denali-github-provider
+```
 
 `DENALI_MODAL_REGION` is evaluated by the local Modal CLI while it builds the deployment, so
 export it in the deploy shell (or CI environment); it is not read from the runtime secret.
-Set `DENALI_MODAL_SECRET_NAME` in the same deploy environment when using a differently named
-Modal secret.
+Set the Secret-name variables in the same deploy environment as the Modal CLI invocation; they are
+not runtime values loaded from a Secret.
 
-Deploy after migrating:
+Deploy production through the checked-in script, which validates combined configuration, runs
+migrations and database status, and deploys the app:
 
 ```bash
-modal deploy modal_app.py
+scripts/deploy_modal_prod.sh
 ```
 
 `api` keeps one warm pilot container. `validation_worker` receives only a validation job UUID,
