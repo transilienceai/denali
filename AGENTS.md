@@ -35,6 +35,10 @@ or provider onboarding.
 
 - Vercel may receive only public frontend/server configuration, currently
   `VITE_CLERK_PUBLISHABLE_KEY` and `MODAL_API_ORIGIN`.
+- Vercel Production uses the Clerk production instance, the `denali-production` Modal app, and
+  production Neon. Vercel Preview uses the Clerk development instance, the isolated `denali-dev`
+  Modal app, and an isolated Neon `denali-dev` branch/database. Never route a development Clerk
+  token to the production Modal verifier or route a preview build to the production database.
 - Backend, database, and provider integration secrets belong in Modal Secrets. Never put
   `CLERK_SECRET_KEY`, a database DSN, provider secret, token, or private key in a `VITE_*`
   variable, Vercel build output, logs, fixtures, screenshots, or the repository.
@@ -66,6 +70,8 @@ or provider onboarding.
   never tokens, authorization headers, DSNs, secrets, callback codes, or provider payloads.
 - Preserve local Compose mode for development. Hosted-only changes must not require Clerk or Modal
   for the local test suite unless the test explicitly covers hosted behavior.
+- `DENALI_MODAL_APP_NAME` and `DENALI_MODAL_SECRET_NAME` are deploy-shell settings. Production
+  defaults to `denali-production`; hosted preview deployments set both to `denali-dev`.
 
 ## Required verification
 

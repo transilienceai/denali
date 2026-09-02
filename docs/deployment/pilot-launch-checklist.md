@@ -177,8 +177,11 @@ build and publish, while `/api/*` remains intentionally unusable. Record Vercel'
 use it to configure Clerk and Modal, deploy Modal, then replace the placeholder with the real
 Modal origin and redeploy Vercel.
 
-- [x] Add both values for Production and Preview; `MODAL_API_ORIGIN` is also configured for
-  Development. Add the Clerk publishable key to Development only if that target will be used.
+- [x] Add the production values to Vercel Production.
+- [ ] Add the Clerk development publishable key and the isolated `denali-dev` Modal origin to
+  Vercel Preview. Never point a development Clerk preview at `denali-production`.
+- [x] `MODAL_API_ORIGIN` is configured for Vercel Development. Add the Clerk publishable key to
+  Development only if that target will be used.
 - [x] Deploy the project and attach `denali.transilience.cloud`.
 - [ ] Verify an authenticated refresh and SPA navigation. Unauthenticated `/` and
   `/api/healthz` are verified.

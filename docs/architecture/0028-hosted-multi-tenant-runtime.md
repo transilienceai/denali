@@ -95,6 +95,18 @@ pattern.
 
 ## Configuration and secret ownership
 
+Hosted preview and production are isolated security environments:
+
+| Vercel target | Clerk instance | Modal environment | Modal app/Secret | Neon environment |
+| --- | --- | --- | --- | --- |
+| Production | Production | `denali-prod` | `denali-production` | Production |
+| Preview | Development | `denali-dev` | `denali-dev` | `denali-dev` branch/database |
+
+A default `*.vercel.app` preview uses the Clerk development publishable key and proxies `/api/*`
+to the `denali-dev` Modal origin. That Modal deployment verifies with the matching development
+Secret and reads only the isolated Neon development environment. Production Modal never accepts
+development Clerk tokens, and preview builds never connect to production Neon.
+
 Vercel receives only:
 
 | Variable | Purpose | Secret |
@@ -138,9 +150,11 @@ The Modal application contains separate functions for the ASGI API, database mig
 status, configuration status, and validation worker. The pilot keeps a warm API container, but
 correctness must not depend on its lifetime or on requests reaching the same container.
 
-`DENALI_MODAL_REGION` and `DENALI_MODAL_SECRET_NAME` are deploy-shell configuration because Modal
-resolves image/function declarations before runtime Secrets are attached. They must be set in the
-deployment environment when the region or Secret name differs from the source defaults.
+`DENALI_MODAL_REGION`, `DENALI_MODAL_APP_NAME`, and `DENALI_MODAL_SECRET_NAME` are deploy-shell
+configuration because Modal resolves image/function declarations before runtime Secrets are
+attached. They must be set in the deployment environment when the region, app name, or Secret name
+differs from the production source defaults. The preview deployment sets both names to
+`denali-dev`.
 
 Local Compose mode remains supported for development with one configured tenant and no Clerk
 authorization. Local mode is not a production topology and must not weaken hosted defaults.
