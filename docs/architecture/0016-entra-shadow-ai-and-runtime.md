@@ -1,4 +1,4 @@
-# ADR 0016: Entra Shadow AI inventory and runtime observations
+# ADR 0016: Entra AI application discovery and runtime observations
 
 ## Status
 
@@ -66,7 +66,7 @@ stable Entra application ID.
 
 ## Consequences
 
-- The first Shadow AI experience can answer which AI applications exist, which have
+- The first AI application discovery experience can answer which AI applications exist, which have
   delegated or application permissions, and which were recently used.
 - Human governance remains explicit: new applications begin `unreviewed`.
 - User identities in sign-in logs remain references unless another connector has

@@ -224,8 +224,11 @@ If the deployed URL differs from step 1, update all of these together and redepl
 
 ### 9. Add providers one at a time
 
-Add each provider's variables to `.env.modal.production`, replace the Modal secret with
-`--force`, redeploy Modal, and complete its hosted acceptance before starting the next provider.
+Add each provider's variables to an ignored provider-only dotenv and create or replace a separate
+provider-operator Modal Secret. Set `DENALI_MODAL_PROVIDER_SECRET_NAME` alongside
+`DENALI_MODAL_SECRET_NAME` when deploying `modal_app.py`. Keeping provider variables separate
+avoids replacing an existing core Secret whose values are intentionally unreadable. Complete each
+provider's hosted acceptance before starting the next provider.
 
 #### AWS
 
