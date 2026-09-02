@@ -178,7 +178,7 @@ use it to configure Clerk and Modal, deploy Modal, then replace the placeholder 
 Modal origin and redeploy Vercel.
 
 - [x] Add the production values to Vercel Production.
-- [ ] Add the Clerk development publishable key and the isolated `denali-dev` Modal origin to
+- [x] Add the Clerk development publishable key and the isolated `denali-dev` Modal origin to
   Vercel Preview. Never point a development Clerk preview at `denali-production`.
 - [x] `MODAL_API_ORIGIN` is configured for Vercel Development. Add the Clerk publishable key to
   Development only if that target will be used.
@@ -186,6 +186,17 @@ Modal origin and redeploy Vercel.
 - [ ] Verify an authenticated refresh and SPA navigation. Unauthenticated `/` and
   `/api/healthz` are verified.
 - [x] Confirm Vercel contains only the public Clerk publishable key and Modal origin.
+
+Development preview deployment recorded on 2026-09-02:
+
+- Modal environment, app, and Secret: `denali-dev`;
+- Modal API origin: `https://transilience-denali-dev--denali-dev-api.modal.run`;
+- Neon branch and database: `denali-dev`, owned by `denali_dev_owner`;
+- Vercel branch alias:
+  `https://denali-git-codex-custom-clerk-profile-transilience-a55654db.vercel.app`;
+- database migrations: 12, latest `012_tenant_connection_constraints.sql`;
+- authenticated Account, Organization, Members, active-Organization context, and same-origin API
+  routing verified from the hosted preview.
 
 ### 7. Reconcile the final URL
 
