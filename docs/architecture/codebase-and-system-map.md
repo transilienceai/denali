@@ -88,7 +88,7 @@ provider integration secrets belong in Modal Secrets.
 | --- | --- |
 | `src/denali/domain/` | Provider-neutral immutable contracts for inventory, findings, vulnerabilities, activity, detections, issues, and deployment identity. |
 | `src/denali/connectors/` | Bounded collectors and import adapters. Connectors normalize external observations into domain batches and explicit coverage. |
-| `src/denali/connections/` | Self-service AWS, Azure, GCP, and GitHub connection plans, validators, setup artifacts, and credential acquisition boundaries. |
+| `src/denali/connections/` | Self-service AWS, Azure, Microsoft Entra, GCP, and GitHub connection plans, validators, setup artifacts, and credential acquisition boundaries. |
 | `src/denali/store/` | PostgreSQL migrations, ingestion, tenant-scoped queries, governance, issue/detection evaluation persistence, connections, setup state, and durable validation jobs. |
 | `src/denali/api/` | FastAPI routes, authentication/authorization, setup callbacks, validation orchestration, response contracts, and hosted/local mode selection. |
 | `src/denali/issues/` | Deterministic cross-evidence issue correlation. |
@@ -142,13 +142,16 @@ scope. It does not prove collection ran, inventory exists, or risk is absent.
 
 - AWS: tenant-owned assume role, external ID, selected account and Regions.
 - Azure: Denali multi-tenant application consent and selected subscriptions.
+- Microsoft Entra: tenant-bound admin consent for the disclosed Graph application-read bundle.
 - GCP: unique per-connection keyless principal and selected projects/resources.
 - GitHub: GitHub App installation and exact repository selection.
 
 Connection validation is durable in hosted mode. `src/denali/api/validation.py` and migration
 `011_hosted_pilot.sql` implement PostgreSQL jobs, deduplication, leases, bounded terminal state,
-and Modal dispatch. Provider collection endpoints still use API-container background work and are
-not restart-safe; do not copy that pattern into new features.
+and Modal dispatch. Microsoft Entra evidence collection uses the same durable design through
+`src/denali/api/collection.py` and migration `013_connection_collection_jobs.sql`. Older provider
+collection endpoints still use API-container background work and are not restart-safe; do not copy
+that pattern into new features.
 
 ## Connector and importer inventory
 
@@ -368,14 +371,14 @@ separately.
 | Provider-specific code to cloud | [GCP 0024](0024-gcp-code-to-cloud.md), [Azure 0025](0025-azure-code-to-cloud.md), [AWS 0026](0026-aws-deployment-code-to-cloud.md), [Kubernetes 0027](0027-shared-kubernetes-code-to-cloud.md) |
 | Runtime activity and detections | [ADR 0015](0015-provider-neutral-runtime-activity.md), [0017](0017-evidence-led-runtime-detections.md) |
 | Entra application discovery | [ADR 0016](0016-entra-shadow-ai-and-runtime.md) |
-| Provider onboarding | [AWS 0018](0018-self-service-aws-connections.md), [Azure 0019](0019-self-service-azure-connections.md), [GCP 0020](0020-self-service-gcp-connections.md), [GitHub 0021](0021-self-service-github-connections.md) |
+| Provider onboarding | [AWS 0018](0018-self-service-aws-connections.md), [Azure 0019](0019-self-service-azure-connections.md), [GCP 0020](0020-self-service-gcp-connections.md), [GitHub 0021](0021-self-service-github-connections.md), [Entra 0029](0029-self-service-entra-connections.md) |
 | Hosted deployment status and next actions | [Pilot checklist](../deployment/pilot-launch-checklist.md) |
 | Golden Path operator/presenter sequence | [Golden Path guide](../product/golden-path-demo.md) |
 
 ## Known architectural gaps
 
-- Hosted provider collection is not yet durable; only connection validation uses PostgreSQL jobs
-  and Modal workers.
+- Microsoft Entra evidence collection is durable; older provider collection endpoints remain an
+  explicit migration gap.
 - Hosted provider configuration and live acceptance remain incomplete.
 - Clerk still uses a development instance for the pilot.
 - The Neon runtime role is not yet split to least privilege and restore operations are untested.

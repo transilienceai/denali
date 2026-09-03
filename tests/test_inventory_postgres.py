@@ -18,10 +18,12 @@ import pytest
 from denali.connections import (
     AWS_SCOPE_BEDROCK_AGENTS,
     AZURE_SCOPES,
+    ENTRA_SCOPES,
     GCP_SCOPES,
     GITHUB_SCOPES,
     aws_coverage_plan,
     azure_coverage_plan,
+    entra_coverage_plan,
     gcp_coverage_plan,
     github_coverage_plan,
 )
@@ -265,8 +267,9 @@ def test_clerk_organization_mapping_is_stable_and_isolated(repository) -> None:
 
 def test_clerk_tenants_cannot_cross_read_or_mutate_evidence_and_jobs(repository) -> None:
     _, repo = repository
-    alpha = repo.resolve_tenant("org_IsolationAlpha")
-    beta = repo.resolve_tenant("org_IsolationBeta")
+    run_key = uuid.uuid4().hex
+    alpha = repo.resolve_tenant(f"org_IsolationAlpha{run_key}")
+    beta = repo.resolve_tenant(f"org_IsolationBeta{run_key}")
     now = datetime.now(UTC)
     repo.ingest(alpha, demo_batch(now))
     repo.ingest_findings(alpha, demo_findings_batch(now))
@@ -388,6 +391,112 @@ def test_connection_validation_jobs_are_deduplicated_and_expire(repository) -> N
         ).fetchone()
     assert state == "failed"
     assert error_summary == "Validation dispatch timed out."
+
+
+def test_entra_consent_state_and_collection_jobs_are_tenant_bound_and_durable(
+    repository,
+) -> None:
+    tenant, repo = repository
+    other_tenant = str(uuid.uuid4())
+    connection_id = str(uuid.uuid4())
+    client_id = str(uuid.uuid4())
+    entra_tenant_id = str(uuid.uuid4())
+    state_sha256 = "d" * 64
+    now = datetime.now(UTC)
+    repo.create_connection(
+        tenant,
+        connection_id=connection_id,
+        provider="entra",
+        display_name="Durable Entra fixture",
+        credential_type="entra_multitenant_app",
+        credential_reference={"client_id": client_id},
+        declared_scopes=list(ENTRA_SCOPES),
+        coverage_plan=[],
+        configuration={
+            "tenant_id": entra_tenant_id,
+            "coverage_mode": "tenant-wide-admin-consent",
+        },
+    )
+
+    launched = repo.record_entra_consent_launch(
+        tenant,
+        connection_id,
+        launch={
+            "method": "entra_admin_consent",
+            "created_at": now.isoformat(),
+            "consent_expires_at": (now + timedelta(minutes=30)).isoformat(),
+        },
+        state_sha256=state_sha256,
+    )
+    assert launched is not None
+    assert "consent_state_sha256" not in str(launched)
+    assert (
+        repo.complete_entra_connection_setup(
+            other_tenant,
+            connection_id,
+            expected_state_sha256=state_sha256,
+            entra_tenant_id=entra_tenant_id,
+            coverage_plan=entra_coverage_plan(list(ENTRA_SCOPES), entra_tenant_id),
+            completed_at=now,
+        )
+        is None
+    )
+    completed = repo.complete_entra_connection_setup(
+        tenant,
+        connection_id,
+        expected_state_sha256=state_sha256,
+        entra_tenant_id=entra_tenant_id,
+        coverage_plan=entra_coverage_plan(list(ENTRA_SCOPES), entra_tenant_id),
+        completed_at=now,
+    )
+    assert completed is not None
+    assert completed["configuration"]["onboarding"]["status"] == "completed"
+    assert "consent_state_sha256" not in str(completed)
+    assert (
+        repo.complete_entra_connection_setup(
+            tenant,
+            connection_id,
+            expected_state_sha256=state_sha256,
+            entra_tenant_id=entra_tenant_id,
+            coverage_plan=[],
+            completed_at=now,
+        )
+        is None
+    )
+
+    job, created = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind="entra_ai"
+    )
+    duplicate, duplicate_created = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind="entra_ai"
+    )
+    assert created is True
+    assert duplicate_created is False
+    assert duplicate["id"] == job["id"]
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        repo.create_connection_collection_job(
+            other_tenant, connection_id, collection_kind="entra_ai"
+        )
+
+    claimed = repo.claim_connection_collection_job(str(job["id"]), lease_seconds=60)
+    assert claimed is not None
+    assert claimed["attempt_count"] == 1
+    assert repo.claim_connection_collection_job(str(job["id"]), lease_seconds=60) is None
+    assert repo.record_connection_collection_failure(
+        str(job["id"]), "sanitized fixture failure", max_attempts=2
+    )
+    reclaimed = repo.claim_connection_collection_job(str(job["id"]), lease_seconds=60)
+    assert reclaimed is not None
+    assert reclaimed["attempt_count"] == 2
+    repo.complete_connection_collection_job(
+        str(job["id"]),
+        {"state": "complete", "completed_at": now.isoformat()},
+    )
+    status = repo.connection_collection_status(
+        tenant, connection_id, collection_kind="entra_ai"
+    )
+    assert status["state"] == "idle"
+    assert status["last_result"]["state"] == "complete"
 
 
 def test_connection_lifecycle_retains_collected_evidence(repository) -> None:

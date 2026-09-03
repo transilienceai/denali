@@ -87,6 +87,10 @@ test("provider callbacks always return to the selected connection", () => {
     "connections",
   );
   assert.equal(
+    navigationFromUrl("https://denali.test/?entra_setup=succeeded&connection_id=def").page,
+    "connections",
+  );
+  assert.equal(
     navigationFromUrl("https://denali.test/?admin_consent=true&state=abc").page,
     "connections",
   );

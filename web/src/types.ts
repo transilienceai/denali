@@ -99,6 +99,7 @@ export type ConnectionValidationResult = {
   project_number?: string;
   repository_id?: number;
   repository_full_name?: string;
+  tenant_id?: string;
 };
 
 export type ConnectionValidation = {
@@ -122,6 +123,19 @@ export type ConnectionCoveragePlan = {
   repository_id?: number;
   repository_node_id?: string;
   repository_full_name?: string;
+  tenant_id?: string;
+};
+
+export type EntraEvidenceCollection = {
+  state: "complete" | "partial" | "failed";
+  completed_at: string;
+  lookback_hours?: number;
+  matched_ai_applications?: number;
+  activity_events?: number;
+  coverage_complete?: number;
+  coverage_partial?: number;
+  coverage_failed?: number;
+  detail?: string;
 };
 
 export type GitHubRepositoryBoundary = {
@@ -138,13 +152,15 @@ export type GitHubRepositoryBoundary = {
 
 export type Connection = {
   id: string;
-  provider: "aws" | "azure" | "gcp" | "github";
+  provider: "aws" | "azure" | "entra" | "gcp" | "github";
   display_name: string;
   lifecycle_state: "active" | "disabled";
   health_state: "unknown" | "healthy" | "partial" | "unhealthy" | "disabled";
   validation_state?: "idle" | "running";
   source_collection_state?: "idle" | "running";
   last_source_collection?: GitHubSourceCollection | null;
+  evidence_collection_state?: "idle" | "running";
+  last_evidence_collection?: EntraEvidenceCollection | null;
   deployment_collection_state?: "idle" | "running";
   last_deployment_collection?: GcpDeploymentCollection | AzureDeploymentCollection | AwsDeploymentCollection | null;
   setup_capabilities: {
@@ -152,6 +168,7 @@ export type Connection = {
     azure_cloud_shell: boolean;
     gcp_cloud_shell: boolean;
     github_app: boolean;
+    entra_admin_consent: boolean;
   };
   credential_reference:
     | {
@@ -162,6 +179,10 @@ export type Connection = {
         type: "azure_multitenant_app";
         client_id: string;
         service_principal_id?: string;
+      }
+    | {
+        type: "entra_multitenant_app";
+        client_id: string;
       }
     | {
         type: "gcp_service_account";
@@ -180,7 +201,7 @@ export type Connection = {
     account_id?: string;
     partition?: "aws" | "aws-us-gov" | "aws-cn";
     deployment_region?: string;
-    coverage_mode?: "automatic" | "selected" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories";
+    coverage_mode?: "automatic" | "selected" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "tenant-wide-admin-consent";
     regions?: string[];
     role_name?: string;
     stack_scopes?: string[];
@@ -194,7 +215,7 @@ export type Connection = {
     repositories?: GitHubRepositoryBoundary[];
     installer?: { id: number; login: string };
     onboarding?: {
-      method: "cloudformation_quick_create" | "azure_cloud_shell" | "gcp_cloud_shell" | "github_app_installation";
+      method: "cloudformation_quick_create" | "azure_cloud_shell" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation";
       template_version?: string;
       template_sha256?: string;
       principal_arn?: string;
@@ -209,6 +230,9 @@ export type Connection = {
       installation_id?: number;
       oauth_expires_at?: string;
       completed_at?: string;
+      consent_expires_at?: string;
+      status?: "completed" | "failed";
+      failed_at?: string;
     };
   };
   created_at?: string;
@@ -324,6 +348,18 @@ export type AzureSetupLaunch = {
   setup_command: string;
   script_version: string;
   script_sha256: string;
+  expires_at: string;
+};
+
+export type EntraConnectionCreate = {
+  provider: "entra";
+  display_name: string;
+  tenant_id: string;
+  declared_scopes: string[];
+};
+
+export type EntraSetupLaunch = {
+  consent_url: string;
   expires_at: string;
 };
 

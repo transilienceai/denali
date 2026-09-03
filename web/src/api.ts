@@ -5,6 +5,8 @@ import type {
   AwsCloudFormationLaunch,
   AzureConnectionCreate,
   AzureSetupLaunch,
+  EntraConnectionCreate,
+  EntraSetupLaunch,
   GcpConnectionCreate,
   GcpSetupLaunch,
   GitHubConnectionCreate,
@@ -119,7 +121,7 @@ export const api = {
     }),
   connections: () => request<{ items: Connection[] }>("/v1/connections"),
   connection: (id: string) => request<Connection>(`/v1/connections/${id}`),
-  createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate) =>
+  createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate) =>
     request<Connection>("/v1/connections", {
       method: "POST",
       body: JSON.stringify(connection),
@@ -152,6 +154,16 @@ export const api = {
     request<{ status: "started" | "already_running"; connection_id: string }>(
       `/v1/connections/${id}/azure/setup/complete`,
       { method: "POST", body: JSON.stringify({ completion_code: completionCode }) },
+    ),
+  launchEntraSetup: (id: string) =>
+    request<EntraSetupLaunch>(
+      `/v1/connections/${id}/entra/setup/launch`,
+      { method: "POST" },
+    ),
+  collectEntraEvidence: (id: string) =>
+    request<{ status: "started" | "already_running"; connection_id: string }>(
+      `/v1/connections/${id}/entra/collect`,
+      { method: "POST" },
     ),
   launchGcpSetup: (id: string) =>
     request<GcpSetupLaunch>(

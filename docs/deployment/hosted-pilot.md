@@ -137,11 +137,14 @@ Use these production provider URLs:
 - web URL: `https://denali.example.com`;
 - GitHub setup URL: `https://denali.example.com/api/v1/connections/github/setup/callback`;
 - GitHub OAuth callback: `https://denali.example.com/api/v1/connections/github/oauth/callback`;
+- Entra admin-consent callback:
+  `https://denali.example.com/api/v1/connections/entra/setup/callback`;
 - Azure consent redirect: `https://denali.example.com`.
 
-Set `DENALI_GITHUB_CALLBACK_URL`, `DENALI_AZURE_CONSENT_REDIRECT_URI`, `DENALI_WEB_URL`,
-`CLERK_AUTHORIZED_PARTIES`, and `DENALI_CORS_ORIGINS` to the final values. The browser normally
-uses the same-origin proxy; CORS remains restricted for diagnostics and controlled direct calls.
+Set `DENALI_GITHUB_CALLBACK_URL`, `DENALI_ENTRA_CALLBACK_URL`,
+`DENALI_AZURE_CONSENT_REDIRECT_URI`, `DENALI_WEB_URL`, `CLERK_AUTHORIZED_PARTIES`, and
+`DENALI_CORS_ORIGINS` to the final values. The browser normally uses the same-origin proxy; CORS
+remains restricted for diagnostics and controlled direct calls.
 
 ### Isolated Vercel preview environment
 
@@ -176,8 +179,8 @@ For two separate Clerk organizations, verify:
 1. organization switching changes `/api/v1/context` and all displayed data;
 2. a member can read but receives `403` for every mutation;
 3. an admin can update governance and operate connections;
-4. AWS, Azure, GCP, and GitHub complete their hosted setup, callback, validation, disable, and
-   delete flows;
+4. AWS, Azure, Microsoft Entra, GCP, and GitHub complete their hosted setup, callback, validation,
+   disable, and delete flows; collection is accepted separately for every enabled collection;
 5. killing an API container does not stop an already spawned validation worker;
 6. Neon restore procedures have been exercised on a non-production branch.
 

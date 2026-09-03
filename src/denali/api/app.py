@@ -38,6 +38,7 @@ from denali.api.clerk_admin import (
     ClerkBackendOrganizationAdmin,
     ClerkOrganizationAdmin,
 )
+from denali.api.collection import run_durable_collection_job
 from denali.api.validation import run_durable_validation_job
 from denali.connections import (
     AWS_COVERAGE_AUTOMATIC,
@@ -47,12 +48,15 @@ from denali.connections import (
     AZURE_CLOUD_PUBLIC,
     AZURE_SCOPE_CODE_TO_CLOUD,
     AZURE_SCOPES,
+    ENTRA_SCOPES,
     GCP_SCOPES,
     GITHUB_SCOPES,
     AwsCloudFormationLauncher,
     AwsConnectionValidator,
     AzureConnectionValidator,
     AzureSetupScriptLauncher,
+    EntraAdminConsentClient,
+    EntraConnectionValidator,
     GcpConnectionPrincipalProvisioner,
     GcpConnectionValidator,
     GcpSetupScriptLauncher,
@@ -60,6 +64,7 @@ from denali.connections import (
     GitHubConnectionValidator,
     aws_connection_coverage_plan,
     azure_coverage_plan,
+    entra_coverage_plan,
     gcp_coverage_plan,
     github_coverage_plan,
 )
@@ -67,9 +72,10 @@ from denali.connections.aws import render_cloudformation
 from denali.connections.gcp import valid_gcp_project_id
 from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
 from denali.connectors.azure_deployments import AzureConnectionDeploymentCollector
+from denali.connectors.entra_connection import EntraConnectionCollector
 from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
 from denali.connectors.github_repository import GitHubRepositoryCollector
-from denali.domain import FindingBatch, InventoryBatch
+from denali.domain import ActivityBatch, FindingBatch, InventoryBatch
 from denali.store.db import migrate
 from denali.store.repository import PostgresInventoryRepository
 
@@ -80,6 +86,8 @@ DEFAULT_LOCAL_TENANT = "00000000-0000-4000-8000-000000000001"
 
 class InventoryReader(Protocol):
     def ingest(self, tenant_id: str, batch: InventoryBatch) -> dict[str, int]: ...
+
+    def ingest_activity(self, tenant_id: str, batch: ActivityBatch) -> dict[str, int]: ...
 
     def ingest_findings(self, tenant_id: str, batch: FindingBatch) -> dict[str, int]: ...
 
@@ -122,6 +130,20 @@ class InventoryReader(Protocol):
 
     def connection_validation_job_state(self, tenant_id: str, connection_id: str) -> str: ...
 
+    def create_connection_collection_job(
+        self, tenant_id: str, connection_id: str, *, collection_kind: str
+    ) -> tuple[dict[str, Any], bool]: ...
+
+    def set_connection_collection_call_id(self, job_id: str, call_id: str) -> None: ...
+
+    def record_connection_collection_failure(
+        self, job_id: str, summary: str, *, max_attempts: int
+    ) -> bool: ...
+
+    def connection_collection_status(
+        self, tenant_id: str, connection_id: str, *, collection_kind: str
+    ) -> dict[str, Any]: ...
+
     def record_connection_launch(
         self, tenant_id: str, connection_id: str, launch: dict[str, Any]
     ) -> dict[str, Any] | None: ...
@@ -163,6 +185,35 @@ class InventoryReader(Protocol):
         *,
         expected_setup_token_sha256: str,
         projects: list[dict[str, str]],
+        coverage_plan: list[dict[str, Any]],
+        completed_at: datetime,
+    ) -> dict[str, Any] | None: ...
+
+    def record_entra_consent_launch(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        launch: dict[str, Any],
+        state_sha256: str,
+    ) -> dict[str, Any] | None: ...
+
+    def fail_entra_connection_setup(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        expected_state_sha256: str,
+        failed_at: datetime,
+    ) -> bool: ...
+
+    def complete_entra_connection_setup(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        expected_state_sha256: str,
+        entra_tenant_id: str,
         coverage_plan: list[dict[str, Any]],
         completed_at: datetime,
     ) -> dict[str, Any] | None: ...
@@ -365,6 +416,17 @@ class AzureSetupCompletion(BaseModel):
     completion_code: str = Field(min_length=16, max_length=32768)
 
 
+class EntraConnectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["entra"] = "entra"
+    display_name: str = Field(min_length=1, max_length=120)
+    tenant_id: UUID
+    declared_scopes: list[str] = Field(
+        default_factory=lambda: list(ENTRA_SCOPES), min_length=1, max_length=len(ENTRA_SCOPES)
+    )
+
+
 class GcpConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -414,7 +476,11 @@ class OrganizationUserCreate(BaseModel):
 
 
 ConnectionCreate = Annotated[
-    AwsConnectionCreate | AzureConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate,
+    AwsConnectionCreate
+    | AzureConnectionCreate
+    | EntraConnectionCreate
+    | GcpConnectionCreate
+    | GitHubConnectionCreate,
     Field(discriminator="provider"),
 ]
 
@@ -424,9 +490,11 @@ def create_app(
     repository: InventoryReader | None = None,
     connection_validator: AwsConnectionValidator | None = None,
     azure_connection_validator: AzureConnectionValidator | None = None,
+    entra_connection_validator: EntraConnectionValidator | None = None,
     gcp_connection_validator: GcpConnectionValidator | None = None,
     cloudformation_launcher: AwsCloudFormationLauncher | None = None,
     azure_setup_launcher: AzureSetupScriptLauncher | None = None,
+    entra_consent_client: EntraAdminConsentClient | None = None,
     gcp_principal_provisioner: GcpConnectionPrincipalProvisioner | None = None,
     gcp_setup_launcher: GcpSetupScriptLauncher | None = None,
     azure_deployment_collector: AzureConnectionDeploymentCollector | None = None,
@@ -435,6 +503,7 @@ def create_app(
     github_app_client: GitHubAppClient | None = None,
     github_connection_validator: GitHubConnectionValidator | None = None,
     github_repository_collector: GitHubRepositoryCollector | None = None,
+    entra_connection_collector: EntraConnectionCollector | None = None,
     onboarding_validation_timeout_seconds: int | None = None,
     onboarding_validation_retry_seconds: int | None = None,
     tenant_id: str | None = None,
@@ -442,6 +511,7 @@ def create_app(
     authenticator: RequestAuthenticator | None = None,
     clerk_organization_admin: ClerkOrganizationAdmin | None = None,
     validation_dispatcher: Callable[[str], str | None] | None = None,
+    collection_dispatcher: Callable[[str], str | None] | None = None,
     migrate_on_start: bool = True,
 ) -> FastAPI:
     configured_dsn = os.environ.get("DENALI_DSN")
@@ -461,6 +531,7 @@ def create_app(
         configured_clerk_organization_admin = ClerkBackendOrganizationAdmin.from_environment()
     configured_launcher = cloudformation_launcher or _cloudformation_launcher_from_environment()
     configured_azure_launcher = azure_setup_launcher or _azure_setup_launcher_from_environment()
+    configured_entra_client = entra_consent_client or _entra_consent_client_from_environment()
     configured_gcp_provisioner = (
         gcp_principal_provisioner or _gcp_principal_provisioner_from_environment()
     )
@@ -499,13 +570,20 @@ def create_app(
         app.state.authenticator = configured_authenticator
         app.state.clerk_organization_admin = configured_clerk_organization_admin
         app.state.validation_dispatcher = validation_dispatcher
+        app.state.collection_dispatcher = collection_dispatcher
         app.state.connection_validator = connection_validator or AwsConnectionValidator()
         app.state.azure_connection_validator = (
             azure_connection_validator or AzureConnectionValidator()
         )
+        app.state.entra_connection_validator = entra_connection_validator or (
+            EntraConnectionValidator(configured_entra_client)
+            if configured_entra_client is not None
+            else None
+        )
         app.state.gcp_connection_validator = gcp_connection_validator or GcpConnectionValidator()
         app.state.cloudformation_launcher = configured_launcher
         app.state.azure_setup_launcher = configured_azure_launcher
+        app.state.entra_consent_client = configured_entra_client
         app.state.gcp_principal_provisioner = configured_gcp_provisioner
         app.state.gcp_setup_launcher = configured_gcp_launcher
         app.state.azure_deployment_collector = (
@@ -526,6 +604,11 @@ def create_app(
         app.state.github_repository_collector = github_repository_collector or (
             GitHubRepositoryCollector(configured_github_app)
             if configured_github_app is not None
+            else None
+        )
+        app.state.entra_connection_collector = entra_connection_collector or (
+            EntraConnectionCollector(configured_entra_client)
+            if configured_entra_client is not None
             else None
         )
         app.state.onboarding_validation_timeout = onboarding_validation_timeout
@@ -623,6 +706,7 @@ def create_app(
         validators = {
             "aws": request.app.state.connection_validator,
             "azure": request.app.state.azure_connection_validator,
+            "entra": request.app.state.entra_connection_validator,
             "gcp": request.app.state.gcp_connection_validator,
             "github": request.app.state.github_connection_validator,
         }
@@ -700,6 +784,54 @@ def create_app(
                     active_validations.discard(connection_key)
 
         background_tasks.add_task(run_validation)
+        return {"status": "started", "connection_id": connection_id}
+
+    def queue_entra_collection(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        repo: InventoryReader,
+        current_tenant: str,
+        target: dict[str, Any],
+    ) -> dict[str, str]:
+        connection_id = str(target["id"])
+        collector = request.app.state.entra_connection_collector
+        if collector is None:
+            raise HTTPException(
+                status_code=503, detail="Microsoft Entra collection is not configured"
+            )
+        create_job = getattr(repo, "create_connection_collection_job", None)
+        if create_job is None:
+            raise HTTPException(status_code=503, detail="durable collection storage is unavailable")
+        job, created = create_job(
+            current_tenant,
+            connection_id,
+            collection_kind="entra_ai",
+        )
+        if not created:
+            return {"status": "already_running", "connection_id": connection_id}
+        job_id = str(job["id"])
+        dispatcher = request.app.state.collection_dispatcher
+        if dispatcher is not None:
+            try:
+                call_id = dispatcher(job_id)
+                if call_id:
+                    repo.set_connection_collection_call_id(job_id, call_id)
+            except Exception as error:
+                repo.record_connection_collection_failure(
+                    job_id,
+                    "Unable to dispatch collection worker.",
+                    max_attempts=1,
+                )
+                raise HTTPException(
+                    status_code=503, detail="Unable to dispatch Microsoft Entra collection"
+                ) from error
+        else:
+            background_tasks.add_task(
+                run_durable_collection_job,
+                repo,
+                {"entra_ai": collector},
+                job_id,
+            )
         return {"status": "started", "connection_id": connection_id}
 
     def queue_github_collection(
@@ -1024,6 +1156,51 @@ def create_app(
                         "cloud": connection.cloud,
                         "coverage_mode": "selected-subscriptions",
                         "subscriptions": [],
+                    },
+                )
+                return _with_validation_state(request, current_tenant, created)
+            except ValueError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+
+        if isinstance(connection, EntraConnectionCreate):
+            consent_client = request.app.state.entra_consent_client
+            if consent_client is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Microsoft Entra onboarding is not configured; set the Entra client "
+                        "credentials and callback URL"
+                    ),
+                )
+            scopes = list(dict.fromkeys(connection.declared_scopes))
+            unsupported_scopes = [scope for scope in scopes if scope not in ENTRA_SCOPES]
+            if unsupported_scopes:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"unsupported Microsoft Entra scope: {', '.join(unsupported_scopes)}",
+                )
+            if set(scopes) != set(ENTRA_SCOPES):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Microsoft Entra onboarding currently requires the complete disclosed "
+                        "AI application evidence bundle"
+                    ),
+                )
+            connection_id = str(uuid4())
+            try:
+                created = repo.create_connection(
+                    current_tenant,
+                    connection_id=connection_id,
+                    provider="entra",
+                    display_name=display_name,
+                    credential_type="entra_multitenant_app",
+                    credential_reference={"client_id": consent_client.client_id},
+                    declared_scopes=scopes,
+                    coverage_plan=[],
+                    configuration={
+                        "tenant_id": str(connection.tenant_id),
+                        "coverage_mode": "tenant-wide-admin-consent",
                     },
                 )
                 return _with_validation_state(request, current_tenant, created)
@@ -1402,6 +1579,124 @@ def create_app(
             wait_for_healthy=True,
         )
 
+    @app.post("/v1/connections/{connection_id}/entra/setup/launch", status_code=201)
+    def launch_entra_setup(
+        request: Request,
+        response: Response,
+        connection_id: UUID,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None or target["provider"] != "entra":
+            raise HTTPException(status_code=404, detail="Microsoft Entra connection not found")
+        if target["lifecycle_state"] != "active":
+            raise HTTPException(status_code=409, detail="disabled connections cannot be launched")
+        consent_client = request.app.state.entra_consent_client
+        if consent_client is None:
+            raise HTTPException(
+                status_code=503, detail="Microsoft Entra onboarding is not configured"
+            )
+        launch = consent_client.create_launch(
+            denali_tenant_id=current_tenant,
+            connection_id=str(connection_id),
+            entra_tenant_id=target["configuration"]["tenant_id"],
+        )
+        recorded = repo.record_entra_consent_launch(
+            current_tenant,
+            str(connection_id),
+            launch={
+                "method": "entra_admin_consent",
+                "created_at": launch["created_at"].isoformat(),
+                "consent_expires_at": launch["expires_at"].isoformat(),
+            },
+            state_sha256=launch["state_sha256"],
+        )
+        if recorded is None:
+            raise HTTPException(status_code=409, detail="connection changed during setup")
+        response.headers["Cache-Control"] = "no-store"
+        return {"consent_url": launch["consent_url"], "expires_at": launch["expires_at"]}
+
+    @app.get("/v1/connections/entra/setup/callback", include_in_schema=False)
+    def entra_setup_callback(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        state: str = Query(min_length=32, max_length=1024),
+        tenant: str | None = Query(default=None, max_length=64),
+        admin_consent: str | None = Query(default=None, max_length=16),
+        error: str | None = Query(default=None, max_length=128),
+    ) -> RedirectResponse:
+        state_tenant, connection_id = _entra_state_context(state)
+        repo, current_tenant = _context_for_tenant(request, state_tenant)
+        target = repo.get_connection_validation_target(current_tenant, connection_id)
+        if target is None or target["provider"] != "entra":
+            raise HTTPException(status_code=404, detail="Microsoft Entra connection not found")
+        expected_hash = target["credential_reference"].get("consent_state_sha256")
+        if not expected_hash or not hmac.compare_digest(expected_hash, _sha256_text(state)):
+            raise HTTPException(status_code=409, detail="Microsoft Entra setup state is invalid")
+        _require_current_setup_expiry(
+            target,
+            key="consent_expires_at",
+            detail="Microsoft Entra consent launch has expired",
+            current_detail="Microsoft Entra consent launch is not current",
+        )
+        consent_client = request.app.state.entra_consent_client
+        if consent_client is None:
+            raise HTTPException(
+                status_code=503, detail="Microsoft Entra onboarding is not configured"
+            )
+        expected_entra_tenant = str(target["configuration"]["tenant_id"])
+        try:
+            returned_tenant = str(UUID(tenant or ""))
+        except ValueError:
+            returned_tenant = ""
+        consent_failed = (
+            error is not None
+            or (admin_consent or "").casefold() != "true"
+            or returned_tenant != expected_entra_tenant
+        )
+        if consent_failed:
+            consumed = repo.fail_entra_connection_setup(
+                current_tenant,
+                connection_id,
+                expected_state_sha256=expected_hash,
+                failed_at=datetime.now(UTC),
+            )
+            if not consumed:
+                raise HTTPException(status_code=409, detail="connection changed during setup")
+            return RedirectResponse(
+                f"{consent_client.web_url}/?"
+                f"{urlencode({'entra_setup': 'failed', 'connection_id': connection_id})}",
+                status_code=303,
+            )
+
+        completed_at = datetime.now(UTC)
+        updated = repo.complete_entra_connection_setup(
+            current_tenant,
+            connection_id,
+            expected_state_sha256=expected_hash,
+            entra_tenant_id=returned_tenant,
+            coverage_plan=entra_coverage_plan(target["declared_scopes"], returned_tenant),
+            completed_at=completed_at,
+        )
+        if updated is None:
+            raise HTTPException(status_code=409, detail="connection changed during setup")
+        validation_target = repo.get_connection_validation_target(current_tenant, connection_id)
+        if validation_target is None:
+            raise HTTPException(status_code=409, detail="connection changed during setup")
+        queue_validation(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            validation_target,
+            wait_for_credentials=False,
+        )
+        return RedirectResponse(
+            f"{consent_client.web_url}/?"
+            f"{urlencode({'entra_setup': 'succeeded', 'connection_id': connection_id})}",
+            status_code=303,
+        )
+
     @app.post("/v1/connections/{connection_id}/gcp/setup/launch", status_code=201)
     def launch_gcp_setup(
         request: Request,
@@ -1697,7 +1992,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="connection not found")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be validated")
-        if target["provider"] not in {"aws", "azure", "gcp", "github"}:
+        if target["provider"] not in {"aws", "azure", "entra", "gcp", "github"}:
             raise HTTPException(status_code=422, detail="connection provider is not supported")
         if target["provider"] == "azure" and not target["configuration"].get("subscriptions"):
             raise HTTPException(
@@ -1714,6 +2009,13 @@ def create_app(
                 status_code=409,
                 detail="complete GitHub App installation before validation",
             )
+        if target["provider"] == "entra" and not target["configuration"].get(
+            "onboarding", {}
+        ).get("completed_at"):
+            raise HTTPException(
+                status_code=409,
+                detail="complete Microsoft Entra admin consent before validation",
+            )
         return queue_validation(
             request,
             background_tasks,
@@ -1721,6 +2023,27 @@ def create_app(
             current_tenant,
             target,
             wait_for_credentials=False,
+        )
+
+    @app.post("/v1/connections/{connection_id}/entra/collect", status_code=202)
+    def collect_entra_evidence(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        connection_id: UUID,
+    ) -> dict[str, str]:
+        repo, current_tenant = _context(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None or target["provider"] != "entra":
+            raise HTTPException(status_code=404, detail="Microsoft Entra connection not found")
+        if target["lifecycle_state"] != "active":
+            raise HTTPException(status_code=409, detail="disabled connections cannot collect")
+        if not target["configuration"].get("onboarding", {}).get("completed_at"):
+            raise HTTPException(
+                status_code=409,
+                detail="complete Microsoft Entra admin consent before collection",
+            )
+        return queue_entra_collection(
+            request, background_tasks, repo, current_tenant, target
         )
 
     @app.post("/v1/connections/{connection_id}/github/collect", status_code=202)
@@ -1825,11 +2148,25 @@ def create_app(
     def disable_connection(request: Request, connection_id: UUID) -> dict[str, Any]:
         repo, current_tenant = _context(request)
         connection_key = (current_tenant, str(connection_id))
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None:
+            raise HTTPException(status_code=404, detail="connection not found")
         if _connection_validation_state(request, *connection_key) == "running":
             raise HTTPException(
                 status_code=409,
                 detail="wait for the active validation to finish before disabling",
             )
+        if target["provider"] == "entra":
+            collection_status = getattr(repo, "connection_collection_status", None)
+            if collection_status is not None and collection_status(
+                current_tenant,
+                str(connection_id),
+                collection_kind="entra_ai",
+            )["state"] == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail="wait for the active evidence collection to finish before disabling",
+                )
         with request.app.state.github_collection_lock:
             if connection_key in request.app.state.active_github_collections:
                 raise HTTPException(
@@ -1865,7 +2202,7 @@ def create_app(
                 )
         row = repo.disable_connection(current_tenant, str(connection_id))
         if row is None:
-            raise HTTPException(status_code=404, detail="connection not found")
+            raise HTTPException(status_code=409, detail="connection changed before disable")
         return _with_validation_state(request, current_tenant, row)
 
     @app.delete("/v1/connections/{connection_id}", status_code=204)
@@ -2223,6 +2560,20 @@ def _with_validation_state(
         collection_result = request.app.state.github_collection_results.get(connection_key)
     result["source_collection_state"] = "running" if collecting else "idle"
     result["last_source_collection"] = collection_result
+    result["evidence_collection_state"] = "idle"
+    result["last_evidence_collection"] = None
+    if result["provider"] == "entra":
+        collection_status = getattr(
+            request.app.state.repository, "connection_collection_status", None
+        )
+        if collection_status is not None:
+            status = collection_status(
+                tenant_id,
+                str(result["id"]),
+                collection_kind="entra_ai",
+            )
+            result["evidence_collection_state"] = status["state"]
+            result["last_evidence_collection"] = status["last_result"]
     with request.app.state.gcp_deployment_collection_lock:
         gcp_collecting = (
             connection_key in request.app.state.active_gcp_deployment_collections
@@ -2271,6 +2622,10 @@ def _with_validation_state(
             result["provider"] == "github"
             and request.app.state.github_app_client is not None
         ),
+        "entra_admin_consent": (
+            result["provider"] == "entra"
+            and request.app.state.entra_consent_client is not None
+        ),
     }
     return result
 
@@ -2300,6 +2655,7 @@ def _is_public_request(request: Request) -> bool:
         "/redoc",
         "/v1/connections/github/setup/callback",
         "/v1/connections/github/oauth/callback",
+        "/v1/connections/entra/setup/callback",
     }:
         return True
     return False
@@ -2348,6 +2704,28 @@ def _azure_setup_launcher_from_environment() -> AzureSetupScriptLauncher | None:
         client_id=client_id,
         redirect_uri=redirect_uri,
         expires_in_seconds=expires_in_seconds,
+    )
+
+
+def _entra_consent_client_from_environment() -> EntraAdminConsentClient | None:
+    client_id = os.environ.get("DENALI_ENTRA_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("DENALI_ENTRA_CLIENT_SECRET", "").strip()
+    web_url = os.environ.get("DENALI_WEB_URL", "http://127.0.0.1:3080").rstrip("/")
+    callback_url = os.environ.get("DENALI_ENTRA_CALLBACK_URL", "").strip() or (
+        f"{web_url}/api/v1/connections/entra/setup/callback"
+    )
+    if not client_id and not client_secret:
+        return None
+    if not client_id or not client_secret:
+        raise ValueError("Microsoft Entra client credentials are incomplete")
+    return EntraAdminConsentClient(
+        client_id=client_id,
+        client_secret=client_secret,
+        callback_url=callback_url,
+        web_url=web_url,
+        setup_seconds=_bounded_environment_integer(
+            "DENALI_ENTRA_ONBOARDING_SECONDS", default=1800, minimum=300, maximum=3600
+        ),
     )
 
 
@@ -2513,17 +2891,35 @@ def _github_state_context(value: str) -> tuple[str, str]:
     return tenant_id, connection_id
 
 
+def _entra_state_context(value: str) -> tuple[str, str]:
+    try:
+        tenant_id, connection_id, token = value.split(".", 2)
+        UUID(tenant_id)
+        UUID(connection_id)
+    except (ValueError, AttributeError) as error:
+        raise HTTPException(
+            status_code=409, detail="Microsoft Entra setup state is invalid"
+        ) from error
+    if len(token) < 32:
+        raise HTTPException(status_code=409, detail="Microsoft Entra setup state is invalid")
+    return tenant_id, connection_id
+
+
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _require_current_setup_expiry(
-    target: dict[str, Any], *, key: str, detail: str
+    target: dict[str, Any],
+    *,
+    key: str,
+    detail: str,
+    current_detail: str = "GitHub setup launch is not current",
 ) -> None:
     try:
         expires_at = datetime.fromisoformat(target["configuration"]["onboarding"][key])
     except (KeyError, TypeError, ValueError) as error:
-        raise HTTPException(status_code=409, detail="GitHub setup launch is not current") from error
+        raise HTTPException(status_code=409, detail=current_detail) from error
     if datetime.now(UTC) > expires_at:
         raise HTTPException(status_code=409, detail=detail)
 

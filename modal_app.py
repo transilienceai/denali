@@ -1,4 +1,4 @@
-"""Modal deployment for Denali's API, migrations, and durable validation worker."""
+"""Modal deployment for Denali's API, migrations, and durable provider workers."""
 
 from __future__ import annotations
 
@@ -55,18 +55,24 @@ def _configure_gcp_oidc() -> None:
 
 
 def _validators():
-    from denali.api.app import _github_app_from_environment
+    from denali.api.app import (
+        _entra_consent_client_from_environment,
+        _github_app_from_environment,
+    )
     from denali.connections import (
         AwsConnectionValidator,
         AzureConnectionValidator,
+        EntraConnectionValidator,
         GcpConnectionValidator,
         GitHubConnectionValidator,
     )
 
     github_app = _github_app_from_environment()
+    entra_client = _entra_consent_client_from_environment()
     return {
         "aws": AwsConnectionValidator(),
         "azure": AzureConnectionValidator(),
+        "entra": EntraConnectionValidator(entra_client) if entra_client else None,
         "gcp": GcpConnectionValidator(),
         "github": GitHubConnectionValidator(github_app) if github_app else None,
     }
@@ -103,6 +109,34 @@ def _dispatch_validation(job_id: str) -> str:
 @app.function(
     image=image,
     secrets=runtime_secrets,
+    timeout=2400,
+    retries=0,
+    **_region_options(),
+)
+def collection_worker(job_id: str) -> None:
+    from denali.api.app import _entra_consent_client_from_environment
+    from denali.api.collection import run_durable_collection_job
+    from denali.connectors.entra_connection import EntraConnectionCollector
+    from denali.store.repository import PostgresInventoryRepository
+
+    entra_client = _entra_consent_client_from_environment()
+    run_durable_collection_job(
+        PostgresInventoryRepository(os.environ["DENALI_DSN"]),
+        {
+            "entra_ai": EntraConnectionCollector(entra_client) if entra_client else None,
+        },
+        job_id,
+    )
+
+
+def _dispatch_collection(job_id: str) -> str:
+    call = collection_worker.spawn(job_id)
+    return call.object_id
+
+
+@app.function(
+    image=image,
+    secrets=runtime_secrets,
     min_containers=1,
     scaledown_window=600,
     timeout=300,
@@ -117,6 +151,7 @@ def api():
     return create_app(
         auth_mode="clerk",
         validation_dispatcher=_dispatch_validation,
+        collection_dispatcher=_dispatch_collection,
         migrate_on_start=False,
     )
 
@@ -184,6 +219,11 @@ def configuration_status() -> None:
             "DENALI_AZURE_CLIENT_ID",
             "DENALI_AZURE_CLIENT_SECRET",
             "DENALI_AZURE_CONSENT_REDIRECT_URI",
+        ),
+        "entra": (
+            "DENALI_ENTRA_CLIENT_ID",
+            "DENALI_ENTRA_CLIENT_SECRET",
+            "DENALI_ENTRA_CALLBACK_URL",
         ),
         "gcp": (
             "DENALI_GCP_ONBOARDING_BUCKET",
