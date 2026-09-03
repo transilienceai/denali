@@ -39,6 +39,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  UserRound,
   Waypoints,
   X,
   Zap,
@@ -200,7 +201,7 @@ function readGitHubSetupReturn(): GitHubSetupReturn | null {
   return { connectionId, state, detail: query.get("detail")?.slice(0, 500) || undefined };
 }
 
-function App({ canWrite = true, accountControls }: { canWrite?: boolean; accountControls?: ReactNode }) {
+function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boolean; accountControls?: ReactNode; profilePage?: ReactNode }) {
   const [azureConsentReturn] = useState(readAzureConsentReturn);
   const [githubSetupReturn] = useState(readGitHubSetupReturn);
   const [navigation, setNavigation] = useState<NavigationLocation>(() =>
@@ -494,7 +495,9 @@ function App({ canWrite = true, accountControls }: { canWrite?: boolean; account
       <main className="main-shell">
         <Topbar page={page} onMenu={() => setSidebarOpen(true)} onRefresh={loadAll} accountControls={accountControls} />
         <div className="workspace">
-          {error ? (
+          {page === "profile" ? (
+            profilePage ?? <ProfileUnavailable />
+          ) : error ? (
             <ErrorState message={error} onRetry={loadAll} />
           ) : loading || !summary ? (
             <LoadingState />
@@ -688,6 +691,8 @@ function Sidebar({ page, onNavigate, open }: { page: Page; onNavigate: (page: Pa
         <NavButton active={page === "detections"} icon={Gauge} label="Detections" onClick={() => onNavigate("detections")} />
         <p className="nav-heading">DATA</p>
         <NavButton active={page === "sources"} icon={Waypoints} label="Sources & coverage" onClick={() => onNavigate("sources")} />
+        <p className="nav-heading">ACCOUNT</p>
+        <NavButton active={page === "profile"} icon={UserRound} label="Profile & organization" onClick={() => onNavigate("profile")} />
       </nav>
 
       <div className="sidebar-footer">
@@ -736,6 +741,7 @@ function Topbar({ page, onMenu, onRefresh, accountControls }: { page: Page; onMe
     runtime: { eyebrow: "Runtime", title: "AI runtime activity" },
     detections: { eyebrow: "Behavior", title: "Runtime detections" },
     sources: { eyebrow: "Data confidence", title: "Sources & coverage" },
+    profile: { eyebrow: "Workspace", title: "Profile & organization" },
   };
   const content = titles[page];
   return (
@@ -749,6 +755,16 @@ function Topbar({ page, onMenu, onRefresh, accountControls }: { page: Page; onMe
         {accountControls && <div className="account-controls">{accountControls}</div>}
       </div>
     </header>
+  );
+}
+
+function ProfileUnavailable() {
+  return (
+    <div className="state-page">
+      <UserRound />
+      <h2>Hosted profile unavailable</h2>
+      <p>Profile and organization management is available when Denali runs with Clerk.</p>
+    </div>
   );
 }
 

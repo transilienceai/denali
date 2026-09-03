@@ -62,32 +62,34 @@ query continues to use the UUID tenant predicate. Members can read; only admins 
 
 ## 3. Configure and deploy Modal
 
-Create a core Modal secret containing the database, Clerk, and canonical-origin variables relevant
-to the deployment from `.env.example`. The source default name is `denali-production`; set
+Create a core Modal Secret containing the Clerk, Neon, and web variables relevant to the
+deployment from `.env.example`. The source default name is `denali-production`; set
 `DENALI_MODAL_SECRET_NAME` in the deploy shell when the environment uses another name. At minimum
-it needs:
+the core Secret needs:
 
 - `DENALI_DSN`, `DENALI_MIGRATION_DSN`, and `DENALI_WEB_URL`;
 - `CLERK_SECRET_KEY`, `CLERK_JWT_KEY`, and `CLERK_AUTHORIZED_PARTIES`;
-- provider variables for every onboarding capability being enabled when a separate
-  provider-operator Secret is not used.
 
-Provider variables may instead live in a separate provider-operator Secret. This avoids replacing
-an existing core Secret when providers are enabled incrementally. Keep that Secret limited to the
-Denali-operated provider identities and configuration, set `DENALI_MODAL_PROVIDER_SECRET_NAME` in
-the deploy shell, and attach both Secrets by deploying `modal_app.py`. Do not duplicate core keys
-in the provider Secret.
+Provider credentials remain in one separate, environment-local Modal Secret. Set
+`DENALI_MODAL_PROVIDER_SECRET_NAME` in the deploy shell to mount it alongside the core Secret.
+The provider Secret is applied after the core Secret, so it must not duplicate core keys.
+Production uses:
+
+```bash
+export DENALI_MODAL_SECRET_NAME=custom-secret
+export DENALI_MODAL_PROVIDER_SECRET_NAME=denali-github-provider
+```
 
 `DENALI_MODAL_REGION` is evaluated by the local Modal CLI while it builds the deployment, so
 export it in the deploy shell (or CI environment); it is not read from the runtime secret.
-Set `DENALI_MODAL_SECRET_NAME` in the same deploy environment when using a differently named core
-Secret. Set `DENALI_MODAL_PROVIDER_SECRET_NAME` there when using the optional provider-operator
-Secret; both names are resolved before runtime Secrets are attached.
+Set the Secret-name variables in the same deploy environment as the Modal CLI invocation; they are
+not runtime values loaded from a Secret.
 
-Deploy after migrating:
+Deploy production through the checked-in script, which validates combined configuration, runs
+migrations and database status, and deploys the app:
 
 ```bash
-modal deploy modal_app.py
+scripts/deploy_modal_prod.sh
 ```
 
 `api` keeps one warm pilot container. `validation_worker` receives only a validation job UUID,
@@ -130,6 +132,32 @@ Use these production provider URLs:
 Set `DENALI_GITHUB_CALLBACK_URL`, `DENALI_AZURE_CONSENT_REDIRECT_URI`, `DENALI_WEB_URL`,
 `CLERK_AUTHORIZED_PARTIES`, and `DENALI_CORS_ORIGINS` to the final values. The browser normally
 uses the same-origin proxy; CORS remains restricted for diagnostics and controlled direct calls.
+
+### Isolated Vercel preview environment
+
+Do not point a Vercel preview using Clerk development keys at `denali-production`. Create an
+isolated hosted development stack named `denali-dev`:
+
+1. Create a Neon branch and empty database named `denali-dev`, owned by a dedicated
+   `denali_dev_owner` role. Collect pooled and direct DSNs that explicitly select the
+   `denali-dev` database and that role; do not reuse the production owner DSN.
+2. Create a Modal environment named `denali-dev`, then create a Secret named `denali-dev` inside
+   it with those DSNs, the Clerk development `sk_test_...` key and matching development JWKS PEM,
+   and the exact stable Vercel preview origin in `CLERK_AUTHORIZED_PARTIES`, `DENALI_WEB_URL`, and
+   `DENALI_CORS_ORIGINS`.
+3. Deploy and migrate the separate Modal application with the checked-in helper:
+
+   ```bash
+   scripts/deploy_modal_dev.sh
+   ```
+
+4. Set Vercel Preview `VITE_CLERK_PUBLISHABLE_KEY` to the matching Clerk development
+   publishable key and Preview `MODAL_API_ORIGIN` to the resulting `denali-dev` Modal API origin.
+   Redeploy the preview.
+
+Clerk users and Organizations are instance-specific. Create development-only test Organizations
+and memberships; do not expect production identities or Organization IDs to exist in development.
+Keep all Production-scoped Vercel variables and the `denali-production` Modal Secret unchanged.
 
 ## 5. Acceptance and operations
 

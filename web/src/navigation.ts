@@ -9,7 +9,8 @@ export type Page =
   | "codeToCloud"
   | "runtime"
   | "detections"
-  | "sources";
+  | "sources"
+  | "profile";
 
 export type DrawerKind =
   | "asset"
@@ -55,6 +56,7 @@ export const PAGE_PATHS: Record<Page, string> = {
   runtime: "/runtime-activity",
   detections: "/detections",
   sources: "/sources",
+  profile: "/profile",
 };
 
 const PATH_PAGES = new Map(

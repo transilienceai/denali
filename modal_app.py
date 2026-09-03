@@ -7,9 +7,11 @@ from pathlib import Path
 
 import modal
 
-APP_NAME = "denali-production"
+APP_NAME = os.environ.get("DENALI_MODAL_APP_NAME", "denali-production")
 SECRET_NAME = os.environ.get("DENALI_MODAL_SECRET_NAME", "denali-production")
-PROVIDER_SECRET_NAME = os.environ.get("DENALI_MODAL_PROVIDER_SECRET_NAME", "").strip()
+PROVIDER_SECRET_NAME = os.environ.get(
+    "DENALI_MODAL_PROVIDER_SECRET_NAME", "denali-github-provider"
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -18,13 +20,10 @@ image = (
     .add_local_dir("src", remote_path="/opt/denali/src", copy=True)
     .run_commands("pip install '/opt/denali[api,aws,azure,gcp,github,hosted]'")
 )
-provider_secret = (
-    modal.Secret.from_name(PROVIDER_SECRET_NAME)
-    if PROVIDER_SECRET_NAME
-    else modal.Secret.from_dict({})
-)
-core_secret = modal.Secret.from_name(SECRET_NAME)
-runtime_secrets = [core_secret, provider_secret]
+runtime_secrets = [
+    modal.Secret.from_name(SECRET_NAME),
+    modal.Secret.from_name(PROVIDER_SECRET_NAME),
+]
 app = modal.App(APP_NAME)
 
 
@@ -114,7 +113,7 @@ def api():
 
 @app.function(
     image=image,
-    secrets=[core_secret],
+    secrets=runtime_secrets,
     timeout=600,
     **_region_options(),
 )
@@ -127,7 +126,7 @@ def migrate_database() -> None:
 
 @app.function(
     image=image,
-    secrets=[core_secret],
+    secrets=runtime_secrets,
     timeout=60,
     **_region_options(),
 )

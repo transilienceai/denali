@@ -42,6 +42,25 @@ export type DenaliContext = {
   can_write: boolean;
 };
 
+export type OrganizationRole = "org:member" | "org:admin";
+
+export type BulkInviteResult = {
+  sent: number;
+  failed: number;
+  results: Array<{
+    email: string;
+    status: "sent" | "failed";
+    invitation_id?: string;
+    error?: string;
+  }>;
+};
+
+export type CreatedOrganizationUser = {
+  user_id: string;
+  email: string;
+  role: OrganizationRole;
+};
+
 type TokenProvider = () => Promise<string | null>;
 let tokenProvider: TokenProvider = async () => null;
 
@@ -82,6 +101,22 @@ async function requestBlob(path: string): Promise<Blob> {
 
 export const api = {
   context: () => request<DenaliContext>("/v1/context"),
+  inviteOrganizationMembers: (emails: string[], role: OrganizationRole) =>
+    request<BulkInviteResult>("/v1/profile/organization/invitations/bulk", {
+      method: "POST",
+      body: JSON.stringify({ emails, role }),
+    }),
+  createOrganizationUser: (account: {
+    email: string;
+    password: string;
+    first_name?: string;
+    last_name?: string;
+    role: OrganizationRole;
+  }) =>
+    request<CreatedOrganizationUser>("/v1/profile/organization/users", {
+      method: "POST",
+      body: JSON.stringify(account),
+    }),
   connections: () => request<{ items: Connection[] }>("/v1/connections"),
   connection: (id: string) => request<Connection>(`/v1/connections/${id}`),
   createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate) =>

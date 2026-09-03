@@ -10,6 +10,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { api, configureApiTokenProvider, type DenaliContext } from "./api";
+import ProfilePage from "./ProfilePage";
 import "./styles.css";
 
 const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY?.trim();
@@ -35,14 +36,15 @@ function HostedDenali() {
 
   if (!isLoaded) return <div className="auth-shell"><div className="auth-status">Loading Denali…</div></div>;
   if (!orgId) {
-    return <div className="auth-shell"><div className="auth-card"><h1>Select a workspace</h1><p>Denali requires an active Clerk organization.</p><OrganizationSwitcher hidePersonal /></div></div>;
+    return <div className="auth-shell"><div className="auth-card"><h1>Select a workspace</h1><p>Denali requires an active Clerk organization.</p><OrganizationSwitcher hidePersonal organizationProfileMode="navigation" organizationProfileUrl="/profile" /></div></div>;
   }
-  if (error) return <div className="auth-shell"><div className="auth-card"><h1>Workspace unavailable</h1><p>{error}</p><OrganizationSwitcher hidePersonal /><UserButton /></div></div>;
+  if (error) return <div className="auth-shell"><div className="auth-card"><h1>Workspace unavailable</h1><p>{error}</p><OrganizationSwitcher hidePersonal organizationProfileMode="navigation" organizationProfileUrl="/profile" /><UserButton userProfileMode="navigation" userProfileUrl="/profile" /></div></div>;
   if (!context) return <div className="auth-shell"><div className="auth-status">Authorizing workspace…</div></div>;
 
   return <App
     canWrite={context.can_write}
-    accountControls={<><OrganizationSwitcher hidePersonal /><UserButton /></>}
+    accountControls={<><OrganizationSwitcher hidePersonal organizationProfileMode="navigation" organizationProfileUrl="/profile" /><UserButton userProfileMode="navigation" userProfileUrl="/profile" /></>}
+    profilePage={<ProfilePage />}
   />;
 }
 

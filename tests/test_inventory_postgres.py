@@ -28,6 +28,11 @@ from denali.connections import (
 from denali.connectors.code_to_cloud import CodeToCloudConnector, DeploymentTarget
 from denali.connectors.demo import demo_batch, demo_findings_batch
 from denali.connectors.repository_posture import RepositoryPostureConnector
+from denali.detections import (
+    ENTRA_CONSENT_RULE_UID,
+    ENTRA_FAILURE_RULE_UID,
+    UNREVIEWED_MODEL_RULE_UID,
+)
 from denali.domain import (
     ActivityBatch,
     ActivityCategory,
@@ -1004,8 +1009,15 @@ def test_runtime_detections_are_evidence_linked_and_idempotent(repository) -> No
         "open_by_severity": {"high": 1, "medium": 1},
     }
     evaluations = repo.latest_runtime_detection_evaluations(tenant)
-    assert {row["state"] for row in evaluations} == {"complete"}
-    assert {row["confirmed_detections"] for row in evaluations} == {1}
+    evaluations_by_rule = {row["rule_uid"]: row for row in evaluations}
+    assert {
+        rule_uid: (row["state"], row["confirmed_detections"])
+        for rule_uid, row in evaluations_by_rule.items()
+    } == {
+        ENTRA_FAILURE_RULE_UID: ("complete", 1),
+        ENTRA_CONSENT_RULE_UID: ("complete", 1),
+        UNREVIEWED_MODEL_RULE_UID: ("unknown", 0),
+    }
 
 
 def test_consent_then_use_issue_persists_exact_detection_and_activity_evidence(
