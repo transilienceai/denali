@@ -12,7 +12,9 @@ The hosted pilot keeps PostgreSQL as Denali's source of truth and separates the 
 
 The canonical architecture and contributor constraints are in
 [ADR 0028](../architecture/0028-hosted-multi-tenant-runtime.md). Repository-wide agent guidance is
-in [`AGENTS.md`](../../AGENTS.md).
+in [`AGENTS.md`](../../AGENTS.md). All changes and releases follow the
+[protected change and release process](../development/change-and-release-process.md); no code is
+pushed directly to `main`, and production deployment is a separate post-merge action.
 
 Provider connections retain their current boundary: they onboard and validate access. They do
 not schedule or run collectors automatically.
@@ -85,12 +87,20 @@ export it in the deploy shell (or CI environment); it is not read from the runti
 Set the Secret-name variables in the same deploy environment as the Modal CLI invocation; they are
 not runtime values loaded from a Secret.
 
-Deploy production through the checked-in script, which validates combined configuration, runs
-migrations and database status, and deploys the app:
+Deploy production through the protected **Deploy Modal production** GitHub Actions workflow after
+the reviewed PR is merged. Supply the exact full `main` commit SHA. The workflow re-runs the
+release gate and calls the checked-in script, which validates combined configuration, runs
+migrations and database status, deploys the app, and verifies production health.
+
+The script refuses feature branches, dirty worktrees, stale `main`, and invocations without an
+explicit production flag. It is shown here only for the documented emergency path:
 
 ```bash
-scripts/deploy_modal_prod.sh
+scripts/deploy_modal_prod.sh --confirm-production
 ```
+
+GitHub's `production` environment stores only `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for the
+deployment workflow. Denali application secrets remain in Modal Secrets.
 
 `api` keeps one warm pilot container. `validation_worker` receives only a validation job UUID,
 claims the job in PostgreSQL, and records completion or a bounded failure. A second validation

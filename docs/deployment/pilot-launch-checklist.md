@@ -149,9 +149,12 @@ modal secret create --from-dotenv .env.modal.production denali-production
 from runtime Secrets. Production keeps core values in `custom-secret` and GitHub values in
 `denali-github-provider`.
 
-```bash
-scripts/deploy_modal_prod.sh
-```
+After the deployment workflow change is reviewed and merged, open GitHub Actions → **Deploy
+Modal production**, run it from `main`, and enter the exact full merged commit SHA. The protected
+workflow runs the migration and deployment steps and verifies both health endpoints and the
+unauthenticated authorization boundary. See the
+[change and release process](../development/change-and-release-process.md); do not deploy
+production from a feature branch or Vercel preview.
 
 - [x] Record the deployed Modal `api` HTTPS origin.
 - [x] Verify `<modal-origin>/healthz` returns `{"status":"ready","version":"0.1.0"}`.
