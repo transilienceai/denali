@@ -159,7 +159,9 @@ Tenant onboarding remains bring-your-own-cloud without uploaded long-lived crede
 - Azure stores the consented tenant and selected subscription identifiers. The Denali-operated
   multi-tenant application obtains bounded tokens when required; access tokens are not persisted.
 - GCP stores selected project identifiers and a unique per-connection principal grant. No service
-  account JSON key is accepted or stored.
+  account JSON key is accepted or stored. Modal's OIDC token is exchanged through a Google
+  Workload Identity Federation provider restricted to the production Modal workspace,
+  environment, and app, then impersonates Denali's operator runtime service account.
 - GitHub stores App installation and exact repository identifiers. Installer OAuth tokens and App
   private keys never enter tenant records.
 

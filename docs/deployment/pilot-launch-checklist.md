@@ -259,11 +259,18 @@ DENALI_AZURE_CONSENT_REDIRECT_URI=https://<production-domain>
 ```text
 DENALI_GCP_ONBOARDING_BUCKET
 DENALI_GCP_OPERATOR_PROJECT_ID
+DENALI_GCP_WORKLOAD_IDENTITY_PROVIDER
+DENALI_GCP_RUNTIME_SERVICE_ACCOUNT
 ```
 
-- These are non-secret identifiers.
-- Configure keyless runtime credentials for Google Application Default Credentials. Do not commit
-  a service-account JSON key. GCP acceptance is blocked until Modal can obtain that identity.
+- These are non-secret identifiers. The provider value is the canonical
+  `projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>` name.
+- Configure the pool to trust Modal's OIDC issuer and restrict assertions to the production
+  workspace, environment, and app. Grant that external principal Workload Identity User on the
+  runtime service account.
+- At container startup Denali writes Modal's short-lived identity token and an external-account
+  ADC configuration to private container-local files. Do not create or commit a service-account
+  JSON key.
 
 #### GitHub
 
