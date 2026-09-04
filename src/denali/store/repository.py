@@ -71,6 +71,8 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
             credential_reference["service_principal_id"] = internal_reference[
                 "service_principal_id"
             ]
+    elif credential_type == "entra_multitenant_app":
+        credential_reference["client_id"] = internal_reference["client_id"]
     elif credential_type == "gcp_service_account":
         credential_reference["principal_email"] = internal_reference["principal_email"]
         if internal_reference.get("principal_unique_id"):
@@ -2184,6 +2186,174 @@ class PostgresInventoryRepository:
             ).fetchone()
         return "running" if row is not None else "idle"
 
+    def create_connection_collection_job(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        collection_kind: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create one durable active collection job for a connection and collection kind."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    """
+                    UPDATE connection_collection_job
+                    SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                        error_summary = CASE
+                          WHEN state = 'queued' THEN 'Collection dispatch timed out.'
+                          ELSE 'Collection worker lease expired.'
+                        END
+                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                      AND collection_kind = %s
+                      AND (
+                        (state = 'running' AND lease_expires_at < now())
+                        OR (state = 'queued' AND created_at < now() - interval '30 minutes')
+                      )
+                    """,
+                    (tenant_id, connection_id, collection_kind),
+                )
+                row = connection.execute(
+                    """
+                    INSERT INTO connection_collection_job
+                      (tenant_id, connection_id, collection_kind)
+                    VALUES (%s::uuid, %s::uuid, %s)
+                    ON CONFLICT (tenant_id, connection_id, collection_kind)
+                      WHERE state IN ('queued', 'running')
+                    DO NOTHING
+                    RETURNING *
+                    """,
+                    (tenant_id, connection_id, collection_kind),
+                ).fetchone()
+                if row is not None:
+                    return dict(row), True
+                active = connection.execute(
+                    """
+                    SELECT * FROM connection_collection_job
+                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                      AND collection_kind = %s AND state IN ('queued', 'running')
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (tenant_id, connection_id, collection_kind),
+                ).fetchone()
+        if active is None:
+            raise RuntimeError("unable to create or find the connection collection job")
+        return dict(active), False
+
+    def claim_connection_collection_job(
+        self, job_id: str, *, lease_seconds: int
+    ) -> dict[str, Any] | None:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                UPDATE connection_collection_job
+                SET state = 'running', started_at = COALESCE(started_at, now()),
+                    attempt_count = attempt_count + 1,
+                    lease_expires_at = now() + make_interval(secs => %s)
+                WHERE id = %s::uuid
+                  AND (
+                    state = 'queued'
+                    OR (state = 'running' AND lease_expires_at < now())
+                  )
+                RETURNING *
+                """,
+                (lease_seconds, job_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def set_connection_collection_call_id(self, job_id: str, call_id: str) -> None:
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE connection_collection_job SET modal_call_id = %s
+                WHERE id = %s::uuid AND state IN ('queued', 'running')
+                """,
+                (call_id, job_id),
+            )
+
+    def complete_connection_collection_job(
+        self, job_id: str, result: dict[str, Any]
+    ) -> None:
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE connection_collection_job
+                SET state = 'succeeded', result = %s::jsonb, completed_at = now(),
+                    lease_expires_at = NULL, error_summary = NULL
+                WHERE id = %s::uuid AND state = 'running'
+                """,
+                (json.dumps(result), job_id),
+            )
+
+    def record_connection_collection_failure(
+        self, job_id: str, summary: str, *, max_attempts: int
+    ) -> bool:
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE connection_collection_job
+                SET state = CASE WHEN attempt_count < %s THEN 'queued' ELSE 'failed' END,
+                    completed_at = CASE WHEN attempt_count < %s THEN NULL ELSE now() END,
+                    lease_expires_at = NULL,
+                    error_summary = %s
+                WHERE id = %s::uuid AND state = 'running'
+                RETURNING state
+                """,
+                (max_attempts, max_attempts, summary[:500], job_id),
+            ).fetchone()
+        return row is not None and row[0] == "queued"
+
+    def connection_collection_status(
+        self, tenant_id: str, connection_id: str, *, collection_kind: str
+    ) -> dict[str, Any]:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            connection.execute(
+                """
+                UPDATE connection_collection_job
+                SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                    error_summary = CASE
+                      WHEN state = 'queued' THEN 'Collection dispatch timed out.'
+                      ELSE 'Collection worker lease expired.'
+                    END
+                WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                  AND collection_kind = %s
+                  AND (
+                    (state = 'running' AND lease_expires_at < now())
+                    OR (state = 'queued' AND created_at < now() - interval '30 minutes')
+                  )
+                """,
+                (tenant_id, connection_id, collection_kind),
+            )
+            active = connection.execute(
+                """
+                SELECT 1 FROM connection_collection_job
+                WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                  AND collection_kind = %s AND state IN ('queued', 'running')
+                LIMIT 1
+                """,
+                (tenant_id, connection_id, collection_kind),
+            ).fetchone()
+            latest = connection.execute(
+                """
+                SELECT state, result, error_summary, completed_at
+                FROM connection_collection_job
+                WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                  AND collection_kind = %s AND state IN ('succeeded', 'failed')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (tenant_id, connection_id, collection_kind),
+            ).fetchone()
+        last_result: dict[str, Any] | None = None
+        if latest is not None:
+            last_result = dict(latest["result"] or {})
+            last_result.setdefault("state", "failed" if latest["state"] == "failed" else "complete")
+            if latest["error_summary"]:
+                last_result["detail"] = latest["error_summary"]
+            if latest["completed_at"]:
+                last_result.setdefault("completed_at", latest["completed_at"].isoformat())
+        return {"state": "running" if active is not None else "idle", "last_result": last_result}
+
     def create_connection(
         self,
         tenant_id: str,
@@ -2478,6 +2648,122 @@ class PostgresInventoryRepository:
                     tenant_id,
                     connection_id,
                     expected_setup_token_sha256,
+                ),
+            ).fetchone()
+        return None if row is None else self.get_connection(tenant_id, connection_id)
+
+    def record_entra_consent_launch(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        launch: dict[str, Any],
+        state_sha256: str,
+    ) -> dict[str, Any] | None:
+        """Record only the hash and expiry for one tenant-admin consent launch."""
+
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE provider_connection
+                SET credential_reference = jsonb_set(
+                        credential_reference,
+                        '{consent_state_sha256}',
+                        to_jsonb(%s::text),
+                        true
+                    ),
+                    configuration = jsonb_set(
+                        configuration, '{onboarding}', %s::jsonb, true
+                    ),
+                    updated_at = now()
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                  AND provider = 'entra' AND lifecycle_state = 'active'
+                RETURNING id
+                """,
+                (state_sha256, json.dumps(launch), tenant_id, connection_id),
+            ).fetchone()
+        return None if row is None else self.get_connection(tenant_id, connection_id)
+
+    def fail_entra_connection_setup(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        expected_state_sha256: str,
+        failed_at: datetime,
+    ) -> bool:
+        """Consume a rejected or failed consent state without persisting provider error text."""
+
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE provider_connection
+                SET credential_reference = credential_reference - 'consent_state_sha256',
+                    configuration = jsonb_set(
+                        jsonb_set(configuration, '{onboarding,status}', '"failed"'::jsonb, true),
+                        '{onboarding,failed_at}', to_jsonb(%s::text), true
+                    ),
+                    updated_at = %s
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                  AND provider = 'entra' AND lifecycle_state = 'active'
+                  AND credential_reference->>'consent_state_sha256' = %s
+                RETURNING id
+                """,
+                (
+                    failed_at.isoformat(),
+                    failed_at,
+                    tenant_id,
+                    connection_id,
+                    expected_state_sha256,
+                ),
+            ).fetchone()
+        return row is not None
+
+    def complete_entra_connection_setup(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        expected_state_sha256: str,
+        entra_tenant_id: str,
+        coverage_plan: list[dict[str, Any]],
+        completed_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Bind the verified Entra tenant and atomically consume one-time consent state."""
+
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE provider_connection
+                SET credential_reference = credential_reference - 'consent_state_sha256',
+                    configuration = jsonb_set(
+                        jsonb_set(
+                            jsonb_set(
+                                configuration,
+                                '{tenant_id}', to_jsonb(%s::text), true
+                            ),
+                            '{onboarding,status}', '"completed"'::jsonb, true
+                        ),
+                        '{onboarding,completed_at}', to_jsonb(%s::text), true
+                    ),
+                    coverage_plan = %s::jsonb,
+                    health_state = 'unknown',
+                    updated_at = %s
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                  AND provider = 'entra' AND lifecycle_state = 'active'
+                  AND configuration->>'tenant_id' = %s
+                  AND credential_reference->>'consent_state_sha256' = %s
+                RETURNING id
+                """,
+                (
+                    entra_tenant_id,
+                    completed_at.isoformat(),
+                    json.dumps(coverage_plan),
+                    completed_at,
+                    tenant_id,
+                    connection_id,
+                    entra_tenant_id,
+                    expected_state_sha256,
                 ),
             ).fetchone()
         return None if row is None else self.get_connection(tenant_id, connection_id)

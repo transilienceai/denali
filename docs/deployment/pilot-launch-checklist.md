@@ -19,7 +19,7 @@ input to Clerk and provider callbacks, and the Modal URL is an input to Vercel.
 - [x] Verify the canonical frontend and same-origin API boundary: `/` returns `200`,
   `/api/healthz` returns `200`, and unauthenticated `/api/v1/context` returns `401`.
 - [ ] Complete two-organization Clerk acceptance.
-- [ ] Configure and accept AWS, Azure, GCP, and GitHub individually.
+- [ ] Configure and accept AWS, Azure, Microsoft Entra, GCP, and GitHub individually.
 
 Production runtime:
 
@@ -193,7 +193,7 @@ Development preview deployment recorded on 2026-09-02:
 - Neon branch and database: `denali-dev`, owned by `denali_dev_owner`;
 - Vercel branch alias:
   `https://denali-git-codex-custom-clerk-profile-transilience-a55654db.vercel.app`;
-- database migrations: 12, latest `012_tenant_connection_constraints.sql`;
+- database migrations: 13, latest `013_connection_collection_jobs.sql`;
 - authenticated Account, Organization, Members, active-Organization context, and same-origin API
   routing verified from the hosted preview.
 - Profile member administration is implemented through admin-only Modal API routes: single and
@@ -210,6 +210,7 @@ If the deployed URL differs from step 1, update all of these together and redepl
 - [x] `CLERK_AUTHORIZED_PARTIES`
 - [ ] Clerk allowed origins and redirect URLs
 - [ ] `DENALI_AZURE_CONSENT_REDIRECT_URI`
+- [ ] `DENALI_ENTRA_CALLBACK_URL`
 - [ ] `DENALI_GITHUB_CALLBACK_URL`
 
 ### 8. Accept Clerk tenancy before adding providers
@@ -272,6 +273,19 @@ DENALI_GCP_RUNTIME_SERVICE_ACCOUNT
   ADC configuration to private container-local files. Do not create or commit a service-account
   JSON key.
 
+#### Microsoft Entra application evidence
+
+```text
+DENALI_ENTRA_CLIENT_ID
+DENALI_ENTRA_CLIENT_SECRET
+DENALI_ENTRA_CALLBACK_URL=https://<production-domain>/api/v1/connections/entra/setup/callback
+```
+
+- `DENALI_ENTRA_CLIENT_SECRET` is the operator secret. The client ID and callback are identifiers.
+- Register the exact same-origin callback on the multi-tenant Entra application.
+- Confirm the application exposes only `Directory.Read.All` and `AuditLog.Read.All` application
+  permissions and that the UI discloses both before redirecting the customer.
+
 #### GitHub
 
 ```text
@@ -306,6 +320,7 @@ CLERK_SECRET_KEY
 DENALI_DSN
 DENALI_MIGRATION_DSN
 DENALI_AZURE_CLIENT_SECRET                 # when Azure is enabled
+DENALI_ENTRA_CLIENT_SECRET                 # when Entra evidence is enabled
 DENALI_GITHUB_CLIENT_SECRET                # when GitHub is enabled
 DENALI_GITHUB_PRIVATE_KEY                  # when GitHub is enabled
 ```

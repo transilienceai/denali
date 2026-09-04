@@ -68,6 +68,7 @@ import type {
   AwsConnectionCreate,
   AzureConnectionCreate,
   AzureSetupLaunch,
+  EntraConnectionCreate,
   GcpConnectionCreate,
   GcpSetupLaunch,
   GitHubConnectionCreate,
@@ -171,6 +172,11 @@ type GitHubSetupReturn = {
   detail?: string;
 };
 
+type EntraSetupReturn = {
+  connectionId: string;
+  state: "succeeded" | "failed";
+};
+
 function readAzureConsentReturn(): AzureConsentReturn | null {
   const query = new URLSearchParams(window.location.search);
   const connectionId = query.get("state") ?? "";
@@ -201,8 +207,18 @@ function readGitHubSetupReturn(): GitHubSetupReturn | null {
   return { connectionId, state, detail: query.get("detail")?.slice(0, 500) || undefined };
 }
 
+function readEntraSetupReturn(): EntraSetupReturn | null {
+  const query = new URLSearchParams(window.location.search);
+  const connectionId = query.get("connection_id") ?? "";
+  const state = query.get("entra_setup");
+  if (state !== "succeeded" && state !== "failed") return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connectionId)) return null;
+  return { connectionId, state };
+}
+
 function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boolean; accountControls?: ReactNode; profilePage?: ReactNode }) {
   const [azureConsentReturn] = useState(readAzureConsentReturn);
+  const [entraSetupReturn] = useState(readEntraSetupReturn);
   const [githubSetupReturn] = useState(readGitHubSetupReturn);
   const [navigation, setNavigation] = useState<NavigationLocation>(() =>
     navigationFromUrl(window.location.href),
@@ -332,7 +348,10 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
   }, [loadAll]);
 
   const hasRunningConnection = connections.some(
-    (connection) => connection.validation_state === "running",
+    (connection) => connection.validation_state === "running"
+      || connection.evidence_collection_state === "running"
+      || connection.source_collection_state === "running"
+      || connection.deployment_collection_state === "running",
   );
 
   useEffect(() => {
@@ -364,13 +383,13 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
   }, [hasRunningConnection]);
 
   useEffect(() => {
-    if (!azureConsentReturn && !githubSetupReturn) return;
+    if (!azureConsentReturn && !entraSetupReturn && !githubSetupReturn) return;
     commitNavigation(
       "connections",
-      { connection: (azureConsentReturn ?? githubSetupReturn)!.connectionId },
+      { connection: (azureConsentReturn ?? entraSetupReturn ?? githubSetupReturn)!.connectionId },
       "replace",
     );
-  }, [azureConsentReturn, githubSetupReturn]);
+  }, [azureConsentReturn, entraSetupReturn, githubSetupReturn]);
 
   const loadRuntimeActivity = useCallback(async (includeFixtures: boolean) => {
     setError(null);
@@ -525,7 +544,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
               onNavigate={navigate}
             />
             ) : page === "connections" ? (
-            <ConnectionsPage connections={connections} selectedId={navigation.query.connection} showCreate={navigation.query.new === "1" || connections.length === 0} navigation={filterNavigation} onSelect={selectConnection} onShowCreate={showConnectionCreate} onChanged={loadAll} azureConsentReturn={azureConsentReturn} githubSetupReturn={githubSetupReturn} canWrite={canWrite} />
+            <ConnectionsPage connections={connections} selectedId={navigation.query.connection} showCreate={navigation.query.new === "1" || connections.length === 0} navigation={filterNavigation} onSelect={selectConnection} onShowCreate={showConnectionCreate} onChanged={loadAll} azureConsentReturn={azureConsentReturn} entraSetupReturn={entraSetupReturn} githubSetupReturn={githubSetupReturn} canWrite={canWrite} />
           ) : page === "inventory" ? (
             <Inventory
               assets={assets}
@@ -2114,6 +2133,13 @@ const AZURE_CONNECTION_SCOPES = [
   { id: "azure.code_to_cloud", label: "Code-to-cloud deployments", detail: "Container Apps, Function Apps, and AKS cluster identities, revisions, images, and managed identities" },
 ];
 
+const ENTRA_CONNECTION_SCOPES = [
+  { id: "entra.ai_applications", label: "AI application inventory", detail: "Catalog-matched enterprise applications and service-principal context" },
+  { id: "entra.permissions", label: "OAuth permissions", detail: "Delegated grants and application-role assignments" },
+  { id: "entra.sign_ins", label: "AI application sign-ins", detail: "Bounded sign-in metadata; no tokens or IP addresses retained" },
+  { id: "entra.directory_audits", label: "Application directory changes", detail: "Bounded application-management audit metadata" },
+];
+
 const GCP_CONNECTION_SCOPES = [
   { id: "gcp.vertex_ai", label: "Vertex AI", detail: "Runtime, model, dataset, pipeline, and notebook resources" },
   { id: "gcp.agent_builder", label: "Agent Builder and Dialogflow", detail: "Discovery Engine and conversational agent resources" },
@@ -2127,9 +2153,10 @@ const GITHUB_CONNECTION_SCOPES = [
   { id: "github.actions_workflows", label: "GitHub Actions workflows", detail: "Workflow inventory only; no workflow runs, secrets, or writes" },
 ];
 
-function connectionScopes(provider: "aws" | "azure" | "gcp" | "github") {
+function connectionScopes(provider: "aws" | "azure" | "entra" | "gcp" | "github") {
   return provider === "aws" ? AWS_CONNECTION_SCOPES
     : provider === "azure" ? AZURE_CONNECTION_SCOPES
+      : provider === "entra" ? ENTRA_CONNECTION_SCOPES
       : provider === "gcp" ? GCP_CONNECTION_SCOPES
         : GITHUB_CONNECTION_SCOPES;
 }
@@ -2143,6 +2170,7 @@ function ConnectionsPage({
   onShowCreate,
   onChanged,
   azureConsentReturn,
+  entraSetupReturn,
   githubSetupReturn,
   canWrite,
 }: {
@@ -2154,11 +2182,12 @@ function ConnectionsPage({
   onShowCreate: (visible: boolean) => void;
   onChanged: () => Promise<void>;
   azureConsentReturn: AzureConsentReturn | null;
+  entraSetupReturn: EntraSetupReturn | null;
   githubSetupReturn: GitHubSetupReturn | null;
   canWrite: boolean;
 }) {
-  const provider = (["aws", "azure", "gcp", "github"] as const).includes(navigation.values.provider as "aws" | "azure" | "gcp" | "github")
-    ? navigation.values.provider as "aws" | "azure" | "gcp" | "github"
+  const provider = (["aws", "azure", "entra", "gcp", "github"] as const).includes(navigation.values.provider as "aws" | "azure" | "entra" | "gcp" | "github")
+    ? navigation.values.provider as "aws" | "azure" | "entra" | "gcp" | "github"
     : "aws";
   const [displayName, setDisplayName] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -2168,6 +2197,7 @@ function ConnectionsPage({
   const [regions, setRegions] = useState("us-east-1");
   const [scopes, setScopes] = useState(() => connectionScopes(provider).map((scope) => scope.id));
   const [azureTenantId, setAzureTenantId] = useState("");
+  const [entraTenantId, setEntraTenantId] = useState("");
   const [azureLaunches, setAzureLaunches] = useState<Record<string, AzureSetupLaunch>>({});
   const [azureCompletionCode, setAzureCompletionCode] = useState<Record<string, string>>({});
   const [gcpLaunches, setGcpLaunches] = useState<Record<string, GcpSetupLaunch>>({});
@@ -2185,7 +2215,7 @@ function ConnectionsPage({
     if (!selected && selectedId) onSelect("", "replace");
   }, [onSelect, selected, selectedId]);
 
-  function selectProvider(next: "aws" | "azure" | "gcp" | "github") {
+  function selectProvider(next: "aws" | "azure" | "entra" | "gcp" | "github") {
     navigation.set("provider", next, "aws");
   }
 
@@ -2194,7 +2224,7 @@ function ConnectionsPage({
     setBusy("create");
     setActionError(null);
     try {
-      const payload: AwsConnectionCreate | AzureConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate = provider === "aws" ? {
+      const payload: AwsConnectionCreate | AzureConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate = provider === "aws" ? {
           provider: "aws",
           display_name: displayName,
           account_id: accountId,
@@ -2208,6 +2238,11 @@ function ConnectionsPage({
           display_name: displayName,
           tenant_id: azureTenantId,
           cloud: "AzureCloud",
+          declared_scopes: scopes,
+        } : provider === "entra" ? {
+          provider: "entra",
+          display_name: displayName,
+          tenant_id: entraTenantId,
           declared_scopes: scopes,
         } : provider === "gcp" ? {
           provider: "gcp",
@@ -2224,6 +2259,7 @@ function ConnectionsPage({
       setDisplayName("");
       setAccountId("");
       setAzureTenantId("");
+      setEntraTenantId("");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to create connection");
     } finally {
@@ -2328,6 +2364,42 @@ function ConnectionsPage({
       setAzureCompletionCode((current) => ({ ...current, [connection.id]: "" }));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to complete Azure setup");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function prepareEntraSetup(connection: Connection) {
+    setBusy(`launch:${connection.id}`);
+    setActionError(null);
+    try {
+      const launch = await api.launchEntraSetup(connection.id);
+      window.location.assign(launch.consent_url);
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Unable to open Microsoft Entra consent");
+      setBusy(null);
+    }
+  }
+
+  async function collectEntraEvidence(connection: Connection) {
+    setBusy(`collect-entra:${connection.id}`);
+    setActionError(null);
+    const previousCompletion = connection.last_evidence_collection?.completed_at ?? null;
+    try {
+      await api.collectEntraEvidence(connection.id);
+      for (let attempt = 0; attempt < 525; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        const current = await api.connection(connection.id);
+        if (current.evidence_collection_state === "running") continue;
+        if (current.last_evidence_collection?.completed_at !== previousCompletion) {
+          await onChanged();
+          return;
+        }
+        throw new Error("Microsoft Entra collection stopped before a result was recorded.");
+      }
+      throw new Error("Microsoft Entra collection is still running. Refresh shortly to see its result.");
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Unable to collect Microsoft Entra evidence");
     } finally {
       setBusy(null);
     }
@@ -2514,7 +2586,7 @@ function ConnectionsPage({
 
   return <div className="page-stack connections-page">
     <section className="page-intro connection-intro">
-      <div><span className="eyebrow">SELF-SERVICE ONBOARDING</span><h2>Connect evidence sources without handing Denali customer credentials.</h2><p>AWS uses assume-role; Azure and Google Cloud use provider-native, keyless identities; GitHub uses short-lived App installation tokens. Customers select exact cloud scopes or repositories, and every declared plane is validated separately.</p></div>
+      <div><span className="eyebrow">SELF-SERVICE ONBOARDING</span><h2>Connect evidence sources without handing Denali customer credentials.</h2><p>AWS uses assume-role; Azure and Google Cloud use provider-native, keyless identities; Entra uses a disclosed Graph read bundle with tenant-admin consent; GitHub uses short-lived App installation tokens. Every declared plane is validated separately.</p></div>
       {canWrite && <button className="primary-action" onClick={() => onShowCreate(!showCreate)}><Plus /> Add connection</button>}
     </section>
     {!canWrite && <section className="read-only-banner"><ShieldCheck /><div><strong>Read-only organization role</strong><span>An organization admin must create, validate, disable, or delete connections.</span></div></section>}
@@ -2523,16 +2595,20 @@ function ConnectionsPage({
       {azureConsentReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{azureConsentReturn.state === "succeeded" ? "Denali’s tenant identity is ready" : "Microsoft Entra could not add Denali to the tenant"}</strong><small>{azureConsentReturn.state === "succeeded" ? `Entra confirmed Denali’s enterprise application${azureConsentReturn.tenantId ? ` in tenant ${azureConsentReturn.tenantId}` : ""}. This step grants no subscription or Microsoft Graph access; selected-subscription Reader access is granted separately in Cloud Shell and verified by Denali.` : azureConsentReturn.detail}</small></span>
     </div>}
+    {entraSetupReturn && <div className={`connection-consent-return ${entraSetupReturn.state}`}>
+      {entraSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
+      <span><strong>{entraSetupReturn.state === "succeeded" ? "Microsoft Entra admin consent recorded" : "Microsoft Entra admin consent was not completed"}</strong><small>{entraSetupReturn.state === "succeeded" ? "Denali verified the one-time callback, bound the exact customer tenant, discarded the setup state, and started read-only Microsoft Graph validation." : "Return to this connection and launch consent again. No tenant access was recorded."}</small></span>
+    </div>}
     {githubSetupReturn && <div className={`connection-consent-return ${githubSetupReturn.state}`}>
       {githubSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{githubSetupReturn.state === "succeeded" ? "GitHub App installation verified" : "GitHub App installation could not be verified"}</strong><small>{githubSetupReturn.state === "succeeded" ? "Denali confirmed the signed-in installer could access this exact installation, recorded its current repository IDs, discarded the temporary user token, and started read-only validation." : githubSetupReturn.detail ?? "Return to the connection and try the GitHub App setup again."}</small></span>
     </div>}
     {actionError && <div className="connection-error"><CircleAlert /><span>{actionError}</span></div>}
     {canWrite && showCreate && <form className="panel connection-create" onSubmit={(event) => void createConnection(event)}>
-      <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
-      <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{provider === "aws" ? "Amazon Web Services" : provider === "azure" ? "Microsoft Azure" : provider === "gcp" ? "Google Cloud" : "GitHub"}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "gcp" ? "GCP" : "GITHUB"}</span></div>
+      <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
+      <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{provider === "aws" ? "Amazon Web Services" : provider === "azure" ? "Microsoft Azure" : provider === "entra" ? "Microsoft Entra" : provider === "gcp" ? "Google Cloud" : "GitHub"}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "entra" ? "A tenant administrator grants Denali application-only Microsoft Graph read permissions. Denali stores the tenant boundary, not access tokens or customer credentials." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "entra" ? "ENTRA" : provider === "gcp" ? "GCP" : "GITHUB"}</span></div>
       <div className="connection-form-grid">
-        <label><span>Connection name</span><input required maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={provider === "aws" ? "Production AWS" : provider === "azure" ? "Production Azure" : provider === "gcp" ? "Production Google Cloud" : "Production GitHub"} /></label>
+        <label><span>Connection name</span><input required maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={provider === "aws" ? "Production AWS" : provider === "azure" ? "Production Azure" : provider === "entra" ? "Production Entra" : provider === "gcp" ? "Production Google Cloud" : "Production GitHub"} /></label>
         {provider === "aws" ? <>
         <label><span>AWS account ID</span><input required inputMode="numeric" pattern="[0-9]{12}" maxLength={12} value={accountId} onChange={(event) => setAccountId(event.target.value)} placeholder="123456789012" /></label>
         <label><span>Partition</span><select value={partition} onChange={(event) => setPartition(event.target.value as AwsConnectionCreate["partition"])}><option value="aws">Commercial AWS</option><option value="aws-us-gov">AWS GovCloud</option><option value="aws-cn">AWS China</option></select></label>
@@ -2540,21 +2616,23 @@ function ConnectionsPage({
         <label><span>Inventory region coverage</span><select value={coverageMode} onChange={(event) => setCoverageMode(event.target.value as AwsConnectionCreate["coverage_mode"])}><option value="automatic">All enabled regions (recommended)</option><option value="selected">Selected regions only</option></select><small>Automatic mode rediscovers enabled and opted-in regions on every validation.</small></label>
         {coverageMode === "selected" && <label><span>Selected inventory regions</span><input required value={regions} onChange={(event) => setRegions(event.target.value)} placeholder="us-east-1, us-west-2" /><small>Coverage outside this explicit allowlist will be reported as excluded.</small></label>}</> : provider === "azure" ? <>
         <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={azureTenantId} onChange={(event) => setAzureTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>Cloud Shell will enumerate enabled subscriptions in this tenant and let you choose.</small></label>
-        <label><span>Resource location coverage</span><input value="All locations in selected subscriptions" disabled /><small>Azure Resource Graph queries are subscription-wide; no single region limits coverage.</small></label></> : provider === "gcp" ? <>
+        <label><span>Resource location coverage</span><input value="All locations in selected subscriptions" disabled /><small>Azure Resource Graph queries are subscription-wide; no single region limits coverage.</small></label></> : provider === "entra" ? <>
+        <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={entraTenantId} onChange={(event) => setEntraTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>The admin-consent request is pinned to this exact directory and the callback must return the same tenant.</small></label>
+        <label><span>Directory boundary</span><input value="Exact tenant, all selected Graph planes" disabled /><small>Denali requests application-only read access. No delegated user session is retained.</small></label></> : provider === "gcp" ? <>
         <label><span>Project selection</span><input value="Choose in Google Cloud Shell" disabled /><small>Cloud Shell enumerates active projects visible to your signed-in Google identity and lets you choose.</small></label>
         <label><span>Resource location coverage</span><input value="All locations in selected projects" disabled /><small>Cloud Asset Inventory queries are project-wide; no preferred region limits coverage.</small></label></> : <>
         <label><span>Repository selection</span><input value="Choose in GitHub" disabled /><small>GitHub’s installation page lets you select repositories in one user or organization account.</small></label>
         <label><span>Token boundary</span><input value="One exact repository per short-lived token" disabled /><small>Denali records immutable repository IDs and does not silently include repositories added later.</small></label></>}
       </div>
-      <fieldset className="connection-scope-picker"><legend>Declared collection planes</legend>{(provider === "aws" ? AWS_CONNECTION_SCOPES : provider === "azure" ? AZURE_CONNECTION_SCOPES : provider === "gcp" ? GCP_CONNECTION_SCOPES : GITHUB_CONNECTION_SCOPES).map((scope) => <label key={scope.id}><input type="checkbox" checked={scopes.includes(scope.id)} onChange={() => toggleScope(scope.id)} /><span><strong>{scope.label}</strong><small>{scope.detail}</small></span></label>)}</fieldset>
+      <fieldset className="connection-scope-picker"><legend>{provider === "entra" ? "Required Entra evidence bundle" : "Declared collection planes"}</legend>{connectionScopes(provider).map((scope) => <label key={scope.id}><input type="checkbox" checked={scopes.includes(scope.id)} disabled={provider === "entra"} onChange={() => toggleScope(scope.id)} /><span><strong>{scope.label}</strong><small>{scope.detail}</small></span></label>)}</fieldset>
       <div className="connection-form-actions"><button type="button" onClick={() => onShowCreate(false)}>Cancel</button><button className="primary-action" type="submit" disabled={busy === "create" || scopes.length === 0}>{busy === "create" ? "Creating…" : "Create onboarding plan"}</button></div>
     </form>}
     <div className="connections-layout">
       <section className="panel connection-list-panel">
         <PanelHeader eyebrow="SOURCES" title={`${connections.length} connection${connections.length === 1 ? "" : "s"}`} />
-        <div className="connection-list">{connections.map((connection) => <button key={connection.id} className={selected?.id === connection.id ? "active" : ""} onClick={() => onSelect(connection.id)}><span className="connection-provider-icon"><CloudCog /></span><span><strong>{connection.display_name}</strong><small>{connection.provider === "aws" ? `${connection.configuration.account_id} · ${(connection.configuration.coverage_mode ?? "automatic") === "automatic" ? "all enabled regions" : (connection.configuration.regions ?? []).join(", ")}` : connection.provider === "azure" ? `${connection.configuration.tenant_id} · ${connection.configuration.subscriptions?.length ?? 0} selected subscriptions` : connection.provider === "gcp" ? `${connection.configuration.projects?.length ?? 0} selected projects` : `${connection.configuration.account_login ?? "not installed"} · ${connection.configuration.repositories?.length ?? 0} exact repositories`}</small></span><ConnectionHealth state={connection.health_state} /></button>)}{connections.length === 0 && <div className="empty-state"><CloudCog /><strong>No connections configured</strong><span>Create an AWS, Azure, Google Cloud, or GitHub onboarding plan to begin.</span></div>}</div>
+        <div className="connection-list">{connections.map((connection) => <button key={connection.id} className={selected?.id === connection.id ? "active" : ""} onClick={() => onSelect(connection.id)}><span className="connection-provider-icon"><CloudCog /></span><span><strong>{connection.display_name}</strong><small>{connection.provider === "aws" ? `${connection.configuration.account_id} · ${(connection.configuration.coverage_mode ?? "automatic") === "automatic" ? "all enabled regions" : (connection.configuration.regions ?? []).join(", ")}` : connection.provider === "azure" ? `${connection.configuration.tenant_id} · ${connection.configuration.subscriptions?.length ?? 0} selected subscriptions` : connection.provider === "entra" ? `${connection.configuration.tenant_id} · tenant-wide Graph read` : connection.provider === "gcp" ? `${connection.configuration.projects?.length ?? 0} selected projects` : `${connection.configuration.account_login ?? "not installed"} · ${connection.configuration.repositories?.length ?? 0} exact repositories`}</small></span><ConnectionHealth state={connection.health_state} /></button>)}{connections.length === 0 && <div className="empty-state"><CloudCog /><strong>No connections configured</strong><span>Create an AWS, Azure, Entra, Google Cloud, or GitHub onboarding plan to begin.</span></div>}</div>
       </section>
-      {selected && <div className={canWrite ? "" : "read-only-detail"}><ConnectionDetail connection={selected} busy={busy} navigation={navigation} azureLaunch={azureLaunches[selected.id]} azureCompletionCode={azureCompletionCode[selected.id] ?? ""} onAzureCompletionCode={(value) => setAzureCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareAzure={() => void prepareAzureSetup(selected)} onCompleteAzure={() => void completeAzureSetup(selected)} onCollectAzure={() => void collectAzureDeployments(selected)} gcpLaunch={gcpLaunches[selected.id]} gcpCompletionCode={gcpCompletionCode[selected.id] ?? ""} onGcpCompletionCode={(value) => setGcpCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareGcp={() => void prepareGcpSetup(selected)} onCompleteGcp={() => void completeGcpSetup(selected)} onCollectGcp={() => void collectGcpDeployments(selected)} onCollectAws={() => void collectAwsDeployments(selected)} onPrepareGitHub={() => void prepareGitHubSetup(selected)} onCollectGitHub={() => void collectGitHubSource(selected)} onLaunch={() => void launchConnection(selected)} onDownload={() => void downloadCloudFormation(selected)} onValidate={() => void validateConnection(selected)} onDisable={() => void disableConnection(selected)} onDelete={() => void deleteConnection(selected)} /></div>}
+      {selected && <div className={canWrite ? "" : "read-only-detail"}><ConnectionDetail connection={selected} busy={busy} navigation={navigation} azureLaunch={azureLaunches[selected.id]} azureCompletionCode={azureCompletionCode[selected.id] ?? ""} onAzureCompletionCode={(value) => setAzureCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareAzure={() => void prepareAzureSetup(selected)} onCompleteAzure={() => void completeAzureSetup(selected)} onCollectAzure={() => void collectAzureDeployments(selected)} onPrepareEntra={() => void prepareEntraSetup(selected)} onCollectEntra={() => void collectEntraEvidence(selected)} gcpLaunch={gcpLaunches[selected.id]} gcpCompletionCode={gcpCompletionCode[selected.id] ?? ""} onGcpCompletionCode={(value) => setGcpCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareGcp={() => void prepareGcpSetup(selected)} onCompleteGcp={() => void completeGcpSetup(selected)} onCollectGcp={() => void collectGcpDeployments(selected)} onCollectAws={() => void collectAwsDeployments(selected)} onPrepareGitHub={() => void prepareGitHubSetup(selected)} onCollectGitHub={() => void collectGitHubSource(selected)} onLaunch={() => void launchConnection(selected)} onDownload={() => void downloadCloudFormation(selected)} onValidate={() => void validateConnection(selected)} onDisable={() => void disableConnection(selected)} onDelete={() => void deleteConnection(selected)} /></div>}
     </div>
   </div>;
 }
@@ -2564,8 +2642,9 @@ function ConnectionHealth({ state }: { state: Connection["health_state"] }) {
   return <span className={`connection-health ${state}`}><Icon />{titleCase(state)}</span>;
 }
 
-function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareEntra, onCollectEntra, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
   if (connection.provider === "azure") return <AzureConnectionDetail connection={connection} busy={busy} launch={azureLaunch} completionCode={azureCompletionCode} onCompletionCode={onAzureCompletionCode} onPrepare={onPrepareAzure} onComplete={onCompleteAzure} onCollect={onCollectAzure} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
+  if (connection.provider === "entra") return <EntraConnectionDetail connection={connection} busy={busy} onPrepare={onPrepareEntra} onCollect={onCollectEntra} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "gcp") return <GcpConnectionDetail connection={connection} busy={busy} launch={gcpLaunch} completionCode={gcpCompletionCode} onCompletionCode={onGcpCompletionCode} onPrepare={onPrepareGcp} onComplete={onCompleteGcp} onCollect={onCollectGcp} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "github") return <GitHubConnectionDetail connection={connection} busy={busy} navigation={navigation} onPrepare={onPrepareGitHub} onCollect={onCollectGitHub} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   const validation = connection.last_validation;
@@ -2601,6 +2680,28 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
     <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed account {validation.account_id_observed ?? "not established"}</small></div>{regionDiscovery && <div className={`region-discovery ${regionDiscovery.state}`}><span>{regionDiscovery.state === "passed" ? <CircleCheck /> : regionDiscovery.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{coverageMode === "automatic" ? "Automatic enabled-region coverage" : "Selected-region coverage"}</strong><p>{regionDiscovery.detail}</p>{regionDiscovery.discovered_regions && regionDiscovery.discovered_regions.length > 0 && <small>{regionDiscovery.discovered_regions.join(", ")}</small>}{regionDiscovery.excluded_enabled_regions && regionDiscovery.excluded_enabled_regions.length > 0 && <small className="excluded-regions">Outside declared scope: {regionDiscovery.excluded_enabled_regions.join(", ")}</small>}</div></div>}<div className="validation-plane-rollup">{planeSummaries.map((summary) => <div className={summary.failed || summary.unknown ? "attention" : "complete"} key={summary.label}><span>{summary.failed || summary.unknown ? <CircleAlert /> : <CircleCheck />}</span><div><strong>{summary.label}</strong><small>{summary.total} Region checks</small></div><div className="rollup-counts"><b className="passed">{summary.passed} passed</b>{summary.notApplicable > 0 && <b>{summary.notApplicable} not applicable</b>}{summary.failed > 0 && <b className="failed">{summary.failed} failed</b>}{summary.unknown > 0 && <b className="failed">{summary.unknown} unknown</b>}</div></div>)}</div><details className="plane-validation-results"><summary>View all {planeResults.length} raw plane/Region results</summary><div className="validation-grid">{planeResults.map((result) => <div key={`${result.scope}:${result.plane}:${result.region}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.region} · {result.state === "not_applicable" ? "Not applicable" : titleCase(result.plane)}</small><p>{result.detail}</p></div></div>)}</div></details></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>No coverage conclusion is available until the stack is deployed and validation runs.</small></span></div>}</div>
     <details className="connection-permissions"><summary>Review {permissions.length} declared permissions</summary><div>{permissions.map((permission) => <code key={permission}>{permission}</code>)}</div><p>The downloaded role also includes bounded read-only permissions for future explicit stack scopes. Those custom stack planes are not configured or claimed here.</p></details>
     <div className="connection-safeguards"><div><strong>Connection lifecycle</strong><span>Disabling prevents further validation. Deleting removes only connection configuration and validation history; collected evidence remains.</span></div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disable</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete configuration</button>}</div>
+  </section>;
+}
+
+function EntraConnectionDetail({ connection, busy, onPrepare, onCollect, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; onPrepare: () => void; onCollect: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+  const validation = connection.last_validation;
+  const setupComplete = connection.configuration.onboarding?.status === "completed";
+  const preparing = busy === `launch:${connection.id}`;
+  const validating = connection.validation_state === "running" || busy === `validate:${connection.id}`;
+  const collecting = connection.evidence_collection_state === "running" || busy === `collect-entra:${connection.id}`;
+  const collection = connection.last_evidence_collection;
+  const permissions = [...new Set(connection.coverage_plan.flatMap((item) => item.permissions))].sort();
+  return <section className="panel connection-detail">
+    <div className="connection-detail-head"><div><span>MICROSOFT ENTRA</span><h3>{connection.display_name}</h3><code>Tenant {connection.configuration.tenant_id}</code></div><ConnectionHealth state={connection.health_state} /></div>
+    <div className="setup-progress">
+      <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>The exact customer tenant and disclosed Microsoft Graph evidence bundle are recorded. No delegated user session, customer secret, or access token is stored.</small></div></div>
+      <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Grant tenant-wide admin consent</strong><small>A Global Administrator reviews and grants Directory.Read.All and AuditLog.Read.All to Denali’s multitenant application. Microsoft returns through a verified, expiring, one-time callback bound to this connection.</small><button className="primary-action" disabled={preparing || !connection.setup_capabilities.entra_admin_consent} onClick={onPrepare}><ExternalLink />{preparing ? "Opening Microsoft consent…" : setupComplete ? "Grant consent again" : "Review and grant consent"}</button>{!connection.setup_capabilities.entra_admin_consent && <small className="launch-unavailable">Entra onboarding requires Denali’s configured multitenant application and same-origin callback.</small>}</div></div>
+      <div className={validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Validate every Graph plane</strong><small>Denali mints a short-lived application token for this exact tenant and tests each declared read plane independently.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating Microsoft Entra…" : validation ? "Validate again" : "Validate connection"}</button>}</div></div>
+      <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect AI application evidence</strong><small>Denali inventories catalog-matched enterprise applications, grants, application permissions, bounded sign-in metadata, and application-management audits. Access tokens and raw Graph payloads are not retained.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={collecting || validating || connection.health_state !== "healthy"} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting Entra evidence…" : collection ? "Collect evidence again" : "Collect Entra evidence"}</button>}{collection && <small className="validation-progress-note">{collection.matched_ai_applications ?? 0} matched AI applications · {collection.activity_events ?? 0} activity events · {collection.coverage_complete ?? 0} complete planes · finished {formatTime(collection.completed_at)}</small>}</div></div>
+    </div>
+    <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed tenant {validation.account_id_observed ?? "not established"}</small></div><div className="validation-grid">{validation.results.map((result) => <div key={`${result.tenant_id}:${result.plane}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{titleCase(result.plane)} · tenant-wide</small><p>{result.detail}</p></div></div>)}</div></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>Grant Microsoft Entra admin consent before validation.</small></span></div>}</div>
+    <details className="connection-permissions"><summary>Review {permissions.length || 2} Microsoft Graph application permissions</summary><div>{(permissions.length ? permissions : ["Directory.Read.All", "AuditLog.Read.All"]).map((permission) => <code key={permission}>{permission}</code>)}</div><p>These are application-only read permissions. Denali cannot create users, change applications, grant consent, modify policies, read mail, or remediate the tenant.</p></details>
+    <div className="connection-safeguards"><div><strong>Connection lifecycle</strong><span>Disabling prevents further validation and collection. Deleting removes Denali’s connection configuration and validation/job history; revoke the enterprise application consent separately in Microsoft Entra. Previously collected evidence remains.</span></div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disable</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete configuration</button>}</div>
   </section>;
 }
 
