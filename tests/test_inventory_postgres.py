@@ -498,6 +498,30 @@ def test_entra_consent_state_and_collection_jobs_are_tenant_bound_and_durable(
     assert status["state"] == "idle"
     assert status["last_result"]["state"] == "complete"
 
+    for collection_kind in (
+        "aws_deployments",
+        "azure_deployments",
+        "gcp_deployments",
+        "github_source",
+    ):
+        provider_job, provider_created = repo.create_connection_collection_job(
+            tenant,
+            connection_id,
+            collection_kind=collection_kind,
+        )
+        assert provider_created is True
+        assert provider_job["collection_kind"] == collection_kind
+        repo.fail_connection_collection_job(
+            str(provider_job["id"]), "fixture dispatch failure"
+        )
+        provider_status = repo.connection_collection_status(
+            tenant,
+            connection_id,
+            collection_kind=collection_kind,
+        )
+        assert provider_status["last_result"]["state"] == "failed"
+        assert provider_status["last_result"]["detail"] == "fixture dispatch failure"
+
 
 def test_connection_lifecycle_retains_collected_evidence(repository) -> None:
     tenant, repo = repository

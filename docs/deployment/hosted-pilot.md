@@ -19,11 +19,9 @@ pushed directly to `main`, and production deployment is a separate post-merge ac
 Provider connections retain their current boundary: they onboard and validate access. They do
 not schedule or run collectors automatically.
 
-Connection validation is durable because it uses a PostgreSQL job and a separately spawned Modal
-worker. The current manually triggered GitHub source and cloud deployment collection endpoints run
-inside the Modal API container with FastAPI background tasks; they are not restart-safe. Do not
-extend that pattern. Migrate collection to PostgreSQL-backed Modal jobs before treating collection
-as a reliable hosted production workflow.
+Connection validation and manually triggered provider collection are durable: the API writes a
+PostgreSQL job and separately spawns the applicable Modal worker. Status polling reads PostgreSQL,
+so work and terminal results survive API-container replacement.
 
 ## 1. Create the Neon database
 

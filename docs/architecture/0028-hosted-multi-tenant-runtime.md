@@ -4,9 +4,8 @@
 
 Accepted and deployed for the invitation-only pilot on 2026-09-01. The web application,
 same-origin API proxy, Clerk Organization authorization, Modal API, durable connection-validation
-worker, and Neon schema are live. Provider integrations still require individual production
-configuration and hosted acceptance. Provider collection jobs are not yet restart-safe and remain
-a documented migration item.
+worker, durable provider-collection workers, and Neon schema are live. Provider integrations still
+require individual production configuration and hosted acceptance.
 
 ## Decision
 
@@ -17,6 +16,7 @@ Browser
   -> Vercel: React/Vite application and same-origin /api/* rewrite
   -> Modal: FastAPI authorization/API boundary
        -> Modal validation_worker: durable connection validation
+       -> Modal collection_worker: durable provider collection
   -> Neon: PostgreSQL system of record
 
 Clerk Organizations
@@ -92,12 +92,10 @@ All new hosted work that can outlive a request must follow this pattern: durable
 claim, explicit lease/timeout, Modal worker receiving durable identifiers, database-backed status,
 sanitized terminal result, and safe retry/deduplication behavior.
 
-The current GitHub source and AWS/Azure/GCP deployment collection endpoints predate this standard.
-They use FastAPI `BackgroundTasks`, process-local locks, and process-local last-result dictionaries.
-They can run in the Modal API container but are not durable across container replacement or scale
-out. They must be migrated to PostgreSQL collection jobs and dedicated Modal workers before they
-are treated as reliable hosted production workflows. New code must not extend this temporary
-pattern.
+Microsoft Entra evidence, GitHub source, and AWS/Azure/GCP deployment collection all use
+`connection_collection_job` records and the dedicated Modal `collection_worker`. The API returns
+after the durable job is recorded and dispatched; polling reads PostgreSQL, so completion does not
+depend on the accepting API container remaining alive.
 
 ## Database connections and migrations
 
@@ -172,8 +170,9 @@ the same canonical web domain under `/api/v1/connections/...`; they never expose
 as the product callback URL.
 
 The Modal application contains separate functions for the ASGI API, database migration, database
-status, configuration status, and validation worker. The pilot keeps a warm API container, but
-correctness must not depend on its lifetime or on requests reaching the same container.
+status, configuration status, validation worker, and collection worker. The pilot keeps a warm API
+container, but correctness must not depend on its lifetime or on requests reaching the same
+container.
 
 `DENALI_MODAL_REGION`, `DENALI_MODAL_APP_NAME`, `DENALI_MODAL_SECRET_NAME`, and
 `DENALI_MODAL_PROVIDER_SECRET_NAME` are deploy-shell configuration because Modal resolves
@@ -210,5 +209,4 @@ are separate acceptance planes; one cannot stand in for the other.
 - Neon stays compatible with the existing PostgreSQL repository and transaction semantics.
 - Customer cloud access is revocable at the provider and does not require Denali to retain
   long-lived customer secrets.
-- Durable validation meets the pilot requirement. Durable hosted collection remains explicit work
-  rather than an implied property of running collectors in the API container.
+- Durable validation and provider collection survive API-container replacement and scale-out.

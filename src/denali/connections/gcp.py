@@ -358,6 +358,16 @@ def _gcp_error_code(error: Exception) -> str:
         if isinstance(payload, dict):
             nested = payload.get("error")
             if isinstance(nested, dict):
+                details = nested.get("details")
+                if isinstance(details, list):
+                    for detail in details:
+                        if not isinstance(detail, dict):
+                            continue
+                        reason = detail.get("reason")
+                        if isinstance(reason, str) and re.fullmatch(
+                            r"[A-Z][A-Z0-9_]{1,63}", reason
+                        ):
+                            return reason
                 if nested.get("status"):
                     return str(nested["status"])
                 if nested.get("code"):

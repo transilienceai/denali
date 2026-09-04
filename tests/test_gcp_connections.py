@@ -15,6 +15,7 @@ from denali.connections import (
     GcpSetupScriptLauncher,
     gcp_coverage_plan,
 )
+from denali.connections.gcp import _gcp_error_code
 
 PRINCIPAL_EMAIL = "denali-audit@denali-operator.iam.gserviceaccount.com"
 PROJECT_ONE = "production-ai-12345"
@@ -281,6 +282,9 @@ def test_gcp_setup_selects_projects_without_customer_credentials() -> None:
         assert "Select projects by number" in script
         assert "roles/cloudasset.viewer" in script
         assert "roles/logging.viewer" in script
+        assert "cloudasset.googleapis.com" in script
+        assert "logging.googleapis.com" in script
+        assert "gcloud services enable" in script
         assert "service account key" not in script.lower()
 
         projects = [
@@ -378,6 +382,32 @@ class FakeResponse:
 
     def json(self) -> dict[str, Any]:
         return self.payload
+
+
+class FakeHttpError(RuntimeError):
+    def __init__(self, payload: dict[str, Any]):
+        super().__init__("provider payload must not be exposed")
+        self.response = FakeResponse(payload)
+
+
+def test_gcp_error_prefers_safe_provider_reason_over_generic_status() -> None:
+    error = FakeHttpError(
+        {
+            "error": {
+                "code": 403,
+                "status": "PERMISSION_DENIED",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "SERVICE_DISABLED",
+                        "metadata": {"consumer": "projects/secret-customer-project"},
+                    }
+                ],
+            }
+        }
+    )
+
+    assert _gcp_error_code(error) == "SERVICE_DISABLED"
 
 
 def test_gcp_validation_is_project_specific_and_all_locations() -> None:

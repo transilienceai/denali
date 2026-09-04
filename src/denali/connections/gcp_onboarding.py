@@ -16,7 +16,7 @@ from denali.connections.gcp import (
     valid_gcp_service_account_email,
 )
 
-GCP_ONBOARDING_SCRIPT_VERSION = "denali-gcp-project-reader-v1"
+GCP_ONBOARDING_SCRIPT_VERSION = "denali-gcp-project-reader-v2"
 
 
 class GcpConnectionPrincipalProvisioner:
@@ -167,6 +167,7 @@ set -euo pipefail
 DENALI_PRINCIPAL_EMAIL='{principal_email}'
 DENALI_SETUP_TOKEN='{completion_token}'
 DENALI_ROLES=('roles/cloudasset.viewer' 'roles/logging.viewer')
+DENALI_REQUIRED_SERVICES=('cloudasset.googleapis.com' 'logging.googleapis.com')
 
 command -v gcloud >/dev/null || {{ echo 'Google Cloud CLI is required.' >&2; exit 1; }}
 command -v jq >/dev/null || {{ echo 'jq is required.' >&2; exit 1; }}
@@ -216,6 +217,10 @@ fi
 DENALI_SELECTED_JSON='[]'
 for selected in "${{DENALI_SELECTED[@]}}"; do
   IFS=$'\t' read -r project_id project_name project_number <<< "$selected"
+  echo "Enabling required inventory APIs for $project_name ($project_id)..."
+  gcloud services enable "${{DENALI_REQUIRED_SERVICES[@]}}" \
+    --project "$project_id" \
+    --quiet >/dev/null
   echo "Granting Denali bounded read access to $project_name ($project_id)..."
   for role in "${{DENALI_ROLES[@]}}"; do
     gcloud projects add-iam-policy-binding "$project_id" \

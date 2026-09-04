@@ -8,11 +8,11 @@ from denali.api.collection import run_durable_collection_job
 
 
 class DurableCollectionRepository:
-    def __init__(self, *, stale_running: bool = False):
+    def __init__(self, *, stale_running: bool = False, collection_kind: str = "entra_ai"):
         self.job = {
             "tenant_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "connection_id": "11111111-1111-4111-8111-111111111111",
-            "collection_kind": "entra_ai",
+            "collection_kind": collection_kind,
             "state": "running" if stale_running else "queued",
             "lease_expired": stale_running,
             "attempt_count": 0,
@@ -81,6 +81,32 @@ def test_collection_job_survives_api_replacement_and_duplicate_worker_delivery()
         "state": "complete",
         "connection_id": "11111111-1111-4111-8111-111111111111",
     }
+
+
+@pytest.mark.parametrize(
+    "collection_kind",
+    [
+        "aws_deployments",
+        "azure_deployments",
+        "entra_ai",
+        "gcp_deployments",
+        "github_source",
+    ],
+)
+def test_every_provider_collection_kind_uses_the_durable_worker(
+    collection_kind: str,
+) -> None:
+    repository = DurableCollectionRepository(collection_kind=collection_kind)
+    collector = Collector()
+
+    run_durable_collection_job(
+        repository,
+        {collection_kind: collector},
+        "job-fixture",
+    )
+
+    assert collector.calls == 1
+    assert repository.job["state"] == "succeeded"
 
 
 def test_collection_job_reclaims_a_stale_worker_lease() -> None:

@@ -21,18 +21,17 @@ the `transilienceai` organization, not an individual account.
 | App slug | `transilience-denali` |
 | App ID | `4776431` |
 | Public link | <https://github.com/apps/transilience-denali> |
-| Homepage URL | `http://127.0.0.1:3080` |
-| Callback URL | `http://127.0.0.1:8088/v1/connections/github/oauth/callback` |
-| Setup URL | `http://127.0.0.1:8088/v1/connections/github/setup/callback` |
+| Production Homepage URL | `https://denali.transilience.cloud/` |
+| Production Callback URL | `https://denali.transilience.cloud/api/v1/connections/github/oauth/callback` |
+| Production Setup URL | `https://denali.transilience.cloud/api/v1/connections/github/setup/callback` |
 | Webhooks | Disabled |
 | Request user authorization (OAuth) during installation | Disabled |
 | Device flow | Disabled |
 | Repository permissions | Metadata: read-only, Contents: read-only, Actions: read-only |
 | Installation target | Any account |
 
-The localhost URLs match the local Docker deployment. When Denali moves to its hosted
-domain, edit Homepage, Callback, and Setup URLs on the app's settings page — nothing
-needs to be re-registered.
+For local-only App registration, use the equivalent localhost routes. The production App must keep
+the three hosted values above; the `/api` prefix is required by the Vercel same-origin rewrite.
 
 ## Screenshots
 
@@ -93,8 +92,7 @@ DENALI_GITHUB_CLIENT_SECRET=REPLACE_ME
 DENALI_GITHUB_APP_SLUG=transilience-denali
 DENALI_GITHUB_PRIVATE_KEY_FILE=/path/to/transilience-denali.private-key.pem
 # Optional; defaults to the local callback below.
-DENALI_GITHUB_CALLBACK_URL=http://127.0.0.1:8088/v1/connections/github/oauth/callback
+DENALI_GITHUB_CALLBACK_URL=https://denali.transilience.cloud/api/v1/connections/github/oauth/callback
 ```
 
-`DENALI_GITHUB_CALLBACK_URL` and the URLs registered on the app must stay in sync when
-the deployment moves off localhost.
+`DENALI_GITHUB_CALLBACK_URL` and the URL registered on the production App must stay in sync.

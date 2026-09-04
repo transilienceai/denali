@@ -114,16 +114,30 @@ def _dispatch_validation(job_id: str) -> str:
     **_region_options(),
 )
 def collection_worker(job_id: str) -> None:
-    from denali.api.app import _entra_consent_client_from_environment
+    from denali.api.app import (
+        _entra_consent_client_from_environment,
+        _github_app_from_environment,
+    )
     from denali.api.collection import run_durable_collection_job
+    from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
+    from denali.connectors.azure_deployments import AzureConnectionDeploymentCollector
     from denali.connectors.entra_connection import EntraConnectionCollector
+    from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
+    from denali.connectors.github_repository import GitHubRepositoryCollector
     from denali.store.repository import PostgresInventoryRepository
 
+    _configure_aws_oidc()
+    _configure_gcp_oidc()
     entra_client = _entra_consent_client_from_environment()
+    github_app = _github_app_from_environment()
     run_durable_collection_job(
         PostgresInventoryRepository(os.environ["DENALI_DSN"]),
         {
+            "aws_deployments": AwsConnectionDeploymentCollector(),
+            "azure_deployments": AzureConnectionDeploymentCollector(),
             "entra_ai": EntraConnectionCollector(entra_client) if entra_client else None,
+            "gcp_deployments": GcpConnectionDeploymentCollector(),
+            "github_source": GitHubRepositoryCollector(github_app) if github_app else None,
         },
         job_id,
     )

@@ -136,6 +136,8 @@ class InventoryReader(Protocol):
 
     def set_connection_collection_call_id(self, job_id: str, call_id: str) -> None: ...
 
+    def fail_connection_collection_job(self, job_id: str, summary: str) -> None: ...
+
     def record_connection_collection_failure(
         self, job_id: str, summary: str, *, max_attempts: int
     ) -> bool: ...
@@ -786,26 +788,28 @@ def create_app(
         background_tasks.add_task(run_validation)
         return {"status": "started", "connection_id": connection_id}
 
-    def queue_entra_collection(
+    def queue_durable_collection(
         request: Request,
         background_tasks: BackgroundTasks,
         repo: InventoryReader,
         current_tenant: str,
         target: dict[str, Any],
-    ) -> dict[str, str]:
+        *,
+        collection_kind: str,
+        collector: Any,
+        unavailable_detail: str,
+        dispatch_failure_detail: str,
+    ) -> dict[str, str] | None:
         connection_id = str(target["id"])
-        collector = request.app.state.entra_connection_collector
         if collector is None:
-            raise HTTPException(
-                status_code=503, detail="Microsoft Entra collection is not configured"
-            )
+            raise HTTPException(status_code=503, detail=unavailable_detail)
         create_job = getattr(repo, "create_connection_collection_job", None)
         if create_job is None:
-            raise HTTPException(status_code=503, detail="durable collection storage is unavailable")
+            return None
         job, created = create_job(
             current_tenant,
             connection_id,
-            collection_kind="entra_ai",
+            collection_kind=collection_kind,
         )
         if not created:
             return {"status": "already_running", "connection_id": connection_id}
@@ -817,22 +821,48 @@ def create_app(
                 if call_id:
                     repo.set_connection_collection_call_id(job_id, call_id)
             except Exception as error:
-                repo.record_connection_collection_failure(
-                    job_id,
-                    "Unable to dispatch collection worker.",
-                    max_attempts=1,
-                )
+                fail_job = getattr(repo, "fail_connection_collection_job", None)
+                if fail_job is not None:
+                    fail_job(job_id, "Unable to dispatch collection worker.")
+                else:
+                    repo.record_connection_collection_failure(
+                        job_id,
+                        "Unable to dispatch collection worker.",
+                        max_attempts=1,
+                    )
                 raise HTTPException(
-                    status_code=503, detail="Unable to dispatch Microsoft Entra collection"
+                    status_code=503, detail=dispatch_failure_detail
                 ) from error
         else:
             background_tasks.add_task(
                 run_durable_collection_job,
                 repo,
-                {"entra_ai": collector},
+                {collection_kind: collector},
                 job_id,
             )
         return {"status": "started", "connection_id": connection_id}
+
+    def queue_entra_collection(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        repo: InventoryReader,
+        current_tenant: str,
+        target: dict[str, Any],
+    ) -> dict[str, str]:
+        result = queue_durable_collection(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            target,
+            collection_kind="entra_ai",
+            collector=request.app.state.entra_connection_collector,
+            unavailable_detail="Microsoft Entra collection is not configured",
+            dispatch_failure_detail="Unable to dispatch Microsoft Entra collection",
+        )
+        if result is None:
+            raise HTTPException(status_code=503, detail="durable collection storage is unavailable")
+        return result
 
     def queue_github_collection(
         request: Request,
@@ -844,10 +874,19 @@ def create_app(
         connection_id = str(target["id"])
         connection_key = (current_tenant, connection_id)
         collector = request.app.state.github_repository_collector
-        if collector is None:
-            raise HTTPException(
-                status_code=503, detail="GitHub source collection is not configured"
-            )
+        durable_result = queue_durable_collection(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            target,
+            collection_kind="github_source",
+            collector=collector,
+            unavailable_detail="GitHub source collection is not configured",
+            dispatch_failure_detail="Unable to dispatch GitHub source collection",
+        )
+        if durable_result is not None:
+            return durable_result
         collection_lock = request.app.state.github_collection_lock
         active_collections = request.app.state.active_github_collections
         with collection_lock:
@@ -891,6 +930,19 @@ def create_app(
         connection_id = str(target["id"])
         connection_key = (current_tenant, connection_id)
         collector = request.app.state.gcp_deployment_collector
+        durable_result = queue_durable_collection(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            target,
+            collection_kind="gcp_deployments",
+            collector=collector,
+            unavailable_detail="Google Cloud deployment collection is not configured",
+            dispatch_failure_detail="Unable to dispatch Google Cloud deployment collection",
+        )
+        if durable_result is not None:
+            return durable_result
         collection_lock = request.app.state.gcp_deployment_collection_lock
         active_collections = request.app.state.active_gcp_deployment_collections
         with collection_lock:
@@ -936,6 +988,19 @@ def create_app(
         connection_id = str(target["id"])
         connection_key = (current_tenant, connection_id)
         collector = request.app.state.aws_deployment_collector
+        durable_result = queue_durable_collection(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            target,
+            collection_kind="aws_deployments",
+            collector=collector,
+            unavailable_detail="AWS deployment collection is not configured",
+            dispatch_failure_detail="Unable to dispatch AWS deployment collection",
+        )
+        if durable_result is not None:
+            return durable_result
         collection_lock = request.app.state.aws_deployment_collection_lock
         active_collections = request.app.state.active_aws_deployment_collections
         with collection_lock:
@@ -981,6 +1046,19 @@ def create_app(
         connection_id = str(target["id"])
         connection_key = (current_tenant, connection_id)
         collector = request.app.state.azure_deployment_collector
+        durable_result = queue_durable_collection(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            target,
+            collection_kind="azure_deployments",
+            collector=collector,
+            unavailable_detail="Azure deployment collection is not configured",
+            dispatch_failure_detail="Unable to dispatch Azure deployment collection",
+        )
+        if durable_result is not None:
+            return durable_result
         collection_lock = request.app.state.azure_deployment_collection_lock
         active_collections = request.app.state.active_azure_deployment_collections
         with collection_lock:
@@ -2156,16 +2234,28 @@ def create_app(
                 status_code=409,
                 detail="wait for the active validation to finish before disabling",
             )
-        if target["provider"] == "entra":
-            collection_status = getattr(repo, "connection_collection_status", None)
-            if collection_status is not None and collection_status(
+        collection_kind_by_provider = {
+            "aws": ("aws_deployments", "AWS deployment"),
+            "azure": ("azure_deployments", "Azure deployment"),
+            "entra": ("entra_ai", "evidence"),
+            "gcp": ("gcp_deployments", "GCP deployment"),
+            "github": ("github_source", "source"),
+        }
+        collection_status = getattr(repo, "connection_collection_status", None)
+        durable_collection = collection_kind_by_provider.get(str(target["provider"]))
+        if collection_status is not None and durable_collection is not None:
+            collection_kind, collection_label = durable_collection
+            if collection_status(
                 current_tenant,
                 str(connection_id),
-                collection_kind="entra_ai",
+                collection_kind=collection_kind,
             )["state"] == "running":
                 raise HTTPException(
                     status_code=409,
-                    detail="wait for the active evidence collection to finish before disabling",
+                    detail=(
+                        f"wait for the active {collection_label} collection to finish "
+                        "before disabling"
+                    ),
                 )
         with request.app.state.github_collection_lock:
             if connection_key in request.app.state.active_github_collections:
@@ -2555,25 +2645,44 @@ def _with_validation_state(
     result["validation_state"] = _connection_validation_state(
         request, tenant_id, str(result["id"])
     )
+    result["source_collection_state"] = "idle"
+    result["last_source_collection"] = None
+    result["evidence_collection_state"] = "idle"
+    result["last_evidence_collection"] = None
+    result["deployment_collection_state"] = "idle"
+    result["last_deployment_collection"] = None
+
+    collection_kind_by_provider = {
+        "aws": ("aws_deployments", "deployment"),
+        "azure": ("azure_deployments", "deployment"),
+        "entra": ("entra_ai", "evidence"),
+        "gcp": ("gcp_deployments", "deployment"),
+        "github": ("github_source", "source"),
+    }
+    collection_status = getattr(
+        request.app.state.repository, "connection_collection_status", None
+    )
+    durable_collection = collection_kind_by_provider.get(str(result["provider"]))
+    if collection_status is not None and durable_collection is not None:
+        collection_kind, field_prefix = durable_collection
+        status = collection_status(
+            tenant_id,
+            str(result["id"]),
+            collection_kind=collection_kind,
+        )
+        result[f"{field_prefix}_collection_state"] = status["state"]
+        result[f"last_{field_prefix}_collection"] = status["last_result"]
+        result["setup_capabilities"] = _connection_setup_capabilities(request, result)
+        return result
+
+    # Injected in-memory repositories used by local contract tests retain the
+    # process-local status path. Hosted PostgreSQL always returns above.
     with request.app.state.github_collection_lock:
         collecting = connection_key in request.app.state.active_github_collections
         collection_result = request.app.state.github_collection_results.get(connection_key)
-    result["source_collection_state"] = "running" if collecting else "idle"
-    result["last_source_collection"] = collection_result
-    result["evidence_collection_state"] = "idle"
-    result["last_evidence_collection"] = None
-    if result["provider"] == "entra":
-        collection_status = getattr(
-            request.app.state.repository, "connection_collection_status", None
-        )
-        if collection_status is not None:
-            status = collection_status(
-                tenant_id,
-                str(result["id"]),
-                collection_kind="entra_ai",
-            )
-            result["evidence_collection_state"] = status["state"]
-            result["last_evidence_collection"] = status["last_result"]
+    if result["provider"] == "github":
+        result["source_collection_state"] = "running" if collecting else "idle"
+        result["last_source_collection"] = collection_result
     with request.app.state.gcp_deployment_collection_lock:
         gcp_collecting = (
             connection_key in request.app.state.active_gcp_deployment_collections
@@ -2581,8 +2690,11 @@ def _with_validation_state(
         gcp_collection_result = request.app.state.gcp_deployment_collection_results.get(
             connection_key
         )
-    result["deployment_collection_state"] = "running" if gcp_collecting else "idle"
-    result["last_deployment_collection"] = gcp_collection_result
+    if result["provider"] == "gcp":
+        result["deployment_collection_state"] = (
+            "running" if gcp_collecting else "idle"
+        )
+        result["last_deployment_collection"] = gcp_collection_result
     with request.app.state.azure_deployment_collection_lock:
         azure_collecting = (
             connection_key in request.app.state.active_azure_deployment_collections
@@ -2605,7 +2717,14 @@ def _with_validation_state(
             "running" if aws_collecting else "idle"
         )
         result["last_deployment_collection"] = aws_collection_result
-    result["setup_capabilities"] = {
+    result["setup_capabilities"] = _connection_setup_capabilities(request, result)
+    return result
+
+
+def _connection_setup_capabilities(
+    request: Request, result: dict[str, Any]
+) -> dict[str, bool]:
+    return {
         "cloudformation_quick_create": (
             result["provider"] == "aws"
             and request.app.state.cloudformation_launcher is not None
@@ -2627,7 +2746,6 @@ def _with_validation_state(
             and request.app.state.entra_consent_client is not None
         ),
     }
-    return result
 
 
 def _connection_validation_state(

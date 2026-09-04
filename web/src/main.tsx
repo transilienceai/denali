@@ -43,7 +43,10 @@ function HostedDenali() {
 
   return <App
     canWrite={context.can_write}
-    accountControls={<><OrganizationSwitcher hidePersonal organizationProfileMode="navigation" organizationProfileUrl="/profile" /><UserButton userProfileMode="navigation" userProfileUrl="/profile" /></>}
+    accountControls={<>
+      <div className="identity-control"><span>Workspace</span><OrganizationSwitcher hidePersonal organizationProfileMode="navigation" organizationProfileUrl="/profile" /></div>
+      <div className="identity-control"><span>Account</span><UserButton userProfileMode="navigation" userProfileUrl="/profile" /></div>
+    </>}
     profilePage={<ProfilePage />}
   />;
 }
