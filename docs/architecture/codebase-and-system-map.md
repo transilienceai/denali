@@ -148,10 +148,9 @@ scope. It does not prove collection ran, inventory exists, or risk is absent.
 
 Connection validation is durable in hosted mode. `src/denali/api/validation.py` and migration
 `011_hosted_pilot.sql` implement PostgreSQL jobs, deduplication, leases, bounded terminal state,
-and Modal dispatch. Microsoft Entra evidence collection uses the same durable design through
-`src/denali/api/collection.py` and migration `013_connection_collection_jobs.sql`. Older provider
-collection endpoints still use API-container background work and are not restart-safe; do not copy
-that pattern into new features.
+and Modal dispatch. All provider collection uses the same durable design through
+`src/denali/api/collection.py`, migration `013_connection_collection_jobs.sql`, and the provider
+kind expansion in migration `014_provider_collection_jobs.sql`.
 
 ## Connector and importer inventory
 
@@ -377,8 +376,6 @@ separately.
 
 ## Known architectural gaps
 
-- Microsoft Entra evidence collection is durable; older provider collection endpoints remain an
-  explicit migration gap.
 - Hosted provider configuration and live acceptance remain incomplete.
 - Clerk still uses a development instance for the pilot.
 - The Neon runtime role is not yet split to least privilege and restore operations are untested.

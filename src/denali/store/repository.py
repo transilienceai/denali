@@ -2272,6 +2272,20 @@ class PostgresInventoryRepository:
                 (call_id, job_id),
             )
 
+    def fail_connection_collection_job(self, job_id: str, summary: str) -> None:
+        """Record a terminal failure before or after a collection worker claims the job."""
+
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE connection_collection_job
+                SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                    error_summary = %s
+                WHERE id = %s::uuid AND state IN ('queued', 'running')
+                """,
+                (summary[:500], job_id),
+            )
+
     def complete_connection_collection_job(
         self, job_id: str, result: dict[str, Any]
     ) -> None:

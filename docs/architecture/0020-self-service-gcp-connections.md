@@ -21,8 +21,9 @@ The customer workflow is:
 2. Open Google Cloud Shell and run the connection-specific, reviewable setup script. Cloud
    Shell uses the customer's existing Google session to enumerate active projects visible to
    that identity and asks the customer to select one, several, or all.
-3. Grant `roles/cloudasset.viewer` and `roles/logging.viewer` to Denali's service account only
-   on the selected projects.
+3. Enable the Cloud Asset Inventory and Cloud Logging APIs, then grant
+   `roles/cloudasset.viewer` and `roles/logging.viewer` to Denali's service account only on the
+   selected projects.
 4. Paste the script's one-time completion code into Denali. Denali stores the selected project
    IDs, names, and immutable project numbers, consumes the completion capability atomically,
    and validates each project independently.
@@ -66,8 +67,8 @@ partial access, each failed or unknown plane remains visible.
 `roles/cloudasset.viewer` supplies project metadata, project-wide resource search, and the
 bounded Cloud Asset RESOURCE snapshots used by the GCP code-to-cloud collector.
 `roles/logging.viewer` supplies read access to log entries. The Cloud Shell identity needs
-permission to update IAM policy on each selected project, normally Project IAM Admin, Owner,
-or an equivalent custom role.
+permission to enable services and update IAM policy on each selected project, normally Owner or
+equivalent Service Usage Admin plus Project IAM Admin permissions.
 
 This slice grants no write/remediation role, service-account key administration, secret
 access, workload invocation, model invocation, data-plane payload access, prompt access, or

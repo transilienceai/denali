@@ -47,6 +47,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api } from "./api";
+import { waitForAcceptedOperation } from "./connectionPolling";
 import {
   AI_APPLICATION_DISCOVERY_LABEL,
   closeDrawerTransition,
@@ -853,7 +854,7 @@ function Dashboard({
       </div>
       </section>
 
-      <GoldenPath deployments={deployments} onOpen={() => onNavigate("codeToCloud")} />
+      {deployments.length > 0 && <GoldenPath deployments={deployments} onOpen={() => onNavigate("codeToCloud")} />}
 
       <section className="command-grid">
         <section className="denali-brief">
@@ -977,6 +978,10 @@ function GoldenPath({
   deployments: CodeToCloudDeployment[];
   onOpen: () => void;
 }) {
+  const providerCount = new Set(
+    deployments.map((deployment) =>
+      deployment.workload_natural_key.startsWith("arn:aws:") ? "AWS" : "GCP"),
+  ).size;
   const ordered = [...deployments].sort((left, right) => {
     const providerOrder = Number(!left.workload_natural_key.startsWith("arn:aws:")) -
       Number(!right.workload_natural_key.startsWith("arn:aws:"));
@@ -987,7 +992,7 @@ function GoldenPath({
       <div className="golden-path-head">
         <div>
           <span className="eyebrow"><Sparkles size={13} /> GOLDEN PATH</span>
-          <h3>Two applications. Two clouds. One reviewable story.</h3>
+          <h3>{deployments.length} application{deployments.length === 1 ? "" : "s"}. {providerCount} cloud{providerCount === 1 ? "" : "s"}. One reviewable story.</h3>
           <p>Start with source, follow an exact deployment declaration, and land on a workload independently observed in its cloud control plane.</p>
         </div>
         <button onClick={onOpen}>Open code-to-cloud <ChevronRight size={16} /></button>
@@ -2204,6 +2209,7 @@ function ConnectionsPage({
   const [gcpCompletionCode, setGcpCompletionCode] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const selected = connections.find((connection) => connection.id === selectedId) ?? connections[0];
 
   useEffect(() => {
@@ -2282,17 +2288,32 @@ function ConnectionsPage({
 
   async function waitForValidation(connection: Connection, maxAttempts: number) {
     const previousValidation = connection.last_validated_at ?? null;
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 2000));
-      const current = await api.connection(connection.id);
-      if (current.validation_state === "running") continue;
-      if (current.last_validated_at !== previousValidation) {
-        await onChanged();
-        return;
-      }
-      throw new Error("Validation stopped before a result was recorded.");
-    }
-    throw new Error("Validation is still running. Refresh shortly to see its result.");
+    await waitForAcceptedOperation({
+      fetchCurrent: () => api.connection(connection.id),
+      isRunning: (current) => current.validation_state === "running",
+      isComplete: (current) => current.last_validated_at !== previousValidation,
+      maxAttempts,
+      stoppedMessage: "Validation stopped before a result was recorded.",
+      timeoutMessage: "Validation is still running. Refresh shortly to see its result.",
+    });
+    await onChanged();
+  }
+
+  async function waitForCollection(
+    connection: Connection,
+    kind: "deployment" | "evidence" | "source",
+  ) {
+    const stateField = `${kind}_collection_state` as const;
+    const resultField = `last_${kind}_collection` as const;
+    const previousCompletion = connection[resultField]?.completed_at ?? null;
+    await waitForAcceptedOperation({
+      fetchCurrent: () => api.connection(connection.id),
+      isRunning: (current) => current[stateField] === "running",
+      isComplete: (current) => current[resultField]?.completed_at !== previousCompletion,
+      stoppedMessage: `${kind === "source" ? "Source" : kind === "evidence" ? "Evidence" : "Deployment"} collection stopped before a result was recorded.`,
+      timeoutMessage: `${kind === "source" ? "Source" : kind === "evidence" ? "Evidence" : "Deployment"} collection is still running. Refresh shortly to see its result.`,
+    });
+    await onChanged();
   }
 
   async function launchConnection(connection: Connection) {
@@ -2384,20 +2405,12 @@ function ConnectionsPage({
   async function collectEntraEvidence(connection: Connection) {
     setBusy(`collect-entra:${connection.id}`);
     setActionError(null);
-    const previousCompletion = connection.last_evidence_collection?.completed_at ?? null;
+    setActionNotice(null);
     try {
-      await api.collectEntraEvidence(connection.id);
-      for (let attempt = 0; attempt < 525; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-        const current = await api.connection(connection.id);
-        if (current.evidence_collection_state === "running") continue;
-        if (current.last_evidence_collection?.completed_at !== previousCompletion) {
-          await onChanged();
-          return;
-        }
-        throw new Error("Microsoft Entra collection stopped before a result was recorded.");
-      }
-      throw new Error("Microsoft Entra collection is still running. Refresh shortly to see its result.");
+      const accepted = await api.collectEntraEvidence(connection.id);
+      setActionNotice(accepted.status === "already_running" ? "Microsoft Entra evidence collection is already running." : "Microsoft Entra evidence collection accepted. It continues safely in the background.");
+      await waitForCollection(connection, "evidence");
+      setActionNotice("Microsoft Entra evidence collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect Microsoft Entra evidence");
     } finally {
@@ -2441,20 +2454,12 @@ function ConnectionsPage({
   async function collectGcpDeployments(connection: Connection) {
     setBusy(`collect-gcp:${connection.id}`);
     setActionError(null);
-    const previousCompletion = connection.last_deployment_collection?.completed_at ?? null;
+    setActionNotice(null);
     try {
-      await api.collectGcpDeployments(connection.id);
-      for (let attempt = 0; attempt < 525; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-        const current = await api.connection(connection.id);
-        if (current.deployment_collection_state === "running") continue;
-        if (current.last_deployment_collection?.completed_at !== previousCompletion) {
-          await onChanged();
-          return;
-        }
-        throw new Error("Deployment collection stopped before a result was recorded.");
-      }
-      throw new Error("Deployment collection is still running. Refresh shortly to see its result.");
+      const accepted = await api.collectGcpDeployments(connection.id);
+      setActionNotice(accepted.status === "already_running" ? "Google Cloud deployment collection is already running." : "Google Cloud deployment collection accepted. It continues safely in the background.");
+      await waitForCollection(connection, "deployment");
+      setActionNotice("Google Cloud deployment collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect GCP deployments");
     } finally {
@@ -2465,20 +2470,12 @@ function ConnectionsPage({
   async function collectAzureDeployments(connection: Connection) {
     setBusy(`collect-azure:${connection.id}`);
     setActionError(null);
-    const previousCompletion = connection.last_deployment_collection?.completed_at ?? null;
+    setActionNotice(null);
     try {
-      await api.collectAzureDeployments(connection.id);
-      for (let attempt = 0; attempt < 525; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-        const current = await api.connection(connection.id);
-        if (current.deployment_collection_state === "running") continue;
-        if (current.last_deployment_collection?.completed_at !== previousCompletion) {
-          await onChanged();
-          return;
-        }
-        throw new Error("Deployment collection stopped before a result was recorded.");
-      }
-      throw new Error("Deployment collection is still running. Refresh shortly to see its result.");
+      const accepted = await api.collectAzureDeployments(connection.id);
+      setActionNotice(accepted.status === "already_running" ? "Azure deployment collection is already running." : "Azure deployment collection accepted. It continues safely in the background.");
+      await waitForCollection(connection, "deployment");
+      setActionNotice("Azure deployment collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect Azure deployments");
     } finally {
@@ -2489,20 +2486,12 @@ function ConnectionsPage({
   async function collectAwsDeployments(connection: Connection) {
     setBusy(`collect-aws:${connection.id}`);
     setActionError(null);
-    const previousCompletion = connection.last_deployment_collection?.completed_at ?? null;
+    setActionNotice(null);
     try {
-      await api.collectAwsDeployments(connection.id);
-      for (let attempt = 0; attempt < 525; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-        const current = await api.connection(connection.id);
-        if (current.deployment_collection_state === "running") continue;
-        if (current.last_deployment_collection?.completed_at !== previousCompletion) {
-          await onChanged();
-          return;
-        }
-        throw new Error("Deployment collection stopped before a result was recorded.");
-      }
-      throw new Error("Deployment collection is still running. Refresh shortly to see its result.");
+      const accepted = await api.collectAwsDeployments(connection.id);
+      setActionNotice(accepted.status === "already_running" ? "AWS deployment collection is already running." : "AWS deployment collection accepted. It continues safely in the background.");
+      await waitForCollection(connection, "deployment");
+      setActionNotice("AWS deployment collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect AWS deployments");
     } finally {
@@ -2525,20 +2514,12 @@ function ConnectionsPage({
   async function collectGitHubSource(connection: Connection) {
     setBusy(`collect:${connection.id}`);
     setActionError(null);
-    const previousCompletion = connection.last_source_collection?.completed_at ?? null;
+    setActionNotice(null);
     try {
-      await api.collectGitHubSource(connection.id);
-      for (let attempt = 0; attempt < 525; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-        const current = await api.connection(connection.id);
-        if (current.source_collection_state === "running") continue;
-        if (current.last_source_collection?.completed_at !== previousCompletion) {
-          await onChanged();
-          return;
-        }
-        throw new Error("Source collection stopped before a result was recorded.");
-      }
-      throw new Error("Source collection is still running. Refresh shortly to see its result.");
+      const accepted = await api.collectGitHubSource(connection.id);
+      setActionNotice(accepted.status === "already_running" ? "GitHub source collection is already running." : "GitHub source collection accepted. It continues safely in the background.");
+      await waitForCollection(connection, "source");
+      setActionNotice("GitHub source collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect GitHub source");
     } finally {
@@ -2603,6 +2584,7 @@ function ConnectionsPage({
       {githubSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{githubSetupReturn.state === "succeeded" ? "GitHub App installation verified" : "GitHub App installation could not be verified"}</strong><small>{githubSetupReturn.state === "succeeded" ? "Denali confirmed the signed-in installer could access this exact installation, recorded its current repository IDs, discarded the temporary user token, and started read-only validation." : githubSetupReturn.detail ?? "Return to the connection and try the GitHub App setup again."}</small></span>
     </div>}
+    {actionNotice && <div className="connection-notice"><CircleCheck /><span>{actionNotice}</span></div>}
     {actionError && <div className="connection-error"><CircleAlert /><span>{actionError}</span></div>}
     {canWrite && showCreate && <form className="panel connection-create" onSubmit={(event) => void createConnection(event)}>
       <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
@@ -2615,9 +2597,9 @@ function ConnectionsPage({
         <label><span>Preferred CloudFormation stack location</span><input required value={deploymentRegion} onChange={(event) => setDeploymentRegion(event.target.value)} placeholder="us-east-1" /><small>This plans where the stack is managed; it does not limit inventory coverage.</small></label>
         <label><span>Inventory region coverage</span><select value={coverageMode} onChange={(event) => setCoverageMode(event.target.value as AwsConnectionCreate["coverage_mode"])}><option value="automatic">All enabled regions (recommended)</option><option value="selected">Selected regions only</option></select><small>Automatic mode rediscovers enabled and opted-in regions on every validation.</small></label>
         {coverageMode === "selected" && <label><span>Selected inventory regions</span><input required value={regions} onChange={(event) => setRegions(event.target.value)} placeholder="us-east-1, us-west-2" /><small>Coverage outside this explicit allowlist will be reported as excluded.</small></label>}</> : provider === "azure" ? <>
-        <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={azureTenantId} onChange={(event) => setAzureTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>Cloud Shell will enumerate enabled subscriptions in this tenant and let you choose.</small></label>
+        <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={azureTenantId} onChange={(event) => setAzureTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>Use a native or invited guest administrator account in this exact tenant. Azure setup also requires at least one enabled subscription visible to that account.</small></label>
         <label><span>Resource location coverage</span><input value="All locations in selected subscriptions" disabled /><small>Azure Resource Graph queries are subscription-wide; no single region limits coverage.</small></label></> : provider === "entra" ? <>
-        <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={entraTenantId} onChange={(event) => setEntraTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>The admin-consent request is pinned to this exact directory and the callback must return the same tenant.</small></label>
+        <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={entraTenantId} onChange={(event) => setEntraTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>Sign in with a Global Administrator who is a native or invited guest user in this exact directory. A personal account outside the tenant cannot grant consent.</small></label>
         <label><span>Directory boundary</span><input value="Exact tenant, all selected Graph planes" disabled /><small>Denali requests application-only read access. No delegated user session is retained.</small></label></> : provider === "gcp" ? <>
         <label><span>Project selection</span><input value="Choose in Google Cloud Shell" disabled /><small>Cloud Shell enumerates active projects visible to your signed-in Google identity and lets you choose.</small></label>
         <label><span>Resource location coverage</span><input value="All locations in selected projects" disabled /><small>Cloud Asset Inventory queries are project-wide; no preferred region limits coverage.</small></label></> : <>
@@ -2693,6 +2675,7 @@ function EntraConnectionDetail({ connection, busy, onPrepare, onCollect, onValid
   const permissions = [...new Set(connection.coverage_plan.flatMap((item) => item.permissions))].sort();
   return <section className="panel connection-detail">
     <div className="connection-detail-head"><div><span>MICROSOFT ENTRA</span><h3>{connection.display_name}</h3><code>Tenant {connection.configuration.tenant_id}</code></div><ConnectionHealth state={connection.health_state} /></div>
+    <div className="microsoft-account-guidance"><CircleHelp /><span><strong>Use an administrator from this exact tenant</strong><small>Microsoft will reject a personal or work account that is not a native or invited guest user in tenant {connection.configuration.tenant_id}. Sign in with a Global Administrator of that directory.</small></span></div>
     <div className="setup-progress">
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>The exact customer tenant and disclosed Microsoft Graph evidence bundle are recorded. No delegated user session, customer secret, or access token is stored.</small></div></div>
       <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Grant tenant-wide admin consent</strong><small>A Global Administrator reviews and grants Directory.Read.All and AuditLog.Read.All to Denali’s multitenant application. Microsoft returns through a verified, expiring, one-time callback bound to this connection.</small><button className="primary-action" disabled={preparing || !connection.setup_capabilities.entra_admin_consent} onClick={onPrepare}><ExternalLink />{preparing ? "Opening Microsoft consent…" : setupComplete ? "Grant consent again" : "Review and grant consent"}</button>{!connection.setup_capabilities.entra_admin_consent && <small className="launch-unavailable">Entra onboarding requires Denali’s configured multitenant application and same-origin callback.</small>}</div></div>
@@ -2719,6 +2702,7 @@ function AzureConnectionDetail({ connection, busy, launch, completionCode, onCom
   const permissions = [...new Set(connection.coverage_plan.flatMap((item) => item.permissions))].sort();
   return <section className="panel connection-detail">
     <div className="connection-detail-head"><div><span>MICROSOFT AZURE</span><h3>{connection.display_name}</h3><code>Tenant {connection.configuration.tenant_id}</code></div><ConnectionHealth state={connection.health_state} /></div>
+    <div className="microsoft-account-guidance"><CircleHelp /><span><strong>Tenant membership and an enabled subscription are required</strong><small>Use a native or invited guest administrator in tenant {connection.configuration.tenant_id}. Personal accounts outside this directory cannot add Denali, and Azure setup cannot continue unless that tenant has at least one enabled subscription visible to the account.</small></span></div>
     <div className="setup-progress">
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>Tenant, application ID, scopes, and subscription-selection boundary are recorded. Entra directory access is not included.</small></div></div>
       <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Add Denali to the tenant and select subscriptions</strong><small>Microsoft Entra first creates a tenant-local enterprise application—the identity Azure can assign a role to. This grants no subscription or Microsoft Graph access. Cloud Shell then enumerates enabled subscriptions and assigns Reader only to those you select; every resource location inside them remains in scope.</small>{!launch && <button className="primary-action" disabled={preparing || !connection.setup_capabilities.azure_cloud_shell} onClick={onPrepare}><ExternalLink />{preparing ? "Preparing Azure setup…" : setupComplete ? "Prepare Azure setup again" : "Prepare Azure setup"}</button>}{launch && <div className="azure-setup-actions"><div className="connection-launch-actions"><a className="primary-action" href={launch.consent_url} target="_blank" rel="noreferrer"><ExternalLink />1. Add Denali to tenant</a><a className="secondary-action" href={launch.cloud_shell_url} target="_blank" rel="noreferrer"><ExternalLink />2. Open Cloud Shell</a><a className="secondary-action" href={launch.script_url} download><Download />Download script</a></div><small className="azure-consent-guidance">Required only once per Entra tenant. This Microsoft-hosted step opens in a new tab and creates—or confirms an existing—Denali enterprise application. It requests no Graph permissions and grants no subscription access; Cloud Shell grants Reader separately.</small><label className="azure-command"><span>3. Run in Cloud Shell</span><textarea readOnly value={launch.setup_command} /><button type="button" onClick={() => void navigator.clipboard.writeText(launch.setup_command)}>Copy command</button><small>The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small></label><label className="azure-completion"><span>4. Paste the completion code printed by the script</span><textarea value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_SETUP_COMPLETE=…" /><button className="primary-action" type="button" disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing ? "Waiting for Azure access propagation…" : "Complete setup and validate"}</button><small>New Azure role assignments can take several minutes to propagate. Denali retries the declared checks before recording a partial result.</small></label></div>}{!connection.setup_capabilities.azure_cloud_shell && <small className="launch-unavailable">Cloud Shell setup requires Denali’s multi-tenant Azure application and private onboarding-script publisher.</small>}{setupComplete && <div className="azure-subscriptions"><strong>{subscriptions.length} selected subscription{subscriptions.length === 1 ? "" : "s"}</strong>{subscriptions.map((subscription) => <code key={subscription.id}>{subscription.name} · {subscription.id}</code>)}</div>}</div></div>
