@@ -1,4 +1,4 @@
-"""Microsoft Entra Shadow AI inventory and runtime activity collection.
+"""Microsoft Entra AI application discovery and runtime activity collection.
 
 Catalog matches discover reviewable AI applications. They are not findings. OAuth
 grants, application permissions, sign-ins, and directory changes remain independent,
@@ -949,7 +949,9 @@ def acquire_graph_token(
 
 def scan_main() -> None:
     parser = argparse.ArgumentParser(
-        description="Collect Entra Shadow AI inventory, permissions, and runtime observations"
+        description=(
+            "Collect Entra AI application inventory, permissions, and runtime observations"
+        )
     )
     parser.add_argument(
         "--entra-tenant-id",

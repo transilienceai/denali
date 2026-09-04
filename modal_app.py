@@ -46,6 +46,14 @@ def _configure_aws_oidc() -> None:
     os.environ.setdefault("AWS_ROLE_SESSION_NAME", "denali-modal")
 
 
+def _configure_gcp_oidc() -> None:
+    """Expose Modal's short-lived identity token through Google ADC."""
+
+    from denali.hosted import configure_gcp_external_account
+
+    configure_gcp_external_account()
+
+
 def _validators():
     from denali.api.app import _github_app_from_environment
     from denali.connections import (
@@ -76,6 +84,7 @@ def validation_worker(job_id: str) -> None:
     from denali.store.repository import PostgresInventoryRepository
 
     _configure_aws_oidc()
+    _configure_gcp_oidc()
     dsn = os.environ["DENALI_DSN"]
     run_durable_validation_job(
         PostgresInventoryRepository(dsn),
@@ -104,6 +113,7 @@ def api():
     from denali.api.app import create_app
 
     _configure_aws_oidc()
+    _configure_gcp_oidc()
     return create_app(
         auth_mode="clerk",
         validation_dispatcher=_dispatch_validation,
@@ -178,6 +188,8 @@ def configuration_status() -> None:
         "gcp": (
             "DENALI_GCP_ONBOARDING_BUCKET",
             "DENALI_GCP_OPERATOR_PROJECT_ID",
+            "DENALI_GCP_WORKLOAD_IDENTITY_PROVIDER",
+            "DENALI_GCP_RUNTIME_SERVICE_ACCOUNT",
         ),
         "github": (
             "DENALI_GITHUB_APP_ID",

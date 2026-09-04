@@ -224,8 +224,11 @@ If the deployed URL differs from step 1, update all of these together and redepl
 
 ### 9. Add providers one at a time
 
-Add each provider's variables to `.env.modal.production`, replace the Modal secret with
-`--force`, redeploy Modal, and complete its hosted acceptance before starting the next provider.
+Add each provider's variables to an ignored provider-only dotenv and create or replace a separate
+provider-operator Modal Secret. Set `DENALI_MODAL_PROVIDER_SECRET_NAME` alongside
+`DENALI_MODAL_SECRET_NAME` when deploying `modal_app.py`. Keeping provider variables separate
+avoids replacing an existing core Secret whose values are intentionally unreadable. Complete each
+provider's hosted acceptance before starting the next provider.
 
 #### AWS
 
@@ -256,11 +259,18 @@ DENALI_AZURE_CONSENT_REDIRECT_URI=https://<production-domain>
 ```text
 DENALI_GCP_ONBOARDING_BUCKET
 DENALI_GCP_OPERATOR_PROJECT_ID
+DENALI_GCP_WORKLOAD_IDENTITY_PROVIDER
+DENALI_GCP_RUNTIME_SERVICE_ACCOUNT
 ```
 
-- These are non-secret identifiers.
-- Configure keyless runtime credentials for Google Application Default Credentials. Do not commit
-  a service-account JSON key. GCP acceptance is blocked until Modal can obtain that identity.
+- These are non-secret identifiers. The provider value is the canonical
+  `projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>` name.
+- Configure the pool to trust Modal's OIDC issuer and restrict assertions to the production
+  workspace, environment, and app. Grant that external principal Workload Identity User on the
+  runtime service account.
+- At container startup Denali writes Modal's short-lived identity token and an external-account
+  ADC configuration to private container-local files. Do not create or commit a service-account
+  JSON key.
 
 #### GitHub
 

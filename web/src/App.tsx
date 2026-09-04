@@ -48,6 +48,7 @@ import {
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api } from "./api";
 import {
+  AI_APPLICATION_DISCOVERY_LABEL,
   closeDrawerTransition,
   drawerTabTransition,
   inventoryQuery,
@@ -679,7 +680,7 @@ function Sidebar({ page, onNavigate, open }: { page: Page; onNavigate: (page: Pa
         <NavButton active={page === "connections"} icon={CloudCog} label="Connections" onClick={() => onNavigate("connections")} />
         <p className="nav-heading">DISCOVER</p>
         <NavButton active={page === "inventory"} icon={Boxes} label="Inventory" onClick={() => onNavigate("inventory")} />
-        <NavButton active={page === "shadowAi"} icon={AppWindow} label="Shadow AI" onClick={() => onNavigate("shadowAi")} />
+        <NavButton active={page === "shadowAi"} icon={AppWindow} label={AI_APPLICATION_DISCOVERY_LABEL} onClick={() => onNavigate("shadowAi")} />
         <NavButton active={page === "codeToCloud"} icon={CloudCog} label="Code to cloud" onClick={() => onNavigate("codeToCloud")} />
         <p className="nav-heading">ASSESS</p>
         <NavButton active={page === "findings"} icon={CircleAlert} label="Posture findings" onClick={() => onNavigate("findings")} />
@@ -732,7 +733,7 @@ function Topbar({ page, onMenu, onRefresh, accountControls }: { page: Page; onMe
     dashboard: { eyebrow: "Command center", title: "Denali Brief" },
     connections: { eyebrow: "Setup", title: "Connections" },
     inventory: { eyebrow: "Discovery", title: "AI inventory" },
-    shadowAi: { eyebrow: "Discovery", title: "Shadow AI" },
+    shadowAi: { eyebrow: "Discovery", title: AI_APPLICATION_DISCOVERY_LABEL },
     findings: { eyebrow: "Posture", title: "AI configuration findings" },
     vulnerabilities: { eyebrow: "Exposure", title: "AI vulnerabilities" },
     issues: { eyebrow: "Correlation", title: "AI issues & paths" },
@@ -1806,7 +1807,7 @@ function ShadowAiPage({
 
   if (!hasEntraBoundary) {
     return <div className="page-stack shadow-ai-page">
-      <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>Shadow AI is outside this Golden Path.</h2><p>This workspace currently contains two code-to-cloud applications in AWS and Google Cloud. It has no declared Microsoft Entra evidence boundary.</p></div><div className="result-count"><strong>N/A</strong><span>Entra application coverage</span></div></section>
+      <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>AI application discovery is outside this Golden Path.</h2><p>This workspace currently contains two code-to-cloud applications in AWS and Google Cloud. It has no declared Microsoft Entra evidence boundary.</p></div><div className="result-count"><strong>N/A</strong><span>Entra application coverage</span></div></section>
       <section className="panel applicability-boundary"><CircleHelp /><div><span className="eyebrow">NOT APPLICABLE</span><h3>No Microsoft Entra tenant is connected</h3><p>Denali will not turn missing Entra collection into four reassuring zeroes. Connect an Entra tenant when workforce AI application discovery belongs in the demo; until then, this page is explicitly out of scope.</p></div></section>
       <section className="shadow-principle"><ShieldCheck /><div><strong>The rest of the Golden Path remains valid.</strong><span>Anna and Summit continue to demonstrate source, deployment, identity, model, component, posture, and runtime evidence without an unrelated SaaS application fixture.</span></div></section>
     </div>;

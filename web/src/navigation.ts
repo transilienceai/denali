@@ -38,6 +38,8 @@ export interface NavigationTransition {
   state: OverlayHistoryState;
 }
 
+export const AI_APPLICATION_DISCOVERY_LABEL = "AI application discovery";
+
 export type DrawerCloseTransition =
   | { delta: number }
   | NavigationTransition;

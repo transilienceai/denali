@@ -206,13 +206,14 @@ Start with the product and evidence boundaries, then follow only the slice being
   [static artifact inclusion](docs/architecture/0011-static-artifact-inclusion.md), and
   [deployment artifact provenance](docs/architecture/0012-deployment-artifact-provenance.md)
 - [Provider-neutral runtime activity](docs/architecture/0015-provider-neutral-runtime-activity.md),
-  [Entra shadow AI and runtime](docs/architecture/0016-entra-shadow-ai-and-runtime.md), and
+  [Entra AI application discovery and runtime](docs/architecture/0016-entra-shadow-ai-and-runtime.md), and
   [runtime detections](docs/architecture/0017-evidence-led-runtime-detections.md)
 
 Product-preview definitions remain available for
 [inventory](docs/product/inventory-preview.md),
 [configuration findings](docs/product/configuration-findings-preview.md), and
-[issues](docs/product/issues-preview.md).
+[issues](docs/product/issues-preview.md). The Microsoft slice is documented in
+[AI application discovery](docs/product/entra-ai-application-discovery-preview.md).
 
 ## Pending acceptance, planned work, and current limits
 
