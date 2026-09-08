@@ -662,48 +662,24 @@ def test_azure_setup_completion_consumes_token_and_binds_selected_subscriptions(
         connection_id,
         launch={
             "method": "azure_cloud_shell",
-            "script_version": "denali-azure-subscription-reader-v1",
+            "script_version": "denali-azure-subscription-reader-v3",
             "script_sha256": "c" * 64,
             "client_id": client_id,
             "published_at": now.isoformat(),
             "url_expires_at": (now + timedelta(hours=1)).isoformat(),
+            "identity_mode": "cloud_shell_service_principal",
         },
         setup_token_sha256=setup_token_sha256,
-        consent_state_sha256="d" * 64,
     )
     assert launched is not None
     assert "setup_token" not in str(launched)
     target = repo.get_connection_validation_target(tenant, connection_id)
     assert target is not None
     assert target["credential_reference"]["setup_token_sha256"] == setup_token_sha256
-    assert target["credential_reference"]["consent_state_sha256"] == "d" * 64
-
-    consented = repo.complete_azure_consent_setup(
-        tenant,
-        connection_id,
-        expected_state_sha256="d" * 64,
-        completed_at=now,
-    )
-    assert consented is not None
-    assert consented["configuration"]["onboarding"]["consent_status"] == "completed"
-    target = repo.get_connection_validation_target(tenant, connection_id)
-    assert target is not None
     assert "consent_state_sha256" not in target["credential_reference"]
-
-    resumed = repo.record_azure_script_launch(
-        tenant,
-        connection_id,
-        launch={
-            "script_version": "denali-azure-subscription-reader-v2",
-            "script_sha256": "e" * 64,
-            "published_at": now.isoformat(),
-            "url_expires_at": (now + timedelta(hours=1)).isoformat(),
-        },
-        setup_token_sha256=setup_token_sha256,
+    assert target["configuration"]["onboarding"]["identity_mode"] == (
+        "cloud_shell_service_principal"
     )
-    assert resumed is not None
-    assert resumed["configuration"]["onboarding"]["consent_status"] == "completed"
-    assert resumed["configuration"]["onboarding"]["script_sha256"] == "e" * 64
 
     plan = azure_coverage_plan(list(AZURE_SCOPES), subscriptions)
     completed = repo.complete_azure_connection_setup(

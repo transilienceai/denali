@@ -83,8 +83,7 @@ export function pageFromPath(pathname: string): Page {
 export function hasConnectionReturn(query: URLSearchParams): boolean {
   return (
     query.has("github_setup") ||
-    query.has("entra_setup") ||
-    query.has("azure_setup")
+    query.has("entra_setup")
   );
 }
 

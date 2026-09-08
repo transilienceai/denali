@@ -2578,22 +2578,16 @@ class PostgresInventoryRepository:
         *,
         launch: dict[str, Any],
         setup_token_sha256: str,
-        consent_state_sha256: str,
     ) -> dict[str, Any] | None:
-        """Record Azure setup and only hashes of its one-time capabilities."""
+        """Record Azure setup and only the hash of its one-time capability."""
 
         with psycopg.connect(self._dsn) as connection:
             row = connection.execute(
                 """
                 UPDATE provider_connection
                 SET credential_reference = jsonb_set(
-                        jsonb_set(
-                            credential_reference,
-                            '{setup_token_sha256}',
-                            to_jsonb(%s::text),
-                            true
-                        ),
-                        '{consent_state_sha256}',
+                        credential_reference - 'consent_state_sha256',
+                        '{setup_token_sha256}',
                         to_jsonb(%s::text),
                         true
                     ),
@@ -2610,131 +2604,9 @@ class PostgresInventoryRepository:
                 """,
                 (
                     setup_token_sha256,
-                    consent_state_sha256,
                     json.dumps(launch),
                     tenant_id,
                     connection_id,
-                ),
-            ).fetchone()
-        return None if row is None else self.get_connection(tenant_id, connection_id)
-
-    def record_azure_script_launch(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        launch: dict[str, Any],
-        setup_token_sha256: str,
-    ) -> dict[str, Any] | None:
-        """Refresh only the Azure Cloud Shell capability after verified consent."""
-
-        with psycopg.connect(self._dsn) as connection:
-            row = connection.execute(
-                """
-                UPDATE provider_connection
-                SET credential_reference = jsonb_set(
-                        credential_reference - 'consent_state_sha256',
-                        '{setup_token_sha256}',
-                        to_jsonb(%s::text),
-                        true
-                    ),
-                    configuration = jsonb_set(
-                        configuration,
-                        '{onboarding}',
-                        COALESCE(configuration->'onboarding', '{}'::jsonb) || %s::jsonb,
-                        true
-                    ),
-                    updated_at = now()
-                WHERE tenant_id = %s::uuid AND id = %s::uuid
-                  AND provider = 'azure' AND lifecycle_state = 'active'
-                  AND configuration->'onboarding'->>'consent_status' = 'completed'
-                RETURNING id
-                """,
-                (setup_token_sha256, json.dumps(launch), tenant_id, connection_id),
-            ).fetchone()
-        return None if row is None else self.get_connection(tenant_id, connection_id)
-
-    def fail_azure_consent_setup(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        expected_state_sha256: str,
-        failed_at: datetime,
-    ) -> bool:
-        """Consume failed Azure consent state without retaining Microsoft error text."""
-
-        with psycopg.connect(self._dsn) as connection:
-            row = connection.execute(
-                """
-                UPDATE provider_connection
-                SET credential_reference = credential_reference - 'consent_state_sha256',
-                    configuration = jsonb_set(
-                        jsonb_set(
-                            configuration,
-                            '{onboarding,consent_status}',
-                            '"failed"'::jsonb,
-                            true
-                        ),
-                        '{onboarding,consent_failed_at}',
-                        to_jsonb(%s::text),
-                        true
-                    ),
-                    updated_at = %s
-                WHERE tenant_id = %s::uuid AND id = %s::uuid
-                  AND provider = 'azure' AND lifecycle_state = 'active'
-                  AND credential_reference->>'consent_state_sha256' = %s
-                RETURNING id
-                """,
-                (
-                    failed_at.isoformat(),
-                    failed_at,
-                    tenant_id,
-                    connection_id,
-                    expected_state_sha256,
-                ),
-            ).fetchone()
-        return row is not None
-
-    def complete_azure_consent_setup(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        expected_state_sha256: str,
-        completed_at: datetime,
-    ) -> dict[str, Any] | None:
-        """Record verified tenant consent and consume its one-time state."""
-
-        with psycopg.connect(self._dsn) as connection:
-            row = connection.execute(
-                """
-                UPDATE provider_connection
-                SET credential_reference = credential_reference - 'consent_state_sha256',
-                    configuration = jsonb_set(
-                        jsonb_set(
-                            configuration,
-                            '{onboarding,consent_status}',
-                            '"completed"'::jsonb,
-                            true
-                        ),
-                        '{onboarding,consent_completed_at}',
-                        to_jsonb(%s::text),
-                        true
-                    ),
-                    health_state = 'unknown',
-                    updated_at = %s
-                WHERE tenant_id = %s::uuid AND id = %s::uuid
-                  AND provider = 'azure' AND lifecycle_state = 'active'
-                  AND credential_reference->>'consent_state_sha256' = %s
-                RETURNING id
-                """,
-                (
-                    completed_at.isoformat(),
-                    completed_at,
-                    tenant_id,
-                    connection_id,
-                    expected_state_sha256,
                 ),
             ).fetchone()
         return None if row is None else self.get_connection(tenant_id, connection_id)

@@ -232,7 +232,6 @@ def configuration_status() -> None:
             "DENALI_AZURE_ONBOARDING_BUCKET",
             "DENALI_AZURE_CLIENT_ID",
             "DENALI_AZURE_CLIENT_SECRET",
-            "DENALI_AZURE_CONSENT_REDIRECT_URI",
         ),
         "entra": (
             "DENALI_ENTRA_CLIENT_ID",

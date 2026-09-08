@@ -137,10 +137,9 @@ Use these production provider URLs:
 - GitHub OAuth callback: `https://denali.example.com/api/v1/connections/github/oauth/callback`;
 - Entra admin-consent callback:
   `https://denali.example.com/api/v1/connections/entra/setup/callback`;
-- Azure consent redirect: `https://denali.example.com`.
 
 Set `DENALI_GITHUB_CALLBACK_URL`, `DENALI_ENTRA_CALLBACK_URL`,
-`DENALI_AZURE_CONSENT_REDIRECT_URI`, `DENALI_WEB_URL`, `CLERK_AUTHORIZED_PARTIES`, and
+`DENALI_WEB_URL`, `CLERK_AUTHORIZED_PARTIES`, and
 `DENALI_CORS_ORIGINS` to the final values. The browser normally uses the same-origin proxy; CORS
 remains restricted for diagnostics and controlled direct calls.
 
