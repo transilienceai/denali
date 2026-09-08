@@ -340,7 +340,7 @@ class AwsDeploymentConnector:
                         workload.evidence,
                     )
                 for model in _model_assertions(parsed, observed_at, inventory_plane):
-                    assets[(model.asset, inventory_plane)] = model
+                    assets.setdefault((model.asset, "aws_bedrock_model"), model)
                     _relationship(
                         relationships,
                         workload.asset,

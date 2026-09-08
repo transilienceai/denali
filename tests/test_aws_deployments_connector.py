@@ -73,6 +73,15 @@ class EcsClient:
         }
 
 
+class SameModelEcsClient(EcsClient):
+    def describe_task_definition(self, **kwargs: Any) -> dict[str, Any]:
+        response = super().describe_task_definition(**kwargs)
+        response["taskDefinition"]["containerDefinitions"][0]["environment"][0]["value"] = (
+            "global.anthropic.claude-sonnet-4-5-v1:0"
+        )
+        return response
+
+
 class EksClient:
     def list_clusters(self, **kwargs: Any) -> dict[str, Any]:
         return {"clusters": ["ai-cluster", "ordinary-cluster"]}
@@ -118,6 +127,10 @@ class Session:
 
     def client(self, service: str, **kwargs: Any) -> Any:
         return self.clients[service]
+
+
+class SameModelSession(Session):
+    clients = {**Session.clients, "ecs": SameModelEcsClient()}
 
 
 class IamClient:
@@ -241,6 +254,22 @@ def test_collects_four_explicit_aws_deployment_contracts_without_secret_values()
         if item.asset.kind is AssetKind.CLOUD_RESOURCE and item.display_name == "ordinary"
     ]
     assert len(ordinary) == 1
+
+
+def test_shared_model_is_asserted_once_with_each_workload_relationship_retained() -> None:
+    batch = AwsDeploymentConnector(
+        account_id="123456789012",
+        region="us-east-1",
+        session=SameModelSession(),
+    ).collect()
+
+    models = [item for item in batch.assets if item.asset.kind is AssetKind.AI_MODEL]
+    model_links = [
+        item for item in batch.relationships if item.kind is RelationshipKind.USES
+    ]
+    assert len(models) == 1
+    assert len(model_links) == 2
+    assert {item.target for item in model_links} == {models[0].asset}
 
 
 def test_connection_collection_ingests_model_links_and_iam_findings() -> None:
