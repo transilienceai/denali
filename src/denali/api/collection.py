@@ -68,19 +68,21 @@ def run_durable_collection_job(
             repository.complete_connection_collection_job(job_id, result)
             return
         except Exception as error:
+            error_type = type(error).__name__
             logger.warning(
-                "connection collection attempt failed",
+                "connection collection attempt failed (%s)",
+                error_type,
                 extra={
                     "tenant_id": tenant_id,
                     "connection_id": connection_id,
                     "job_id": job_id,
                     "collection_kind": collection_kind,
-                    "error_type": type(error).__name__,
+                    "error_type": error_type,
                 },
             )
             retry = repository.record_connection_collection_failure(
                 job_id,
-                "Collection worker could not complete the declared read planes.",
+                f"Collection worker could not complete the declared read planes ({error_type}).",
                 max_attempts=max_attempts,
             )
             if not retry:
