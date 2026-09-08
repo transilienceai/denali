@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from denali.connections.azure import (
+    AZURE_ACTIVITY_API_VERSION,
     AZURE_MANAGEMENT_ENDPOINT,
     AZURE_RESOURCE_GRAPH_API_VERSION,
+    AZURE_SCOPE_AI_ACTIVITY,
+    AZURE_SCOPE_AI_PLATFORM,
+    AZURE_SCOPE_AI_SERVICES,
     AZURE_SCOPE_CODE_TO_CLOUD,
     authorized_azure_request,
     valid_azure_uuid,
 )
 from denali.domain import (
+    ActivityBatch,
+    ActivityCategory,
+    ActivityOutcome,
+    ActivityRecord,
     AssertionType,
     AssetAssertion,
     AssetKind,
@@ -43,6 +51,33 @@ MAX_RESOURCES_PER_TYPE = 10_000
 MAX_PAGES_PER_TYPE = 100
 PAGE_SIZE = 1_000
 
+_AZURE_AI_PLANES = {
+    AZURE_SCOPE_AI_SERVICES: (
+        (
+            "azure_ai_services_accounts",
+            "microsoft.cognitiveservices/accounts",
+            AssetKind.CLOUD_RESOURCE,
+        ),
+        (
+            "azure_ai_search_services",
+            "microsoft.search/searchservices",
+            AssetKind.AI_DATASTORE,
+        ),
+    ),
+    AZURE_SCOPE_AI_PLATFORM: (
+        (
+            "azure_machine_learning_workspaces",
+            "microsoft.machinelearningservices/workspaces",
+            AssetKind.CLOUD_RESOURCE,
+        ),
+        (
+            "azure_bot_services",
+            "microsoft.botservice/botservices",
+            AssetKind.AI_AGENT,
+        ),
+    ),
+}
+
 _MODEL_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*(?:MODEL|DEPLOYMENT)_ID$")
 _RESOURCE_ID_RE = re.compile(
     r"^/subscriptions/(?P<subscription>[0-9a-f-]{36})/resourceGroups/"
@@ -62,9 +97,15 @@ class AzureResourceClient(Protocol):
         self, *, subscription_id: str, resource_type: str
     ) -> tuple[dict[str, Any], ...]: ...
 
+    def list_activity(
+        self, *, subscription_id: str, start_time: datetime, end_time: datetime
+    ) -> tuple[dict[str, Any], ...]: ...
+
 
 class InventorySink(Protocol):
     def ingest(self, tenant_id: str, batch: InventoryBatch) -> dict[str, int]: ...
+
+    def ingest_activity(self, tenant_id: str, batch: ActivityBatch) -> dict[str, int]: ...
 
 
 class AzureResourceGraphRestClient:
@@ -80,6 +121,11 @@ class AzureResourceGraphRestClient:
             CONTAINER_APP_RESOURCE_TYPE,
             FUNCTION_APP_RESOURCE_TYPE,
             AKS_CLUSTER_RESOURCE_TYPE,
+            *(
+                resource_type
+                for planes in _AZURE_AI_PLANES.values()
+                for _, resource_type, _ in planes
+            ),
         }:
             raise ValueError("unsupported Azure deployment resource type")
         kind_filter = (
@@ -134,13 +180,53 @@ class AzureResourceGraphRestClient:
             if raw_skip_token in {None, ""}:
                 return tuple(records)
             if not isinstance(raw_skip_token, str):
-                raise AzureDeploymentDiscoveryError(
-                    "resourcegraph:Resources:invalid_skip_token"
-                )
+                raise AzureDeploymentDiscoveryError("resourcegraph:Resources:invalid_skip_token")
             skip_token = raw_skip_token
         raise AzureDeploymentDiscoveryError(
             f"resourcegraph:Resources:page_limit_{MAX_PAGES_PER_TYPE}"
         )
+
+    def list_activity(
+        self, *, subscription_id: str, start_time: datetime, end_time: datetime
+    ) -> tuple[dict[str, Any], ...]:
+        records: list[dict[str, Any]] = []
+        url = (
+            f"{AZURE_MANAGEMENT_ENDPOINT}/subscriptions/{subscription_id}/providers/"
+            "microsoft.insights/eventtypes/management/values"
+        )
+        params: dict[str, str] | None = {
+            "api-version": AZURE_ACTIVITY_API_VERSION,
+            "$filter": (
+                f"eventTimestamp ge '{start_time.isoformat()}' and "
+                f"eventTimestamp le '{end_time.isoformat()}'"
+            ),
+        }
+        for _ in range(MAX_PAGES_PER_TYPE):
+            try:
+                response = self._request("GET", url, params=params, timeout=30.0)
+                response.raise_for_status()
+                payload = response.json()
+            except Exception as error:
+                raise AzureDeploymentDiscoveryError(
+                    f"activitylog:List:{_safe_error_code(error)}"
+                ) from None
+            if not isinstance(payload, dict) or not isinstance(payload.get("value", []), list):
+                raise AzureDeploymentDiscoveryError("activitylog:List:invalid_response_shape")
+            records.extend(item for item in payload.get("value", []) if isinstance(item, dict))
+            if len(records) > MAX_RESOURCES_PER_TYPE:
+                raise AzureDeploymentDiscoveryError(
+                    f"activitylog:List:record_limit_{MAX_RESOURCES_PER_TYPE}"
+                )
+            next_link = payload.get("nextLink")
+            if not next_link:
+                return tuple(records)
+            if not isinstance(next_link, str) or not next_link.startswith(
+                AZURE_MANAGEMENT_ENDPOINT
+            ):
+                raise AzureDeploymentDiscoveryError("activitylog:List:invalid_next_link")
+            url = next_link
+            params = None
+        raise AzureDeploymentDiscoveryError(f"activitylog:List:page_limit_{MAX_PAGES_PER_TYPE}")
 
 
 class AzureConnectionDeploymentCollector:
@@ -165,8 +251,14 @@ class AzureConnectionDeploymentCollector:
             raise ValueError("connection is not an Azure connection")
         if connection.get("lifecycle_state") != "active":
             raise ValueError("disabled Azure connections cannot collect")
-        if AZURE_SCOPE_CODE_TO_CLOUD not in connection.get("declared_scopes", []):
-            raise ValueError("Azure code-to-cloud scope is not declared")
+        scopes = set(connection.get("declared_scopes", []))
+        if not scopes & {
+            AZURE_SCOPE_CODE_TO_CLOUD,
+            AZURE_SCOPE_AI_SERVICES,
+            AZURE_SCOPE_AI_PLATFORM,
+            AZURE_SCOPE_AI_ACTIVITY,
+        }:
+            raise ValueError("Azure connection has no supported collection scope")
         subscriptions = connection.get("configuration", {}).get("subscriptions", [])
         customer_tenant = connection.get("configuration", {}).get("tenant_id")
         if (
@@ -188,12 +280,47 @@ class AzureConnectionDeploymentCollector:
                     {"subscription_id": str(subscription_id), "state": "failed"}
                 )
                 continue
-            batch = AzureDeploymentConnector(
-                subscription_id=subscription_id,
-                resource_client=client,
-            ).collect(connection_id=str(connection["id"]))
-            repository.ingest(tenant_id, batch)
-            states = {item.state for item in batch.coverage}
+            subscription_id = subscription_id.lower()
+            batches: list[InventoryBatch] = []
+            for scope_name, planes in _AZURE_AI_PLANES.items():
+                if scope_name not in scopes:
+                    continue
+                for plane, resource_type, kind in planes:
+                    batches.append(
+                        _azure_ai_inventory_batch(
+                            subscription_id=subscription_id,
+                            connection_id=str(connection["id"]),
+                            client=client,
+                            plane=plane,
+                            resource_type=resource_type,
+                            kind=kind,
+                        )
+                    )
+            if AZURE_SCOPE_CODE_TO_CLOUD in scopes:
+                batches.append(
+                    AzureDeploymentConnector(
+                        subscription_id=subscription_id,
+                        resource_client=client,
+                    ).collect(connection_id=str(connection["id"]))
+                )
+            for batch in batches:
+                repository.ingest(tenant_id, batch)
+            activity_count = 0
+            activity_coverage: tuple[Coverage, ...] = ()
+            if AZURE_SCOPE_AI_ACTIVITY in scopes:
+                end_time = datetime.now(UTC)
+                activity_batch = _azure_ai_activity_batch(
+                    subscription_id=subscription_id,
+                    connection_id=str(connection["id"]),
+                    client=client,
+                    start_time=end_time - timedelta(hours=24),
+                    end_time=end_time,
+                )
+                repository.ingest_activity(tenant_id, activity_batch)
+                activity_count = len(activity_batch.activities)
+                activity_coverage = activity_batch.coverage
+            states = {item.state for batch in batches for item in batch.coverage}
+            states.update(item.state for item in activity_coverage)
             if CoverageState.FAILED in states:
                 state = "failed"
                 failed += 1
@@ -206,10 +333,13 @@ class AzureConnectionDeploymentCollector:
                 {
                     "subscription_id": subscription_id,
                     "state": state,
-                    "assets": len(batch.assets),
+                    "assets": sum(len(batch.assets) for batch in batches),
                     "ai_workloads": sum(
-                        item.asset.kind is AssetKind.AI_WORKLOAD for item in batch.assets
+                        item.asset.kind is AssetKind.AI_WORKLOAD
+                        for batch in batches
+                        for item in batch.assets
                     ),
+                    "activity_events": activity_count,
                 }
             )
         completed_at = datetime.now(UTC).isoformat()
@@ -378,6 +508,218 @@ class AzureDeploymentConnector:
         )
 
 
+def _azure_ai_inventory_batch(
+    *,
+    subscription_id: str,
+    connection_id: str,
+    client: AzureResourceClient,
+    plane: str,
+    resource_type: str,
+    kind: AssetKind,
+) -> InventoryBatch:
+    observed_at = datetime.now(UTC)
+    scope = f"azure:subscription:{subscription_id}"
+    warnings: list[str] = []
+    assertions: list[AssetAssertion] = []
+    try:
+        records = client.list_resources(
+            subscription_id=subscription_id, resource_type=resource_type
+        )
+    except AzureDeploymentDiscoveryError as error:
+        return InventoryBatch(
+            connector_id="denali.azure_ai_inventory",
+            connection_id=connection_id,
+            run_id=f"azure-ai-inventory-{plane}-{observed_at.isoformat()}",
+            scope_key=scope,
+            collected_at=observed_at,
+            coverage=(Coverage(plane, CoverageState.FAILED, scope, str(error)),),
+        )
+    prefix = f"/subscriptions/{subscription_id}/"
+    for position, raw in enumerate(records):
+        resource_id = raw.get("id") if isinstance(raw, dict) else None
+        observed_type = str(raw.get("type", "")).lower() if isinstance(raw, dict) else ""
+        observed_subscription = (
+            str(raw.get("subscriptionId", "")).lower() if isinstance(raw, dict) else ""
+        )
+        if (
+            not isinstance(resource_id, str)
+            or not resource_id.lower().startswith(prefix)
+            or observed_type != resource_type
+            or observed_subscription != subscription_id
+        ):
+            warnings.append(f"{resource_type} item {position}: invalid resource boundary")
+            continue
+        name = raw.get("name")
+        if not isinstance(name, str) or not name:
+            warnings.append(f"{resource_type} item {position}: resource name is missing")
+            continue
+        evidence = Evidence(
+            source_type="azure_resource_graph",
+            locator=f"azure://resourcegraph{resource_id}",
+            observed_at=observed_at,
+            payload={
+                "subscription_id": subscription_id,
+                "resource_id": resource_id,
+                "resource_type": resource_type,
+                "location": raw.get("location"),
+            },
+        )
+        assertions.append(
+            AssetAssertion(
+                asset=AssetRef(kind, resource_id.lower()),
+                coverage_plane=plane,
+                display_name=name,
+                assertion_type=AssertionType.OBSERVED,
+                confidence=1.0,
+                evidence=evidence,
+                attributes={
+                    "provider": "azure",
+                    "subscription_id": subscription_id,
+                    "resource_id": resource_id,
+                    "resource_type": resource_type,
+                    "location": raw.get("location"),
+                },
+            )
+        )
+    state = CoverageState.PARTIAL if warnings else CoverageState.COMPLETE
+    detail = "; ".join([f"Observed {len(assertions)} {resource_type} resources.", *warnings[:10]])
+    return InventoryBatch(
+        connector_id="denali.azure_ai_inventory",
+        connection_id=connection_id,
+        run_id=f"azure-ai-inventory-{plane}-{observed_at.isoformat()}",
+        scope_key=scope,
+        collected_at=observed_at,
+        coverage=(Coverage(plane, state, scope, detail),),
+        assets=tuple(assertions),
+    )
+
+
+_AZURE_AI_ACTIVITY_PROVIDERS = {
+    "microsoft.cognitiveservices",
+    "microsoft.search",
+    "microsoft.machinelearningservices",
+    "microsoft.botservice",
+    "microsoft.app",
+    "microsoft.web",
+    "microsoft.containerservice",
+}
+
+
+def _azure_ai_activity_batch(
+    *,
+    subscription_id: str,
+    connection_id: str,
+    client: AzureResourceClient,
+    start_time: datetime,
+    end_time: datetime,
+) -> ActivityBatch:
+    observed_at = datetime.now(UTC)
+    scope = f"azure:subscription:{subscription_id}:activity-log"
+    run_id = f"azure-ai-activity-{subscription_id}-{observed_at.isoformat()}"
+    try:
+        records = client.list_activity(
+            subscription_id=subscription_id, start_time=start_time, end_time=end_time
+        )
+    except AzureDeploymentDiscoveryError as error:
+        return ActivityBatch(
+            connector_id="denali.azure_ai_activity",
+            connection_id=connection_id,
+            run_id=run_id,
+            scope_key=scope,
+            collected_at=observed_at,
+            coverage=(
+                Coverage("azure_ai_management_activity", CoverageState.FAILED, scope, str(error)),
+            ),
+        )
+    activities: list[ActivityRecord] = []
+    warnings: list[str] = []
+    for position, raw in enumerate(records):
+        provider = raw.get("resourceProviderName")
+        provider_value = provider.get("value") if isinstance(provider, dict) else None
+        if (
+            not isinstance(provider_value, str)
+            or provider_value.lower() not in _AZURE_AI_ACTIVITY_PROVIDERS
+        ):
+            continue
+        source_uid = raw.get("eventDataId")
+        occurred_at = _azure_timestamp(raw.get("eventTimestamp"))
+        operation = raw.get("operationName")
+        operation_name = operation.get("value") if isinstance(operation, dict) else None
+        title = operation.get("localizedValue") if isinstance(operation, dict) else None
+        if (
+            not all(
+                isinstance(value, str) and value for value in (source_uid, operation_name, title)
+            )
+            or occurred_at is None
+        ):
+            warnings.append(f"activity item {position}: missing stable identity")
+            continue
+        status = raw.get("status")
+        status_value = str(status.get("value", "")).lower() if isinstance(status, dict) else ""
+        outcome = (
+            ActivityOutcome.SUCCESS
+            if status_value in {"succeeded", "success", "accepted"}
+            else ActivityOutcome.FAILURE
+            if status_value in {"failed", "failure"}
+            else ActivityOutcome.UNKNOWN
+        )
+        resource_id = raw.get("resourceId")
+        activities.append(
+            ActivityRecord(
+                source_uid=source_uid,
+                category=ActivityCategory.ADMIN_CHANGE,
+                activity_name=operation_name,
+                title=title,
+                occurred_at=occurred_at,
+                observed_at=observed_at,
+                outcome=outcome,
+                provider="Microsoft Azure",
+                account_uid=subscription_id,
+                region=raw.get("resourceRegion")
+                if isinstance(raw.get("resourceRegion"), str)
+                else None,
+                evidence=Evidence(
+                    source_type="azure_activity_log",
+                    locator=f"azure://activity/{subscription_id}/{source_uid}",
+                    observed_at=observed_at,
+                    payload={
+                        "subscription_id": subscription_id,
+                        "event_id": source_uid,
+                        "operation": operation_name,
+                        "resource_provider": provider_value,
+                        "resource_id": resource_id if isinstance(resource_id, str) else None,
+                    },
+                ),
+            )
+        )
+    state = CoverageState.PARTIAL if warnings else CoverageState.COMPLETE
+    detail = "; ".join(
+        [
+            f"Collected {len(activities)} bounded AI management events from the last 24 hours.",
+            *warnings[:10],
+        ]
+    )
+    return ActivityBatch(
+        connector_id="denali.azure_ai_activity",
+        connection_id=connection_id,
+        run_id=run_id,
+        scope_key=scope,
+        collected_at=observed_at,
+        coverage=(Coverage("azure_ai_management_activity", state, scope, detail),),
+        activities=tuple(activities),
+    )
+
+
+def _azure_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
 def _parse_resource(
     raw: dict[str, Any], *, subscription_id: str, resource_type: str
 ) -> dict[str, Any]:
@@ -523,9 +865,7 @@ def _asset_assertions(
         return cloud_ref, cloud_assertion, None, None
 
     name_identifier = (
-        "container_app_name"
-        if parsed["service"] == "azure_container_apps"
-        else "function_app_name"
+        "container_app_name" if parsed["service"] == "azure_container_apps" else "function_app_name"
     )
     workload_attributes = {
         **shared_attributes,
@@ -582,9 +922,7 @@ def _containers(properties: dict[str, Any]) -> list[Any]:
     return containers if isinstance(containers, list) else []
 
 
-def _model_configuration_keys(
-    properties: dict[str, Any], resource_type: str
-) -> list[str]:
+def _model_configuration_keys(properties: dict[str, Any], resource_type: str) -> list[str]:
     keys: set[str] = set()
     if resource_type == CONTAINER_APP_RESOURCE_TYPE:
         for container in _containers(properties):

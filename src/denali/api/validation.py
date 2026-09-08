@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from time import monotonic, sleep
 from typing import Any, Protocol
 
@@ -40,6 +40,7 @@ def run_durable_validation_job(
     timeout_seconds: int,
     retry_seconds: int,
     max_error_attempts: int = 3,
+    on_healthy: Callable[[str, str, str], None] | None = None,
 ) -> None:
     """Claim and execute a database-backed validation job exactly once per lease."""
 
@@ -94,6 +95,23 @@ def run_durable_validation_job(
                 repository.record_connection_validation(
                     tenant_id, connection_id, validation
                 )
+                if (
+                    on_healthy is not None
+                    and validation["credential_state"] == "passed"
+                    and validation["health_state"] == "healthy"
+                ):
+                    try:
+                        on_healthy(tenant_id, connection_id, str(target["provider"]))
+                    except Exception as error:
+                        logger.warning(
+                            "automatic collection dispatch failed after healthy validation",
+                            extra={
+                                "tenant_id": tenant_id,
+                                "connection_id": connection_id,
+                                "validation_job_id": job_id,
+                                "error_type": type(error).__name__,
+                            },
+                        )
                 repository.complete_connection_validation_job(job_id)
                 return
             sleep(min(retry_seconds, max(0, deadline - monotonic())))

@@ -43,10 +43,8 @@ from denali.api.validation import run_durable_validation_job
 from denali.connections import (
     AWS_COVERAGE_AUTOMATIC,
     AWS_COVERAGE_SELECTED,
-    AWS_SCOPE_CODE_TO_CLOUD,
     AWS_SCOPES,
     AZURE_CLOUD_PUBLIC,
-    AZURE_SCOPE_CODE_TO_CLOUD,
     AZURE_SCOPES,
     ENTRA_SCOPES,
     GCP_SCOPES,
@@ -2190,11 +2188,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="AWS connection not found")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot collect")
-        if AWS_SCOPE_CODE_TO_CLOUD not in target["declared_scopes"]:
-            raise HTTPException(
-                status_code=409,
-                detail="AWS code-to-cloud scope is not declared",
-            )
         return queue_aws_deployment_collection(
             request, background_tasks, repo, current_tenant, target
         )
@@ -2214,11 +2207,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="Azure connection not found")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot collect")
-        if AZURE_SCOPE_CODE_TO_CLOUD not in target["declared_scopes"]:
-            raise HTTPException(
-                status_code=409,
-                detail="Azure code-to-cloud scope is not declared",
-            )
         if not target["configuration"].get("subscriptions"):
             raise HTTPException(
                 status_code=409,

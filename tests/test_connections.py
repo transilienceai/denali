@@ -155,7 +155,6 @@ class PassingAwsDeploymentCollector:
         self, *, tenant_id: str, connection: dict[str, Any], repository: Any
     ) -> dict[str, Any]:
         assert tenant_id == DEFAULT_LOCAL_TENANT
-        assert connection["declared_scopes"] == [AWS_SCOPE_CODE_TO_CLOUD]
         return {
             "connection_id": str(connection["id"]),
             "state": "complete",
@@ -167,7 +166,7 @@ class PassingAwsDeploymentCollector:
         }
 
 
-def test_aws_connection_collects_deployments_only_for_declared_scope() -> None:
+def test_aws_connection_collects_declared_evidence_scopes() -> None:
     repository = ConnectionRepositoryStub()
     app = create_app(
         repository=repository,
@@ -206,11 +205,10 @@ def test_aws_connection_collects_deployments_only_for_declared_scope() -> None:
                 "declared_scopes": [AWS_SCOPE_BEDROCK_LOGGING],
             },
         ).json()
-        blocked = client.post(
+        logging_collection = client.post(
             f"/v1/connections/{other['id']}/aws/collect-deployments"
         )
-        assert blocked.status_code == 409
-        assert blocked.json()["detail"] == "AWS code-to-cloud scope is not declared"
+        assert logging_collection.status_code == 202
 
 
 def test_aws_connection_api_never_returns_external_id_and_requires_safe_delete() -> None:

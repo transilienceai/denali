@@ -312,6 +312,21 @@ def test_clerk_tenants_cannot_cross_read_or_mutate_evidence_and_jobs(repository)
     )
     assert created is True
     assert repo.list_connections(beta) == []
+    repo.record_connection_validation(
+        alpha,
+        connection_id,
+        {
+            "started_at": now,
+            "completed_at": now,
+            "health_state": "healthy",
+            "credential_state": "passed",
+            "account_id_observed": "123456789012",
+            "results": [],
+            "summary": "Fixture validation passed.",
+        },
+    )
+    assert repo.list_healthy_connection_ids(alpha, provider="aws") == [connection_id]
+    assert repo.list_healthy_connection_ids(beta, provider="aws") == []
     assert repo.get_connection(beta, connection_id) is None
     assert repo.connection_validation_job_state(beta, connection_id) == "idle"
     with pytest.raises(psycopg.errors.ForeignKeyViolation):

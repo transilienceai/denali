@@ -19,7 +19,7 @@ pushed directly to `main`, and production deployment is a separate post-merge ac
 Provider connections retain their current boundary: they onboard and validate access. They do
 not schedule or run collectors automatically.
 
-Connection validation and manually triggered provider collection are durable: the API writes a
+Connection validation and provider collection are durable: the API writes a
 PostgreSQL job and separately spawns the applicable Modal worker. Status polling reads PostgreSQL,
 so work and terminal results survive API-container replacement.
 
@@ -103,7 +103,10 @@ deployment workflow. Denali application secrets remain in Modal Secrets.
 `api` keeps one warm pilot container. `validation_worker` receives only a validation job UUID,
 claims the job in PostgreSQL, and records completion or a bounded failure. A second validation
 request for the same tenant and connection returns `already_running`. An expired worker lease is
-failed before a later manual retry creates a replacement job.
+failed before a later manual retry creates a replacement job. Healthy validation automatically
+dispatches the first provider collection; manual collection remains available for explicit retry
+or refresh. Successful cloud collection refreshes dependent GitHub correlation and tenant rule
+evaluation as specified by [ADR 0030](../architecture/0030-hosted-evidence-orchestration.md).
 
 For AWS, prefer Modal OIDC. Configure AWS to trust `https://oidc.modal.com`, create a
 least-privilege role limited to the Denali Modal workspace/application, and set

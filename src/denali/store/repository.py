@@ -2443,6 +2443,29 @@ class PostgresInventoryRepository:
             ).fetchall()
         return [_connection_response(row) for row in rows]
 
+    def list_healthy_connection_ids(
+        self, tenant_id: str, *, provider: str, limit: int = 50
+    ) -> list[str]:
+        """Return a bounded tenant-scoped dependency target set for worker orchestration."""
+
+        if not 1 <= limit <= 100:
+            raise ValueError("connection dependency limit must be between 1 and 100")
+        with psycopg.connect(self._dsn) as connection:
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM provider_connection
+                WHERE tenant_id = %s::uuid AND provider = %s
+                  AND lifecycle_state = 'active' AND health_state = 'healthy'
+                ORDER BY id
+                LIMIT %s
+                """,
+                (tenant_id, provider, limit + 1),
+            ).fetchall()
+        if len(rows) > limit:
+            raise RuntimeError("connection dependency boundary exceeds the configured limit")
+        return [str(row[0]) for row in rows]
+
     def get_connection(self, tenant_id: str, connection_id: str) -> dict[str, Any] | None:
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             row = connection.execute(

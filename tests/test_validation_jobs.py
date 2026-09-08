@@ -108,3 +108,70 @@ def test_durable_validation_job_retries_transient_provider_errors() -> None:
     assert validator.attempts == 2
     assert repository.completed is True
     assert repository.failure is None
+
+
+def test_healthy_validation_triggers_collection_before_completion() -> None:
+    repository = JobRepository()
+    calls: list[tuple[str, str, str]] = []
+
+    run_durable_validation_job(
+        repository,
+        {"aws": PassingValidator()},
+        "44444444-4444-4444-8444-444444444444",
+        timeout_seconds=60,
+        retry_seconds=0,
+        on_healthy=lambda tenant_id, connection_id, provider: calls.append(
+            (tenant_id, connection_id, provider)
+        ),
+    )
+
+    assert calls == [
+        (
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "11111111-1111-4111-8111-111111111111",
+            "aws",
+        )
+    ]
+    assert repository.completed is True
+
+
+def test_non_healthy_validation_does_not_trigger_collection() -> None:
+    class PartialValidator(PassingValidator):
+        def validate(self, target: dict[str, Any]) -> dict[str, Any]:
+            result = super().validate(target)
+            result["health_state"] = "partial"
+            return result
+
+    repository = JobRepository()
+    calls: list[tuple[str, str, str]] = []
+    run_durable_validation_job(
+        repository,
+        {"aws": PartialValidator()},
+        "55555555-5555-4555-8555-555555555555",
+        timeout_seconds=60,
+        retry_seconds=0,
+        on_healthy=lambda *values: calls.append(values),
+    )
+
+    assert calls == []
+    assert repository.completed is True
+
+
+def test_collection_dispatch_failure_does_not_relabel_healthy_validation() -> None:
+    repository = JobRepository()
+
+    def fail_dispatch(*_values: str) -> None:
+        raise RuntimeError("temporary dispatcher failure")
+
+    run_durable_validation_job(
+        repository,
+        {"aws": PassingValidator()},
+        "66666666-6666-4666-8666-666666666666",
+        timeout_seconds=60,
+        retry_seconds=0,
+        on_healthy=fail_dispatch,
+    )
+
+    assert repository.validation is not None
+    assert repository.completed is True
+    assert repository.failure is None
