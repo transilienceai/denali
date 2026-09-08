@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from denali.api.maintenance import dispatch_active_connection_refresh
+import pytest
+
+from denali.api.maintenance import (
+    dispatch_active_connection_refresh,
+    invoke_deployed_maintenance,
+)
 
 
 class MaintenanceRepository:
@@ -94,3 +99,29 @@ def test_operator_refresh_fails_closed_per_job_without_stopping_the_batch() -> N
             "Unable to dispatch operator-requested validation worker.",
         )
     ]
+
+
+def test_operator_invokes_the_deployed_modal_graph() -> None:
+    calls: list[tuple[str, str, str, int]] = []
+
+    class Function:
+        def remote(self, limit: int) -> dict[str, int]:
+            calls.append(("remote", "", "", limit))
+            return {"active": 5}
+
+    def load(app_name: str, function_name: str, *, environment_name: str) -> Function:
+        calls.append((app_name, function_name, environment_name, 0))
+        return Function()
+
+    assert invoke_deployed_maintenance(
+        "refresh", limit=100, function_loader=load
+    ) == {"active": 5}
+    assert calls == [
+        ("denali-production", "refresh_active_connections", "denali-prod", 0),
+        ("remote", "", "", 100),
+    ]
+
+
+def test_operator_status_invocation_is_bounded() -> None:
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        invoke_deployed_maintenance("status", limit=501, function_loader=lambda *_a, **_k: None)

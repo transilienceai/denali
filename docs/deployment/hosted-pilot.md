@@ -112,8 +112,8 @@ After a reviewed release changes validation or collection orchestration, an oper
 bounded refresh of all active connections from the exact deployed `main` revision:
 
 ```bash
-modal run --env denali-prod modal_app.py::refresh_active_connections --limit 100
-modal run --env denali-prod modal_app.py::active_connection_status --limit 100
+PYTHONPATH=src python -m denali.api.maintenance refresh --limit 100 --confirm-production
+PYTHONPATH=src python -m denali.api.maintenance status --limit 100 --confirm-production
 ```
 
 The refresh function creates the same durable validation jobs as the authenticated API and relies
@@ -121,6 +121,9 @@ on the normal healthy-validation hook for collection. It neither accepts a tenan
 edits connection evidence directly. The status function prints only structured tenant/connection
 identifiers, provider, health, and job states; it never prints names, credentials, or provider
 payloads. Run it only from clean, current `main` after the production workflow succeeds.
+The checked-in command resolves the functions from the deployed `denali-production` app; do not
+replace it with `modal run`, which creates a temporary function graph whose spawned workers do not
+have the deployed app's lifecycle.
 
 For AWS, prefer Modal OIDC. Configure AWS to trust `https://oidc.modal.com`, create a
 least-privilege role limited to the Denali Modal workspace/application, and set
