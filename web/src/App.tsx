@@ -508,6 +508,8 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
               assets={assets}
               coverage={coverage}
               issues={issues}
+              findingSummary={findingSummary ?? { total: 0, by_state: {}, open_by_severity: {} }}
+              detectionSummary={detectionSummary ?? { total: 0, by_state: {}, open_by_severity: {} }}
               vulnerabilitySummary={vulnerabilitySummary ?? {
                 total: 0,
                 by_state: {},
@@ -777,6 +779,8 @@ function Dashboard({
   assets,
   coverage,
   issues,
+  findingSummary,
+  detectionSummary,
   vulnerabilitySummary,
   activitySummary,
   activities,
@@ -791,6 +795,8 @@ function Dashboard({
   assets: Asset[];
   coverage: Coverage[];
   issues: Issue[];
+  findingSummary: FindingSummary;
+  detectionSummary: RuntimeDetectionSummary;
   vulnerabilitySummary: VulnerabilitySummary;
   activitySummary: RuntimeActivitySummary;
   activities: RuntimeActivity[];
@@ -813,6 +819,18 @@ function Dashboard({
   const priorityIssue = [...issues]
     .filter((issue) => issue.state === "open")
     .sort((left, right) => (severityRank[right.severity] ?? 0) - (severityRank[left.severity] ?? 0) || right.confidence - left.confidence)[0];
+  const openFindings = findingSummary.by_state.open ?? 0;
+  const openDetections = detectionSummary.by_state.open ?? 0;
+  const findingSeverityDetail = ["critical", "high", "medium"]
+    .map((severity) => [severity, findingSummary.open_by_severity[severity] ?? 0] as const)
+    .filter(([, count]) => count > 0)
+    .map(([severity, count]) => `${count} ${severity}`)
+    .join(" · ");
+  const detectionSeverityDetail = ["critical", "high", "medium"]
+    .map((severity) => [severity, detectionSummary.open_by_severity[severity] ?? 0] as const)
+    .filter(([, count]) => count > 0)
+    .map(([severity, count]) => `${count} ${severity}`)
+    .join(" · ");
   const criticalVulnerabilityOccurrences = vulnerabilitySummary.open_by_severity.critical ?? 0;
   const fixableVulnerabilityOccurrences = vulnerabilitySummary.open_by_fix_state.fixed ?? 0;
   const vulnerabilityAssessed = coverage.some(
@@ -844,7 +862,7 @@ function Dashboard({
       </div>
       </section>
 
-      {deployments.length > 0 && <GoldenPath deployments={deployments} onOpen={() => onNavigate("codeToCloud")} />}
+      {deployments.length > 0 && <VerifiedDeployments deployments={deployments} onOpen={() => onNavigate("codeToCloud")} />}
 
       <section className="command-grid">
         <section className="denali-brief">
@@ -853,17 +871,26 @@ function Dashboard({
             <span className="deterministic-badge"><ShieldCheck size={14} /> Evidence-backed</span>
           </div>
           <div className="brief-priorities">
-            <button className="brief-priority" onClick={() => priorityIssue ? onOpenIssue(priorityIssue.id) : onNavigate("issues")}>
+            <button className="brief-priority" onClick={() => priorityIssue ? onOpenIssue(priorityIssue.id) : onNavigate(openDetections > 0 ? "detections" : "issues")}>
               <span className="priority-number">01</span>
               <span className="priority-copy">
-                <small>{priorityIssue ? `${priorityIssue.severity.toUpperCase()} CORRELATED ISSUE` : "CORRELATION"}</small>
-                <strong>{priorityIssue?.title ?? "No open correlated issue is currently retained"}</strong>
-                <span>{priorityIssue ? `${Math.round(priorityIssue.confidence * 100)}% confidence · ${priorityIssue.finding_count + priorityIssue.detection_count + priorityIssue.activity_count} linked signals` : "No issue has crossed a configured correlation threshold."}</span>
+                <small>{priorityIssue ? `${priorityIssue.severity.toUpperCase()} CORRELATED ISSUE` : openDetections > 0 ? "RUNTIME DETECTION" : "CORRELATION"}</small>
+                <strong>{priorityIssue?.title ?? (openDetections > 0 ? `${openDetections} open runtime detection${openDetections === 1 ? "" : "s"}` : "No open correlated issue is currently retained")}</strong>
+                <span>{priorityIssue ? `${Math.round(priorityIssue.confidence * 100)}% confidence · ${priorityIssue.finding_count + priorityIssue.detection_count + priorityIssue.activity_count} linked signals` : openDetections > 0 ? `${detectionSeverityDetail || "Evidence-linked behavior"} · review before correlation` : "No issue has crossed a configured correlation threshold."}</span>
+              </span>
+              <ChevronRight size={19} />
+            </button>
+            <button className="brief-priority" onClick={() => onNavigate("findings")}>
+              <span className="priority-number">02</span>
+              <span className="priority-copy">
+                <small>CONFIGURATION POSTURE</small>
+                <strong>{openFindings === 0 ? "No open configuration findings" : `${openFindings} open configuration finding${openFindings === 1 ? "" : "s"}`}</strong>
+                <span>{openFindings > 0 ? `${findingSeverityDetail || "Evidence-backed findings"} · inspect affected resources` : "No retained finding currently requires review."}</span>
               </span>
               <ChevronRight size={19} />
             </button>
             <button className="brief-priority" onClick={() => onViewInventory("ai_workload")}>
-              <span className="priority-number">02</span>
+              <span className="priority-number">03</span>
               <span className="priority-copy">
                 <small>AI WORKLOAD GOVERNANCE</small>
                 <strong>{unreviewedWorkloads === 0 ? "No observed AI workloads await review" : `${unreviewedWorkloads} observed AI workload${unreviewedWorkloads === 1 ? "" : "s"} await review`}</strong>
@@ -872,7 +899,7 @@ function Dashboard({
               <ChevronRight size={19} />
             </button>
             <button className="brief-priority" onClick={() => onNavigate("vulnerabilities")}>
-              <span className="priority-number">03</span>
+              <span className="priority-number">04</span>
               <span className="priority-copy">
                 <small>AI STACK EXPOSURE</small>
                 <strong>{vulnerabilityAssessed ? `${vulnerabilitySummary.open_vulnerability_ids} distinct open vulnerabilities` : "Vulnerability exposure has not been assessed"}</strong>
@@ -961,7 +988,15 @@ function Dashboard({
   );
 }
 
-function GoldenPath({
+function deploymentProvider(deployment: CodeToCloudDeployment) {
+  const explicitProvider = String(deployment.workload_attributes.provider ?? deployment.attributes.provider ?? "").toLowerCase();
+  const naturalKey = deployment.workload_natural_key.toLowerCase();
+  if (explicitProvider.includes("azure") || naturalKey.includes("/subscriptions/") || naturalKey.includes("microsoft.")) return "Azure";
+  if (explicitProvider.includes("aws") || naturalKey.startsWith("arn:aws:")) return "AWS";
+  return "GCP";
+}
+
+function VerifiedDeployments({
   deployments,
   onOpen,
 }: {
@@ -969,27 +1004,25 @@ function GoldenPath({
   onOpen: () => void;
 }) {
   const providerCount = new Set(
-    deployments.map((deployment) =>
-      deployment.workload_natural_key.startsWith("arn:aws:") ? "AWS" : "GCP"),
+    deployments.map(deploymentProvider),
   ).size;
   const ordered = [...deployments].sort((left, right) => {
-    const providerOrder = Number(!left.workload_natural_key.startsWith("arn:aws:")) -
-      Number(!right.workload_natural_key.startsWith("arn:aws:"));
+    const providerOrder = deploymentProvider(left).localeCompare(deploymentProvider(right));
     return providerOrder || left.workload_natural_key.localeCompare(right.workload_natural_key);
   });
   return (
     <section className="golden-path-panel">
       <div className="golden-path-head">
         <div>
-          <span className="eyebrow"><Sparkles size={13} /> GOLDEN PATH</span>
-          <h3>{deployments.length} application{deployments.length === 1 ? "" : "s"}. {providerCount} cloud{providerCount === 1 ? "" : "s"}. One reviewable story.</h3>
-          <p>Start with source, follow an exact deployment declaration, and land on a workload independently observed in its cloud control plane.</p>
+          <span className="eyebrow"><Sparkles size={15} /> VERIFIED DEPLOYMENTS</span>
+          <h3>{deployments.length} application{deployments.length === 1 ? "" : "s"} connected from source to runtime.</h3>
+          <p>Trace each application from an immutable source revision to the exact workload independently observed in its cloud account.</p>
         </div>
-        <button onClick={onOpen}>Open code-to-cloud <ChevronRight size={16} /></button>
+        <button onClick={onOpen}>Explore deployment evidence <ChevronRight size={16} /></button>
       </div>
       <div className="golden-path-apps">
         {ordered.map((deployment, index) => {
-          const provider = deployment.workload_natural_key.startsWith("arn:aws:") ? "AWS" : "GCP";
+          const provider = deploymentProvider(deployment);
           const repositorySlug = deployment.repository_natural_key.split("/").at(-1) ?? deployment.repository_name;
           const rawWorkloadName = deployment.workload_natural_key.split(/[/:]/).at(-1) ?? deployment.workload_name;
           const applicationName = deployment.workload_name !== rawWorkloadName
@@ -997,7 +1030,9 @@ function GoldenPath({
             : titleCase(repositorySlug.replaceAll("-", " "));
           const location = provider === "AWS"
             ? deployment.workload_natural_key.split(":")[3]
-            : deployment.workload_natural_key.match(/\/locations\/([^/]+)/)?.[1];
+            : provider === "Azure"
+              ? deployment.workload_natural_key.match(/\/locations\/([^/]+)/i)?.[1] ?? String(deployment.workload_attributes.location ?? "Azure")
+              : deployment.workload_natural_key.match(/\/locations\/([^/]+)/)?.[1];
           return (
             <button className="golden-path-app" key={deployment.id} onClick={onOpen}>
               <span className={`golden-path-number ${provider.toLowerCase()}`}>{String(index + 1).padStart(2, "0")}</span>
@@ -1017,7 +1052,7 @@ function GoldenPath({
           );
         })}
       </div>
-      <div className="golden-path-proof"><ShieldCheck size={16} /><span><strong>{deployments.length} exact source-to-runtime links</strong> retained from immutable GitHub revisions and independent AWS/GCP observations.</span></div>
+      <div className="golden-path-proof"><ShieldCheck size={18} /><span><strong>{deployments.length} verified source-to-runtime link{deployments.length === 1 ? "" : "s"}</strong> across {providerCount} cloud provider{providerCount === 1 ? "" : "s"}, retained from immutable source revisions and independent control-plane observations.</span></div>
     </section>
   );
 }
@@ -1131,7 +1166,7 @@ function Findings({
       <div className="findings-table" role="table" aria-label="AI configuration findings">
         <div className="findings-table-head" role="row"><span>Finding</span><span>Severity</span><span>State</span><span>Affected</span><span>Source</span><span>Last seen</span><span /></div>
         {filtered.map((finding) => <FindingTableRow key={finding.id} finding={finding} onClick={() => onOpenFinding(finding.id)} />)}
-        {filtered.length === 0 && <div className="empty-state"><ShieldCheck /><strong>{findings.length === 0 ? "No findings have been imported" : "No findings match these filters"}</strong><span>{findings.length === 0 ? "Import a Prowler JSON-OCSF report or run the transparent demo seed." : "Reset the filters or include resolved findings."}</span></div>}
+        {filtered.length === 0 && <div className="empty-state"><ShieldCheck /><strong>{findings.length === 0 ? "No findings have been imported" : "No findings match these filters"}</strong><span>{findings.length === 0 ? "Connect a supported posture scanner or import a bounded Prowler JSON-OCSF report." : "Reset the filters or include resolved findings."}</span></div>}
       </div>
     </section>
     <p className="fixture-note"><CircleHelp size={15} /> Findings are evaluated conditions. Resource references do not create inventory assets or graph edges.</p>
@@ -1263,7 +1298,7 @@ function Vulnerabilities({
       <div className="vulnerabilities-table" role="table" aria-label="AI vulnerabilities">
         <div className="vulnerabilities-table-head" role="row"><span>Vulnerability</span><span>Severity</span><span>Component</span><span>Fix</span><span>Scanner</span><span>Last seen</span><span /></div>
         {filtered.map((item) => <VulnerabilityTableRow key={item.id} item={item} onClick={() => onOpenVulnerability(item.id)} />)}
-        {filtered.length === 0 && <div className="empty-state"><ShieldCheck /><strong>{vulnerabilities.length === 0 ? "No vulnerability reports have been imported" : "No vulnerabilities match these filters"}</strong><span>{vulnerabilities.length === 0 ? "Import a Syft SBOM and Grype JSON report, or run the transparent demo seed." : "Reset the filters or include resolved vulnerabilities."}</span></div>}
+        {filtered.length === 0 && <div className="empty-state"><ShieldCheck /><strong>{vulnerabilities.length === 0 ? "No vulnerability assessment has been imported" : "No vulnerabilities match these filters"}</strong><span>{vulnerabilities.length === 0 ? "Connect a CI-generated Syft SBOM and Grype JSON report for each deployed artifact." : "Reset the filters or include resolved vulnerabilities."}</span></div>}
       </div>
     </section>
     <p className="fixture-note"><ShieldCheck size={15} /> A package match is evidence, not certainty. Scanner match method, Denali-derived confidence, database version, and component correlation stay visible.</p>
@@ -1375,6 +1410,19 @@ function Issues({
   const confirmed = evaluations.reduce((total, item) => total + item.confirmed_issues, 0);
   const incomplete = evaluations.reduce((total, item) => total + item.incomplete_candidates, 0);
   const evaluated = evaluation !== null;
+  const correlationComplete = evaluation?.state === "complete";
+  const correlationCoverageDetail = !evaluation
+    ? "Awaiting evaluation"
+    : correlationComplete
+      ? "All rule inputs evaluated"
+      : incomplete > 0
+        ? `${incomplete} incomplete candidate${incomplete === 1 ? "" : "s"}`
+        : "Some rule inputs have incomplete coverage";
+  const emptyIssueDetail = !evaluated
+    ? "Run the deterministic issue evaluator after collecting inventory and findings."
+    : correlationComplete
+      ? "Current evidence was evaluated; no deterministic path or sequence met an issue rule."
+      : "No issue currently meets the evidence threshold; incomplete rule inputs are identified above.";
 
   return <div className="page-stack issues-page">
     <section className="page-intro"><div><span className="eyebrow">CONFIRMED CONSEQUENCES</span><h2>Prioritize what can actually happen.</h2><p>Denali combines independently observed inventory, findings, relationships, detections, and activity only when exact identifiers and explicit evidence support the conclusion.</p></div><div className="result-count"><strong>{evaluated ? summary.by_state.open ?? 0 : "N/A"}</strong><span>{evaluated ? "open issues" : "issue evaluation"}</span></div></section>
@@ -1382,11 +1430,11 @@ function Issues({
       <FindingMetric severity="critical" count={evaluated ? summary.open_by_severity.critical ?? 0 : "N/A"} />
       <FindingMetric severity="high" count={evaluated ? summary.open_by_severity.high ?? 0 : "N/A"} />
       <div className="issue-signal-card"><span className="issue-signal-icon confirmed"><Gauge /></span><div><span>Confirmed issues</span><strong>{evaluated ? confirmed : "N/A"}</strong><small>{evaluated ? "Paths and temporal correlations" : "Not evaluated"}</small></div></div>
-      <div className="issue-signal-card"><span className={`issue-signal-icon ${incomplete ? "attention" : "complete"}`}>{incomplete ? <CircleHelp /> : <ShieldCheck />}</span><div><span>Correlation coverage</span><strong>{evaluation ? titleCase(evaluation.state) : "Not run"}</strong><small>{incomplete ? `${incomplete} incomplete candidates` : "No hidden path gaps"}</small></div></div>
+      <div className="issue-signal-card"><span className={`issue-signal-icon ${correlationComplete ? "complete" : "attention"}`}>{correlationComplete ? <ShieldCheck /> : <CircleHelp />}</span><div><span>Correlation coverage</span><strong>{evaluation ? titleCase(evaluation.state) : "Not run"}</strong><small>{correlationCoverageDetail}</small></div></div>
     </section>
     <section className={`issue-coverage-banner ${evaluation?.state ?? "unknown"}`}>
       {evaluation?.state === "complete" ? <CircleCheck /> : <CircleHelp />}
-      <div><strong>{evaluation?.state === "complete" ? "Correlation evaluation is complete" : "Correlation evaluation has unknowns"}</strong><span>{evaluation?.detail ?? "Every displayed issue is evidence-bearing. Graph paths require active edges; temporal issues require exact identity and sequence."}</span></div>
+      <div><strong>{correlationComplete ? "Correlation evaluation is complete" : evaluation ? "Correlation coverage is partial" : "Correlation has not been evaluated"}</strong><span>{evaluation?.detail ?? "Every displayed issue is evidence-bearing. Graph paths require active edges; temporal issues require exact identity and sequence."}</span></div>
       {evaluation && <small>{formatTime(evaluation.evaluated_at)}</small>}
     </section>
     <section className="panel issues-panel">
@@ -1399,7 +1447,7 @@ function Issues({
       <div className="issues-table" role="table" aria-label="AI issues and attack paths">
         <div className="issues-table-head" role="row"><span>Issue</span><span>Severity</span><span>State</span><span>Context</span><span>Evidence</span><span>Last confirmed</span><span /></div>
         {filtered.map((issue) => <IssueTableRow key={issue.id} issue={issue} onClick={() => onOpenIssue(issue.id)} />)}
-        {filtered.length === 0 && <div className="empty-state"><ShieldCheck /><strong>{issues.length === 0 ? "No confirmed issues" : "No issues match these filters"}</strong><span>{issues.length === 0 ? "Run the deterministic issue evaluator after collecting inventory and findings." : "Reset the filters or include resolved issues."}</span></div>}
+        {filtered.length === 0 && <div className="empty-state"><ShieldCheck /><strong>{issues.length === 0 ? (evaluated ? "No issue currently meets the evidence threshold" : "No confirmed issues") : "No issues match these filters"}</strong><span>{issues.length === 0 ? emptyIssueDetail : "Reset the filters or include resolved issues."}</span></div>}
       </div>
     </section>
     <p className="fixture-note"><ShieldCheck size={15} /> Findings, detections, and activity never create graph edges. Graph issues require active capability assertions; temporal issues require exact identity and a strict event sequence.</p>
@@ -1839,9 +1887,9 @@ function ShadowAiPage({
 
   if (!hasEntraBoundary) {
     return <div className="page-stack shadow-ai-page">
-      <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>AI application discovery is outside this Golden Path.</h2><p>This workspace currently contains two code-to-cloud applications in AWS and Google Cloud. It has no declared Microsoft Entra evidence boundary.</p></div><div className="result-count"><strong>N/A</strong><span>Entra application coverage</span></div></section>
-      <section className="panel applicability-boundary"><CircleHelp /><div><span className="eyebrow">NOT APPLICABLE</span><h3>No Microsoft Entra tenant is connected</h3><p>Denali will not turn missing Entra collection into four reassuring zeroes. Connect an Entra tenant when workforce AI application discovery belongs in the demo; until then, this page is explicitly out of scope.</p></div></section>
-      <section className="shadow-principle"><ShieldCheck /><div><strong>The rest of the Golden Path remains valid.</strong><span>Anna and Summit continue to demonstrate source, deployment, identity, model, component, posture, and runtime evidence without an unrelated SaaS application fixture.</span></div></section>
+      <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>AI application discovery is not configured for this workspace.</h2><p>No Microsoft Entra evidence boundary has been declared, so Denali does not present missing collection as zero discovered applications.</p></div><div className="result-count"><strong>N/A</strong><span>Entra application coverage</span></div></section>
+      <section className="panel applicability-boundary"><CircleHelp /><div><span className="eyebrow">NOT ASSESSED</span><h3>No Microsoft Entra tenant is connected</h3><p>Denali will not turn missing Entra collection into reassuring zeroes. Connect an Entra tenant when workforce AI application discovery is in scope; until then, this page remains explicitly not assessed.</p></div></section>
+      <section className="shadow-principle"><ShieldCheck /><div><strong>Other connected evidence remains available.</strong><span>Source, deployment, identity, model, component, posture, and runtime evidence remain independently reviewable.</span></div></section>
     </div>;
   }
 
@@ -1971,7 +2019,7 @@ function RuntimeActivityPage({
       <div className="runtime-table" role="table" aria-label="AI runtime activity">
         <div className="runtime-table-head" role="row"><span>Activity</span><span>Type</span><span>Outcome</span><span>Actor</span><span>Provider</span><span>Occurred</span><span /></div>
         {filtered.map((item) => <RuntimeActivityRow key={item.id} item={item} onClick={() => onOpenActivity(item.id)} />)}
-        {filtered.length === 0 && <div className="empty-state"><Activity /><strong>{activities.length === 0 ? "No runtime activity has been imported" : "No activity matches these filters"}</strong><span>{activities.length === 0 ? "Import a bounded provider activity export or run the transparent demo seed." : "Reset the filters to see the full activity stream."}</span></div>}
+        {filtered.length === 0 && <div className="empty-state"><Activity /><strong>{activities.length === 0 ? "No runtime activity has been imported" : "No activity matches these filters"}</strong><span>{activities.length === 0 ? "Collect a bounded activity window from a connected cloud provider." : "Reset the filters to see the full activity stream."}</span></div>}
       </div>
     </section>
     <p className="fixture-note"><ShieldCheck size={15} /> Runtime activity is an observation, not a detection or issue. Denali makes no risk claim until a separate rule evaluates the evidence.</p>
