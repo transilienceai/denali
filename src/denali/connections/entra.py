@@ -219,7 +219,12 @@ class EntraConnectionValidator:
                 "tenant_id": tenant_id,
             }
             try:
-                graph.list(metadata[2], params={"$top": "1", "$select": metadata[3]}, limit=2)
+                graph.list(
+                    metadata[2],
+                    params={"$top": "1", "$select": metadata[3]},
+                    limit=2,
+                    follow_pagination=False,
+                )
                 result.update(
                     state="passed",
                     detail="The declared read-only Microsoft Graph plane was callable.",

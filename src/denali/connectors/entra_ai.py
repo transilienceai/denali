@@ -118,7 +118,12 @@ class AiSaasCatalog:
 
 class GraphClient(Protocol):
     def list(
-        self, path: str, *, params: dict[str, str] | None = None, limit: int = MAX_GRAPH_RECORDS
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        limit: int = MAX_GRAPH_RECORDS,
+        follow_pagination: bool = True,
     ) -> tuple[dict[str, Any], ...]: ...
 
 
@@ -130,7 +135,12 @@ class MicrosoftGraphClient:
         self.timeout = timeout
 
     def list(
-        self, path: str, *, params: dict[str, str] | None = None, limit: int = MAX_GRAPH_RECORDS
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        limit: int = MAX_GRAPH_RECORDS,
+        follow_pagination: bool = True,
     ) -> tuple[dict[str, Any], ...]:
         if not path.startswith("/"):
             raise ValueError("Graph path must begin with /")
@@ -172,6 +182,8 @@ class MicrosoftGraphClient:
                         raise GraphRecordLimitReached(
                             f"Microsoft Graph collection exceeded the {limit}-record safety limit"
                         )
+            if not follow_pagination:
+                break
             next_link = payload.get("@odata.nextLink")
             if next_link is None:
                 break

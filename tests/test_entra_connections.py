@@ -45,8 +45,15 @@ class FakeGraph:
         self.calls: list[str] = []
 
     def list(
-        self, path: str, *, params: dict[str, str] | None = None, limit: int = 20_000
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        limit: int = 20_000,
+        follow_pagination: bool = True,
     ) -> tuple[dict[str, Any], ...]:
+        del params, limit
+        assert follow_pagination is False
         self.calls.append(path)
         if path in self.failures:
             raise RuntimeError("provider response must not escape")

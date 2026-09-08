@@ -11,6 +11,7 @@ from denali.connectors.entra_ai import (
     AiSaasCatalog,
     CatalogEntry,
     EntraAiConnector,
+    MicrosoftGraphClient,
 )
 from denali.domain import (
     ActivityCategory,
@@ -33,15 +34,55 @@ class FakeGraph:
         self.requests: list[tuple[str, dict[str, str]]] = []
 
     def list(
-        self, path: str, *, params: dict[str, str] | None = None, limit: int = 20_000
+        self,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        limit: int = 20_000,
+        follow_pagination: bool = True,
     ) -> tuple[dict[str, Any], ...]:
-        del limit
+        del limit, follow_pagination
         self.calls.append(path)
         self.requests.append((path, dict(params or {})))
         response = self.responses.get(path, ())
         if isinstance(response, Exception):
             raise response
         return tuple(response)
+
+
+def test_graph_validation_probe_does_not_follow_a_next_link(monkeypatch) -> None:
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return (
+                b'{"value":[{"id":"first"}],"@odata.nextLink":'
+                b'"https://graph.microsoft.com/v1.0/servicePrincipals?$skiptoken=next"}'
+            )
+
+    def urlopen(request: Any, *, timeout: float) -> FakeResponse:
+        del timeout
+        requested_urls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr("denali.connectors.entra_ai.urllib.request.urlopen", urlopen)
+    graph = MicrosoftGraphClient("short-lived-fixture-token")
+
+    records = graph.list(
+        "/v1.0/servicePrincipals",
+        params={"$top": "1", "$select": "id"},
+        limit=2,
+        follow_pagination=False,
+    )
+
+    assert records == ({"id": "first"},)
+    assert len(requested_urls) == 1
 
 
 def _catalog() -> AiSaasCatalog:
