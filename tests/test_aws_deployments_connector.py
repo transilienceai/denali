@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from denali.connectors.aws_deployments import (
+    AwsConnectionDeploymentCollector,
     AwsDeploymentConnector,
     _agentcore_batch,
     _bedrock_logging_batch,
@@ -21,7 +22,10 @@ class LambdaClient:
             "Role": "arn:aws:iam::123456789012:role/lambda-role",
             "Runtime": "python3.13",
             "Environment": {
-                "Variables": {"BEDROCK_MODEL_ID": "never-retained"}
+                "Variables": {
+                    "BEDROCK_MODEL_ID": "global.anthropic.claude-sonnet-4-5-v1:0",
+                    "API_TOKEN": "never-retained",
+                }
                 if FunctionName == "agent"
                 else {"LOG_LEVEL": "debug"}
             },
@@ -50,7 +54,13 @@ class EcsClient:
                     {
                         "name": "worker",
                         "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/worker@sha256:abc",
-                        "environment": [{"name": "MODEL_ENDPOINT_NAME", "value": "never-retained"}],
+                        "environment": [
+                            {
+                                "name": "PROPOSAL_CRITIC_MODEL_ID",
+                                "value": "global.anthropic.claude-opus-4-6-v1",
+                            },
+                            {"name": "API_TOKEN", "value": "never-retained"},
+                        ],
                     }
                 ],
             },
@@ -110,6 +120,72 @@ class Session:
         return self.clients[service]
 
 
+class IamClient:
+    def list_role_policies(self, *, RoleName: str, **kwargs: Any) -> dict[str, Any]:
+        policies = ["InvokeModels"] if RoleName in {"lambda-role", "ecs-role"} else []
+        return {"PolicyNames": policies, "IsTruncated": False}
+
+    def get_role_policy(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "PolicyDocument": {
+                "Statement": {
+                    "Effect": "Allow",
+                    "Action": "bedrock:InvokeModel",
+                    "Resource": "arn:aws:bedrock:*::foundation-model/anthropic.*",
+                }
+            }
+        }
+
+    def list_attached_role_policies(self, **kwargs: Any) -> dict[str, Any]:
+        return {"AttachedPolicies": [], "IsTruncated": False}
+
+
+class StsClient:
+    def __init__(self, *, assumed: bool):
+        self.assumed = assumed
+
+    def assume_role(self, **kwargs: Any) -> dict[str, Any]:
+        assert not self.assumed
+        return {
+            "Credentials": {
+                "AccessKeyId": "temporary",
+                "SecretAccessKey": "temporary",
+                "SessionToken": "temporary",
+            }
+        }
+
+    def get_caller_identity(self) -> dict[str, str]:
+        assert self.assumed
+        return {"Account": "123456789012"}
+
+
+class AssumedSession(Session):
+    clients = {**Session.clients, "iam": IamClient(), "sts": StsClient(assumed=True)}
+
+
+class BaseSession:
+    def client(self, service: str, **kwargs: Any) -> Any:
+        assert service == "sts"
+        return StsClient(assumed=False)
+
+
+class Repository:
+    def __init__(self):
+        self.inventory: list[Any] = []
+        self.findings: list[Any] = []
+
+    def ingest(self, tenant_id: str, batch: Any) -> dict[str, int]:
+        self.inventory.append(batch)
+        return {"assets": len(batch.assets)}
+
+    def ingest_findings(self, tenant_id: str, batch: Any) -> dict[str, int]:
+        self.findings.append(batch)
+        return {"findings": len(batch.findings)}
+
+    def ingest_activity(self, tenant_id: str, batch: Any) -> dict[str, int]:
+        raise AssertionError("activity was not requested")
+
+
 def test_collects_four_explicit_aws_deployment_contracts_without_secret_values() -> None:
     batch = AwsDeploymentConnector(
         account_id="123456789012",
@@ -150,12 +226,58 @@ def test_collects_four_explicit_aws_deployment_contracts_without_secret_values()
     assert "never-retained" not in str(batch)
     assert sum(item.kind is RelationshipKind.HOSTED_ON for item in batch.relationships) == 4
     assert sum(item.kind is RelationshipKind.RUNS_AS for item in batch.relationships) == 4
+    assert sum(item.kind is RelationshipKind.USES for item in batch.relationships) == 2
+    assert {
+        item.attributes["model_id"]
+        for item in batch.assets
+        if item.asset.kind is AssetKind.AI_MODEL
+    } == {
+        "global.anthropic.claude-sonnet-4-5-v1:0",
+        "global.anthropic.claude-opus-4-6-v1",
+    }
     ordinary = [
         item
         for item in batch.assets
         if item.asset.kind is AssetKind.CLOUD_RESOURCE and item.display_name == "ordinary"
     ]
     assert len(ordinary) == 1
+
+
+def test_connection_collection_ingests_model_links_and_iam_findings() -> None:
+    repository = Repository()
+
+    result = AwsConnectionDeploymentCollector(
+        session_factory=lambda **credentials: AssumedSession() if credentials else BaseSession()
+    ).collect(
+        tenant_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        connection={
+            "id": "11111111-1111-4111-8111-111111111111",
+            "provider": "aws",
+            "lifecycle_state": "active",
+            "declared_scopes": ["aws.code_to_cloud"],
+            "configuration": {
+                "account_id": "123456789012",
+                "coverage_mode": "selected",
+                "regions": ["us-east-1"],
+                "partition": "aws",
+            },
+            "credential_reference": {
+                "role_arn": "arn:aws:iam::123456789012:role/denali",
+                "external_id": "external",
+            },
+        },
+        repository=repository,
+    )
+
+    assert result["state"] == "complete"
+    assert result["regions"][0]["iam_findings"] == 2
+    assert len(repository.findings) == 1
+    assert len(repository.findings[0].findings) == 2
+    assert any(
+        relationship.kind is RelationshipKind.USES
+        for batch in repository.inventory
+        for relationship in batch.relationships
+    )
 
 
 def test_agentcore_marks_undocumented_regions_without_false_failures() -> None:
