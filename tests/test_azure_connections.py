@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 
@@ -73,77 +71,14 @@ class AzureConnectionRepositoryStub:
         *,
         launch: dict[str, Any],
         setup_token_sha256: str,
-        consent_state_sha256: str,
     ) -> dict[str, Any] | None:
         target = self.targets.get(connection_id)
         row = self.rows.get(connection_id)
         if target is None or row is None:
             return None
         target["credential_reference"]["setup_token_sha256"] = setup_token_sha256
-        target["credential_reference"]["consent_state_sha256"] = consent_state_sha256
         target["configuration"]["onboarding"] = launch
         row["configuration"]["onboarding"] = launch
-        return row
-
-    def record_azure_script_launch(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        launch: dict[str, Any],
-        setup_token_sha256: str,
-    ) -> dict[str, Any] | None:
-        target = self.targets.get(connection_id)
-        row = self.rows.get(connection_id)
-        if target is None or row is None:
-            return None
-        if target["configuration"].get("onboarding", {}).get("consent_status") != "completed":
-            return None
-        target["credential_reference"]["setup_token_sha256"] = setup_token_sha256
-        target["credential_reference"].pop("consent_state_sha256", None)
-        target["configuration"]["onboarding"].update(launch)
-        row["configuration"] = target["configuration"]
-        return row
-
-    def fail_azure_consent_setup(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        expected_state_sha256: str,
-        failed_at: datetime,
-    ) -> bool:
-        target = self.targets.get(connection_id)
-        if target is None:
-            return False
-        if target["credential_reference"].get("consent_state_sha256") != expected_state_sha256:
-            return False
-        target["credential_reference"].pop("consent_state_sha256", None)
-        target["configuration"]["onboarding"].update(
-            consent_status="failed", consent_failed_at=failed_at.isoformat()
-        )
-        self.rows[connection_id]["configuration"] = target["configuration"]
-        return True
-
-    def complete_azure_consent_setup(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        expected_state_sha256: str,
-        completed_at: datetime,
-    ) -> dict[str, Any] | None:
-        target = self.targets.get(connection_id)
-        row = self.rows.get(connection_id)
-        if target is None or row is None:
-            return None
-        if target["credential_reference"].get("consent_state_sha256") != expected_state_sha256:
-            return None
-        target["credential_reference"].pop("consent_state_sha256", None)
-        target["configuration"]["onboarding"].update(
-            consent_status="completed", consent_completed_at=completed_at.isoformat()
-        )
-        row["configuration"] = target["configuration"]
         return row
 
     def complete_azure_connection_setup(
@@ -311,17 +246,14 @@ def test_azure_setup_enumerates_then_binds_only_selected_subscriptions() -> None
     repository = AzureConnectionRepositoryStub()
     s3 = FakeS3OnboardingClient()
     validator = PropagatingAzureValidator()
-    setup_tokens = iter((SETUP_TOKEN, "s" * 48, SETUP_TOKEN))
     launcher = AzureSetupScriptLauncher(
         bucket_name="denali-onboarding",
         client_id=CLIENT_ID,
-        redirect_uri="http://127.0.0.1:3080/api/v1/connections/azure/setup/callback",
-        web_url="http://127.0.0.1:3080",
         s3_client=s3,
         now=lambda: datetime.now(UTC),
         nonce=lambda: "one-time-script",
-        token=lambda: next(setup_tokens),
-        consent_verifier=lambda tenant_id: None,
+        token=lambda: SETUP_TOKEN,
+        tenant_identity_verifier=lambda tenant_id: None,
     )
     app = create_app(
         repository=repository,
@@ -355,50 +287,19 @@ def test_azure_setup_enumerates_then_binds_only_selected_subscriptions() -> None
         assert launch_response.status_code == 201
         launch = launch_response.json()
         assert launch["cloud_shell_url"] == "https://shell.azure.com/bash"
-        assert "adminconsent" in launch["consent_url"]
-        state = parse_qs(urlparse(launch["consent_url"]).query)["state"][0]
-        assert state != connection_id
-        assert state not in str(repository.targets[connection_id])
-        assert repository.targets[connection_id]["credential_reference"][
-            "consent_state_sha256"
-        ] == hashlib.sha256(state.encode()).hexdigest()
+        assert launch["identity_prepared_in_script"] is True
+        assert "consent_url" not in launch
         assert "denali-azure-onboard.sh" in launch["setup_command"]
         assert SETUP_TOKEN not in launch_response.text
         assert launch_response.headers["cache-control"] == "no-store"
         assert s3.put is not None
         script = s3.put["Body"].decode()
         assert "az account list --all" in script
+        assert 'az ad sp create --id "$DENALI_CLIENT_ID"' in script
         assert "Select subscriptions by number" in script
         assert "--assignee-principal-type ServicePrincipal" in script
         assert "--role 'acdd72a7-3385-48ef-bd42-f606fba81ae7'" not in script
         assert "DENALI_READER_ROLE_ID='acdd72a7-3385-48ef-bd42-f606fba81ae7'" in script
-
-        premature = client.post(
-            f"/v1/connections/{connection_id}/azure/setup/complete",
-            json={"completion_code": _completion_code([])},
-        )
-        assert premature.status_code == 409
-        assert premature.json()["detail"] == "Azure tenant consent is not completed"
-
-        callback = client.get(
-            "/v1/connections/azure/setup/callback",
-            params={"state": state},
-            follow_redirects=False,
-        )
-        assert callback.status_code == 303
-        assert "azure_setup=succeeded" in callback.headers["location"]
-        assert (
-            client.get(
-                "/v1/connections/azure/setup/callback",
-                params={"state": state},
-                follow_redirects=False,
-            ).status_code
-            == 409
-        )
-        resumed = client.post(f"/v1/connections/{connection_id}/azure/setup/script")
-        assert resumed.status_code == 201
-        assert resumed.json()["consent_verified"] is True
-        assert resumed.json()["consent_url"] is None
 
         subscriptions = [
             {"id": SUBSCRIPTION_ONE, "name": "Production"},
@@ -442,52 +343,8 @@ def test_azure_setup_enumerates_then_binds_only_selected_subscriptions() -> None
         assert missing_scope.json()["detail"] == "Azure code-to-cloud scope is not declared"
 
 
-def test_azure_callback_rejects_wrong_tenant_and_consumes_state() -> None:
+def test_azure_completion_requires_verified_tenant_identity() -> None:
     repository = AzureConnectionRepositoryStub()
-    launcher = AzureSetupScriptLauncher(
-        bucket_name="denali-onboarding",
-        client_id=CLIENT_ID,
-        redirect_uri="http://127.0.0.1:3080/api/v1/connections/azure/setup/callback",
-        web_url="http://127.0.0.1:3080",
-        s3_client=FakeS3OnboardingClient(),
-        token=iter((SETUP_TOKEN, "w" * 48)).__next__,
-        consent_verifier=lambda tenant_id: None,
-    )
-    app = create_app(
-        repository=repository,
-        azure_setup_launcher=launcher,
-        migrate_on_start=False,
-    )
-    with TestClient(app) as client:
-        created = client.post(
-            "/v1/connections",
-            json={"provider": "azure", "display_name": "Wrong tenant", "tenant_id": TENANT_ID},
-        ).json()
-        launch = client.post(f"/v1/connections/{created['id']}/azure/setup/launch").json()
-        state = parse_qs(urlparse(launch["consent_url"]).query)["state"][0]
-        rejected = client.get(
-            "/v1/connections/azure/setup/callback",
-            params={
-                "state": state,
-                "tenant": SUBSCRIPTION_ONE,
-                "admin_consent": "True",
-            },
-            follow_redirects=False,
-        )
-        replay = client.get(
-            "/v1/connections/azure/setup/callback",
-            params={"state": state, "tenant": TENANT_ID, "admin_consent": "True"},
-            follow_redirects=False,
-        )
-
-    assert rejected.status_code == 303
-    assert "reason=tenant_mismatch" in rejected.headers["location"]
-    assert replay.status_code == 409
-
-
-def test_azure_callback_requires_verified_tenant_identity() -> None:
-    repository = AzureConnectionRepositoryStub()
-    now = datetime.now(UTC)
 
     def fail_verification(_tenant_id: str) -> None:
         raise RuntimeError("enterprise application unavailable")
@@ -495,12 +352,9 @@ def test_azure_callback_requires_verified_tenant_identity() -> None:
     launcher = AzureSetupScriptLauncher(
         bucket_name="denali-onboarding",
         client_id=CLIENT_ID,
-        redirect_uri="http://127.0.0.1:3080/api/v1/connections/azure/setup/callback",
-        web_url="http://127.0.0.1:3080",
         s3_client=FakeS3OnboardingClient(),
-        now=lambda: now,
-        token=iter((SETUP_TOKEN, "v" * 48)).__next__,
-        consent_verifier=fail_verification,
+        token=lambda: SETUP_TOKEN,
+        tenant_identity_verifier=fail_verification,
     )
     app = create_app(
         repository=repository,
@@ -512,52 +366,23 @@ def test_azure_callback_requires_verified_tenant_identity() -> None:
             "/v1/connections",
             json={"provider": "azure", "display_name": "Verify tenant", "tenant_id": TENANT_ID},
         ).json()
-        launch = client.post(f"/v1/connections/{created['id']}/azure/setup/launch").json()
-        state = parse_qs(urlparse(launch["consent_url"]).query)["state"][0]
-        rejected = client.get(
-            "/v1/connections/azure/setup/callback",
-            params={"state": state, "tenant": TENANT_ID, "admin_consent": "True"},
-            follow_redirects=False,
-        )
-        resume = client.post(f"/v1/connections/{created['id']}/azure/setup/script")
-
-    assert rejected.status_code == 303
-    assert "reason=tenant_identity_not_ready" in rejected.headers["location"]
-    assert resume.status_code == 409
-
-
-def test_expired_azure_state_is_rejected() -> None:
-    repository = AzureConnectionRepositoryStub()
-    launcher = AzureSetupScriptLauncher(
-        bucket_name="denali-onboarding",
-        client_id=CLIENT_ID,
-        redirect_uri="http://127.0.0.1:3080/api/v1/connections/azure/setup/callback",
-        web_url="http://127.0.0.1:3080",
-        s3_client=FakeS3OnboardingClient(),
-        now=lambda: datetime.now(UTC) - timedelta(hours=2),
-        token=iter((SETUP_TOKEN, "e" * 48)).__next__,
-        consent_verifier=lambda tenant_id: None,
-    )
-    app = create_app(
-        repository=repository,
-        azure_setup_launcher=launcher,
-        migrate_on_start=False,
-    )
-    with TestClient(app) as client:
-        created = client.post(
-            "/v1/connections",
-            json={"provider": "azure", "display_name": "Expired", "tenant_id": TENANT_ID},
-        ).json()
-        launch = client.post(f"/v1/connections/{created['id']}/azure/setup/launch").json()
-        state = parse_qs(urlparse(launch["consent_url"]).query)["state"][0]
-        response = client.get(
-            "/v1/connections/azure/setup/callback",
-            params={"state": state, "tenant": TENANT_ID, "admin_consent": "True"},
-            follow_redirects=False,
+        launched = client.post(f"/v1/connections/{created['id']}/azure/setup/launch")
+        assert launched.status_code == 201
+        completion = client.post(
+            f"/v1/connections/{created['id']}/azure/setup/complete",
+            json={
+                "completion_code": _completion_code(
+                    [{"id": SUBSCRIPTION_ONE, "name": "Production"}]
+                )
+            },
         )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Azure consent launch has expired"
+    assert completion.status_code == 409
+    assert completion.json()["detail"] == (
+        "Denali could not verify its enterprise application in the Azure tenant"
+    )
+    assert repository.targets[created["id"]]["configuration"]["subscriptions"] == []
+    assert "setup_token_sha256" in repository.targets[created["id"]]["credential_reference"]
 
 
 class FakeToken:

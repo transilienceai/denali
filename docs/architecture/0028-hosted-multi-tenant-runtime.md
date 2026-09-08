@@ -71,7 +71,7 @@ Every tenant-owned repository method accepts the server-resolved Denali tenant U
 from request bodies, query parameters, routes, arbitrary headers, or the browser's selected state
 are untrusted and cannot select a tenant.
 
-`/healthz`, API documentation, and the Azure, Entra, and GitHub provider callbacks are public at
+`/healthz`, API documentation, and the Entra and GitHub provider callbacks are public at
 the HTTP middleware layer. Callback authorization instead uses verified, expiring, one-time setup
 state. The stored state resolves both tenant and connection, so changing the browser's active
 Organization cannot redirect a callback into another tenant.
@@ -154,8 +154,10 @@ Tenant onboarding remains bring-your-own-cloud without uploaded long-lived crede
 
 - AWS stores a tenant role ARN, external ID, selected account/Regions, and validation evidence.
   Modal uses its short-lived OIDC identity to assume the role.
-- Azure stores the consented tenant and selected subscription identifiers. The Denali-operated
-  multi-tenant application obtains bounded tokens when required; access tokens are not persisted.
+- Azure stores the customer tenant and selected subscription identifiers. A customer tenant
+  administrator creates the Denali-operated multi-tenant application's local service principal;
+  subscription administrators grant Reader only on the subscriptions they select. Denali obtains
+  bounded tokens when required; access tokens are not persisted.
 - GCP stores selected project identifiers and a unique per-connection principal grant. No service
   account JSON key is accepted or stored. Modal's OIDC token is exchanged through a Google
   Workload Identity Federation provider restricted to the production Modal workspace,

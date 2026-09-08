@@ -209,7 +209,6 @@ If the deployed URL differs from step 1, update all of these together and redepl
 - [x] `DENALI_CORS_ORIGINS`
 - [x] `CLERK_AUTHORIZED_PARTIES`
 - [ ] Clerk allowed origins and redirect URLs
-- [ ] `DENALI_AZURE_CONSENT_REDIRECT_URI`
 - [ ] `DENALI_ENTRA_CALLBACK_URL`
 - [ ] `DENALI_GITHUB_CALLBACK_URL`
 
@@ -249,11 +248,12 @@ DENALI_AWS_PRINCIPAL_ARN
 DENALI_AZURE_ONBOARDING_BUCKET
 DENALI_AZURE_CLIENT_ID
 DENALI_AZURE_CLIENT_SECRET
-DENALI_AZURE_CONSENT_REDIRECT_URI=https://<production-domain>
 ```
 
 - `DENALI_AZURE_CLIENT_SECRET` is the secret; the other entries are identifiers/configuration.
-- Register the final redirect URL before browser acceptance.
+- The Cloud Shell script creates or confirms the customer tenant's local service principal and
+  grants Reader only on the subscriptions the customer selects. Azure onboarding has no browser
+  consent callback because the operator application requests no API permissions.
 
 #### Google Cloud
 

@@ -157,34 +157,6 @@ class InventoryReader(Protocol):
         *,
         launch: dict[str, Any],
         setup_token_sha256: str,
-        consent_state_sha256: str,
-    ) -> dict[str, Any] | None: ...
-
-    def record_azure_script_launch(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        launch: dict[str, Any],
-        setup_token_sha256: str,
-    ) -> dict[str, Any] | None: ...
-
-    def fail_azure_consent_setup(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        expected_state_sha256: str,
-        failed_at: datetime,
-    ) -> bool: ...
-
-    def complete_azure_consent_setup(
-        self,
-        tenant_id: str,
-        connection_id: str,
-        *,
-        expected_state_sha256: str,
-        completed_at: datetime,
     ) -> dict[str, Any] | None: ...
 
     def record_gcp_connection_setup_launch(
@@ -1236,7 +1208,7 @@ def create_app(
                     status_code=503,
                     detail=(
                         "Azure onboarding is not configured; set DENALI_AZURE_CLIENT_ID, "
-                        "DENALI_AZURE_ONBOARDING_BUCKET, and the consent redirect URI"
+                        "and DENALI_AZURE_ONBOARDING_BUCKET"
                     ),
                 )
             scopes = list(dict.fromkeys(connection.declared_scopes))
@@ -1600,67 +1572,7 @@ def create_app(
                 "client_id": launch["client_id"],
                 "published_at": launch["published_at"].isoformat(),
                 "url_expires_at": launch["expires_at"].isoformat(),
-                "consent_status": "launched",
-                "consent_expires_at": launch["expires_at"].isoformat(),
-            },
-            setup_token_sha256=launch["callback_token_sha256"],
-            consent_state_sha256=launch["consent_state_sha256"],
-        )
-        if recorded is None:
-            raise HTTPException(status_code=409, detail="connection changed during launch")
-        response.headers["Cache-Control"] = "no-store"
-        return {
-            "consent_url": launch["consent_url"],
-            "cloud_shell_url": launch["cloud_shell_url"],
-            "script_url": launch["script_url"],
-            "setup_command": launch["setup_command"],
-            "script_version": launch["script_version"],
-            "script_sha256": launch["script_sha256"],
-            "expires_at": launch["expires_at"],
-            "consent_verified": False,
-        }
-
-    @app.post("/v1/connections/{connection_id}/azure/setup/script", status_code=201)
-    def resume_azure_setup(
-        request: Request,
-        response: Response,
-        connection_id: UUID,
-    ) -> dict[str, Any]:
-        repo, current_tenant = _context(request)
-        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
-        if target is None or target["provider"] != "azure":
-            raise HTTPException(status_code=404, detail="Azure connection not found")
-        if target["lifecycle_state"] != "active":
-            raise HTTPException(status_code=409, detail="disabled connections cannot be launched")
-        if target["configuration"].get("onboarding", {}).get("consent_status") != "completed":
-            raise HTTPException(status_code=409, detail="Azure tenant consent is not completed")
-        launcher = request.app.state.azure_setup_launcher
-        if launcher is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Azure Cloud Shell onboarding is not configured",
-            )
-        try:
-            launch = launcher.create_launch(
-                tenant_id=current_tenant,
-                connection_id=str(connection_id),
-                connection=target,
-                include_consent=False,
-            )
-        except Exception as error:
-            raise HTTPException(
-                status_code=502, detail="Unable to prepare the Azure setup script"
-            ) from error
-        recorded = repo.record_azure_script_launch(
-            current_tenant,
-            str(connection_id),
-            launch={
-                "method": "azure_cloud_shell",
-                "script_version": launch["script_version"],
-                "script_sha256": launch["script_sha256"],
-                "client_id": launch["client_id"],
-                "published_at": launch["published_at"].isoformat(),
-                "url_expires_at": launch["expires_at"].isoformat(),
+                "identity_mode": "cloud_shell_service_principal",
             },
             setup_token_sha256=launch["callback_token_sha256"],
         )
@@ -1668,95 +1580,14 @@ def create_app(
             raise HTTPException(status_code=409, detail="connection changed during launch")
         response.headers["Cache-Control"] = "no-store"
         return {
-            "consent_url": None,
             "cloud_shell_url": launch["cloud_shell_url"],
             "script_url": launch["script_url"],
             "setup_command": launch["setup_command"],
             "script_version": launch["script_version"],
             "script_sha256": launch["script_sha256"],
             "expires_at": launch["expires_at"],
-            "consent_verified": True,
+            "identity_prepared_in_script": True,
         }
-
-    @app.get("/v1/connections/azure/setup/callback", include_in_schema=False)
-    def azure_setup_callback(
-        request: Request,
-        state: str = Query(min_length=32, max_length=1024),
-        tenant: str | None = Query(default=None, max_length=64),
-        admin_consent: str | None = Query(default=None, max_length=16),
-        error: str | None = Query(default=None, max_length=128),
-    ) -> RedirectResponse:
-        state_tenant, connection_id = _azure_state_context(state)
-        repo, current_tenant = _context_for_tenant(request, state_tenant)
-        target = repo.get_connection_validation_target(current_tenant, connection_id)
-        if target is None or target["provider"] != "azure":
-            raise HTTPException(status_code=404, detail="Azure connection not found")
-        expected_hash = target["credential_reference"].get("consent_state_sha256")
-        if not expected_hash or not hmac.compare_digest(expected_hash, _sha256_text(state)):
-            raise HTTPException(status_code=409, detail="Azure setup state is invalid")
-        _require_current_setup_expiry(
-            target,
-            key="consent_expires_at",
-            detail="Azure consent launch has expired",
-            current_detail="Azure consent launch is not current",
-        )
-        launcher = request.app.state.azure_setup_launcher
-        if launcher is None:
-            raise HTTPException(status_code=503, detail="Azure onboarding is not configured")
-        expected_tenant = str(target["configuration"]["tenant_id"])
-        try:
-            returned_tenant = str(UUID(tenant or ""))
-        except ValueError:
-            returned_tenant = ""
-        reason = None
-        if error:
-            reason = (
-                "access_denied"
-                if error.casefold() == "access_denied"
-                else "microsoft_rejected"
-            )
-        elif returned_tenant and returned_tenant != expected_tenant:
-            reason = "tenant_mismatch"
-        elif admin_consent is not None and admin_consent.casefold() != "true":
-            reason = "consent_not_granted"
-        if reason is None:
-            try:
-                launcher.verify_tenant_identity(expected_tenant)
-            except Exception:
-                reason = "tenant_identity_not_ready"
-        if reason is not None:
-            consumed = repo.fail_azure_consent_setup(
-                current_tenant,
-                connection_id,
-                expected_state_sha256=expected_hash,
-                failed_at=datetime.now(UTC),
-            )
-            if not consumed:
-                raise HTTPException(status_code=409, detail="connection changed during setup")
-            failure_query = urlencode(
-                {
-                    "azure_setup": "failed",
-                    "connection_id": connection_id,
-                    "reason": reason,
-                }
-            )
-            return RedirectResponse(
-                f"{launcher.web_url}/?{failure_query}",
-                status_code=303,
-            )
-        completed = repo.complete_azure_consent_setup(
-            current_tenant,
-            connection_id,
-            expected_state_sha256=expected_hash,
-            completed_at=datetime.now(UTC),
-        )
-        if completed is None:
-            raise HTTPException(status_code=409, detail="connection changed during setup")
-        return RedirectResponse(
-            f"{launcher.web_url}/?"
-            f"{urlencode({'azure_setup': 'succeeded', 'connection_id': connection_id})}",
-            status_code=303,
-        )
 
     @app.post("/v1/connections/{connection_id}/azure/setup/complete", status_code=202)
     def complete_azure_setup(
@@ -1771,8 +1602,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="Azure connection not found")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be completed")
-        if target["configuration"].get("onboarding", {}).get("consent_status") != "completed":
-            raise HTTPException(status_code=409, detail="Azure tenant consent is not completed")
         payload = _decode_azure_completion_code(completion.completion_code)
         expected_token_hash = target["credential_reference"].get("setup_token_sha256")
         presented_token = payload.get("token")
@@ -1802,6 +1631,16 @@ def create_app(
         if not _valid_uuid_text(service_principal_id):
             raise HTTPException(status_code=422, detail="Azure service principal ID is invalid")
         subscriptions = _azure_subscriptions_from_completion(payload)
+        launcher = request.app.state.azure_setup_launcher
+        if launcher is None:
+            raise HTTPException(status_code=503, detail="Azure onboarding is not configured")
+        try:
+            launcher.verify_tenant_identity(target["configuration"]["tenant_id"])
+        except Exception as error:
+            raise HTTPException(
+                status_code=409,
+                detail="Denali could not verify its enterprise application in the Azure tenant",
+            ) from error
         completed_at = datetime.now(UTC)
         updated = repo.complete_azure_connection_setup(
             current_tenant,
@@ -2964,7 +2803,6 @@ def _is_public_request(request: Request) -> bool:
         "/redoc",
         "/v1/connections/github/setup/callback",
         "/v1/connections/github/oauth/callback",
-        "/v1/connections/azure/setup/callback",
         "/v1/connections/entra/setup/callback",
     }:
         return True
@@ -2998,10 +2836,6 @@ def _cloudformation_launcher_from_environment() -> AwsCloudFormationLauncher | N
 def _azure_setup_launcher_from_environment() -> AzureSetupScriptLauncher | None:
     bucket_name = os.environ.get("DENALI_AZURE_ONBOARDING_BUCKET")
     client_id = os.environ.get("DENALI_AZURE_CLIENT_ID")
-    web_url = os.environ.get("DENALI_WEB_URL", "http://127.0.0.1:3080").rstrip("/")
-    redirect_uri = os.environ.get("DENALI_AZURE_CONSENT_REDIRECT_URI", "").rstrip("/")
-    if not redirect_uri or redirect_uri == web_url:
-        redirect_uri = f"{web_url}/api/v1/connections/azure/setup/callback"
     if not bucket_name or not client_id:
         return None
     expires_in_seconds = _bounded_environment_integer(
@@ -3013,8 +2847,6 @@ def _azure_setup_launcher_from_environment() -> AzureSetupScriptLauncher | None:
     return AzureSetupScriptLauncher(
         bucket_name=bucket_name,
         client_id=client_id,
-        redirect_uri=redirect_uri,
-        web_url=web_url,
         expires_in_seconds=expires_in_seconds,
     )
 
@@ -3214,18 +3046,6 @@ def _entra_state_context(value: str) -> tuple[str, str]:
         ) from error
     if len(token) < 32:
         raise HTTPException(status_code=409, detail="Microsoft Entra setup state is invalid")
-    return tenant_id, connection_id
-
-
-def _azure_state_context(value: str) -> tuple[str, str]:
-    try:
-        tenant_id, connection_id, token = value.split(".", 2)
-        UUID(tenant_id)
-        UUID(connection_id)
-    except (ValueError, AttributeError) as error:
-        raise HTTPException(status_code=409, detail="Azure setup state is invalid") from error
-    if len(token) < 32:
-        raise HTTPException(status_code=409, detail="Azure setup state is invalid")
     return tenant_id, connection_id
 
 

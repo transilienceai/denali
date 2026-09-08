@@ -90,10 +90,6 @@ test("provider callbacks always return to the selected connection", () => {
     navigationFromUrl("https://denali.test/?entra_setup=succeeded&connection_id=def").page,
     "connections",
   );
-  assert.equal(
-    navigationFromUrl("https://denali.test/?azure_setup=succeeded&connection_id=ghi").page,
-    "connections",
-  );
 });
 
 test("query updates preserve unrelated state and drawer removal preserves filters", () => {
