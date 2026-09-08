@@ -57,6 +57,19 @@ CASE aa.assertion_type
 END
 """
 
+_TENANT_EVIDENCE_LOCK_NAMESPACE = "denali-tenant-evidence"
+
+
+def _lock_tenant_evidence_mutation(
+    connection: psycopg.Connection[Any], tenant_id: str
+) -> None:
+    """Serialize one tenant's evidence writes within the caller's transaction."""
+
+    connection.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"{_TENANT_EVIDENCE_LOCK_NAMESPACE}:{tenant_id}",),
+    )
+
 
 def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
@@ -178,6 +191,7 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                _lock_tenant_evidence_mutation(connection, tenant_id)
                 self._insert_run(connection, tenant_id, batch)
                 asset_ids: dict[AssetRef, str] = {}
                 for assertion in batch.assets:
@@ -247,6 +261,7 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                _lock_tenant_evidence_mutation(connection, tenant_id)
                 self._insert_run(connection, tenant_id, batch)
                 persisted_findings = 0
                 for finding in batch.findings:
@@ -315,6 +330,7 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                _lock_tenant_evidence_mutation(connection, tenant_id)
                 self._insert_run(connection, tenant_id, batch)
                 if batch.scan_subject is not None:
                     self._upsert_vulnerability_scan(connection, tenant_id, batch)
@@ -373,6 +389,7 @@ class PostgresInventoryRepository:
         unresolved_entities = 0
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                _lock_tenant_evidence_mutation(connection, tenant_id)
                 self._insert_run(connection, tenant_id, batch)
                 for activity in batch.activities:
                     row = connection.execute(
@@ -597,6 +614,7 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                _lock_tenant_evidence_mutation(connection, tenant_id)
                 snapshot = self._load_detection_snapshot(connection, tenant_id)
                 sign_in_coverage = self._detection_coverage_state(
                     connection,
@@ -1164,6 +1182,7 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                _lock_tenant_evidence_mutation(connection, tenant_id)
                 snapshot = self._load_correlation_snapshot(connection, tenant_id)
                 detection_snapshot = self._load_detection_snapshot(connection, tenant_id)
                 runtime_detections = self._load_correlation_runtime_detections(

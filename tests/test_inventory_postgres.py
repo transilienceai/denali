@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -263,6 +265,33 @@ def test_clerk_organization_mapping_is_stable_and_isolated(repository) -> None:
     first = repo.resolve_tenant("org_DenaliPilotA")
     assert repo.resolve_tenant("org_DenaliPilotA") == first
     assert repo.resolve_tenant("org_DenaliPilotB") != first
+
+
+def test_tenant_evidence_mutations_are_serialized_without_blocking_other_tenants(
+    repository,
+) -> None:
+    tenant, repo = repository
+    other_tenant = repo.resolve_tenant(f"org_ConcurrentEvidence{uuid.uuid4().hex}")
+    lock_key = f"denali-tenant-evidence:{tenant}"
+    assert DSN
+
+    with psycopg.connect(DSN) as blocker:
+        blocker.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (lock_key,),
+        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            blocked = pool.submit(repo.ingest, tenant, demo_batch(datetime.now(UTC)))
+            independent = pool.submit(
+                repo.ingest, other_tenant, demo_batch(datetime.now(UTC))
+            )
+            try:
+                with pytest.raises(FutureTimeoutError):
+                    blocked.result(timeout=0.1)
+                assert independent.result(timeout=5)["assets"] > 0
+            finally:
+                blocker.commit()
+            assert blocked.result(timeout=5)["assets"] > 0
 
 
 def test_clerk_tenants_cannot_cross_read_or_mutate_evidence_and_jobs(repository) -> None:
