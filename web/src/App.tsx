@@ -97,6 +97,7 @@ import type {
   Summary,
   Vulnerability,
   VulnerabilityDetail,
+  VulnerabilityImportJob,
   VulnerabilitySummary,
 } from "./types";
 
@@ -563,8 +564,11 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
               }}
               vulnerabilities={vulnerabilities}
               coverage={coverage}
+              assets={assets}
+              canWrite={canWrite}
               navigation={filterNavigation}
               onOpenVulnerability={(id) => openDrawer("vulnerability", id)}
+              onChanged={loadAll}
             />
           ) : page === "issues" ? (
             <Issues
@@ -1249,14 +1253,20 @@ function Vulnerabilities({
   summary,
   vulnerabilities,
   coverage,
+  assets,
+  canWrite,
   navigation,
   onOpenVulnerability,
+  onChanged,
 }: {
   summary: VulnerabilitySummary;
   vulnerabilities: Vulnerability[];
   coverage: Coverage[];
+  assets: Asset[];
+  canWrite: boolean;
   navigation: FilterNavigation;
   onOpenVulnerability: (id: string) => void;
+  onChanged: () => Promise<void>;
 }) {
   const search = navigation.values.q ?? "";
   const severity = navigation.values.severity ?? "all";
@@ -1278,6 +1288,7 @@ function Vulnerabilities({
   );
   const metricValue = (value: number) => assessed ? value : "N/A";
   const metricDetail = assessed ? "affected occurrences" : "not assessed";
+  const workloads = assets.filter((asset) => asset.kind === "ai_workload");
 
   return <div className="page-stack vulnerabilities-page">
     <section className="page-intro"><div><span className="eyebrow">SBOM-FIRST EXPOSURE</span><h2>Vulnerabilities in the AI stack</h2><p>Scanner-neutral vulnerabilities mapped to exact component occurrences and the AI workloads that contain them.</p></div><div className="result-count"><strong>{assessed ? summary.open_vulnerability_ids : "N/A"}</strong><span>{assessed ? "distinct open vulnerabilities" : "vulnerability coverage"}</span><small>{assessed ? `${summary.by_state.open ?? 0} affected component occurrences` : "No non-fixture scan imported"}</small></div></section>
@@ -1287,6 +1298,9 @@ function Vulnerabilities({
       <VulnerabilityMetric icon={ShieldCheck} tone="fixable" label="Fix available" value={metricValue(fixable)} detail={metricDetail} />
       <VulnerabilityMetric icon={Bug} tone="exploit" label="Exploit evidence" value={metricValue(exploited)} detail={metricDetail} />
     </section>
+    {canWrite && workloads.length > 0 && (
+      <VulnerabilityImportPanel workloads={workloads} onChanged={onChanged} />
+    )}
     <section className="panel vulnerabilities-panel">
       <div className="filterbar">
         <label className="search-field"><Search size={18} /><input value={search} onChange={(event) => navigation.set("q", event.target.value, "", "replace")} placeholder="Search CVE, component, or scanner…" /></label>
@@ -1303,6 +1317,112 @@ function Vulnerabilities({
     </section>
     <p className="fixture-note"><ShieldCheck size={15} /> A package match is evidence, not certainty. Scanner match method, Denali-derived confidence, database version, and component correlation stay visible.</p>
   </div>;
+}
+
+function VulnerabilityImportPanel({
+  workloads,
+  onChanged,
+}: {
+  workloads: Asset[];
+  onChanged: () => Promise<void>;
+}) {
+  const [targetAssetId, setTargetAssetId] = useState(workloads[0]?.id ?? "");
+  const [syftReport, setSyftReport] = useState<Record<string, unknown> | null>(null);
+  const [grypeReport, setGrypeReport] = useState<Record<string, unknown> | null>(null);
+  const [syftName, setSyftName] = useState("");
+  const [grypeName, setGrypeName] = useState("");
+  const [authoritative, setAuthoritative] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function loadReport(
+    file: File | undefined,
+    expectedTool: "syft" | "grype",
+    setReport: (value: Record<string, unknown> | null) => void,
+    setName: (value: string) => void,
+  ) {
+    setError(null);
+    setMessage(null);
+    if (!file) {
+      setReport(null);
+      setName("");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setError(`${expectedTool === "syft" ? "Syft" : "Grype"} report exceeds 8 MB.`);
+      setReport(null);
+      setName("");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(await file.text()) as Record<string, unknown>;
+      const descriptor = parsed.descriptor as Record<string, unknown> | undefined;
+      if (String(descriptor?.name ?? "").toLowerCase() !== expectedTool) {
+        throw new Error(`This file does not identify itself as a ${expectedTool} report.`);
+      }
+      setReport(parsed);
+      setName(file.name);
+    } catch (cause) {
+      setReport(null);
+      setName("");
+      setError(cause instanceof Error ? cause.message : "Report is not valid JSON.");
+    }
+  }
+
+  async function submitImport() {
+    if (!targetAssetId || !syftReport || !grypeReport) return;
+    setSubmitting(true);
+    setError(null);
+    setMessage("Staging scanner evidence…");
+    try {
+      const accepted = await api.createVulnerabilityImport({
+        target_asset_id: targetAssetId,
+        syft_report: syftReport,
+        grype_report: grypeReport,
+        authoritative,
+      });
+      setMessage("Import queued. Denali is normalizing the reports…");
+      const completed = await waitForAcceptedOperation<VulnerabilityImportJob>({
+        fetchCurrent: () => api.vulnerabilityImport(accepted.id),
+        isRunning: (job) => job.state === "queued" || job.state === "running",
+        isComplete: (job) => job.state === "succeeded",
+        stoppedMessage: "The import stopped before evidence could be normalized.",
+        timeoutMessage: "The import is still running. Refresh to see the durable result.",
+      });
+      await onChanged();
+      setMessage(
+        `Imported ${completed.result?.component_count ?? 0} component assertions and ` +
+        `${completed.result?.vulnerability_count ?? 0} distinct vulnerabilities.`,
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Evidence import failed.");
+      setMessage(null);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="panel vulnerability-import-panel">
+      <div className="vulnerability-import-copy">
+        <span className="eyebrow">IMPORT SCANNER EVIDENCE</span>
+        <h3>Attach a CI scan to an observed workload</h3>
+        <p>Upload native Syft and Grype JSON generated for the same exact deployed artifact. Denali verifies that both reports identify the same container image before attaching their evidence.</p>
+      </div>
+      <div className="vulnerability-import-fields">
+        <label><span>Observed workload</span><select value={targetAssetId} onChange={(event) => setTargetAssetId(event.target.value)}>{workloads.map((workload) => <option key={workload.id} value={workload.id}>{workload.display_name ?? workload.natural_key}</option>)}</select></label>
+        <label className="scan-file"><span>Syft JSON</span><input type="file" accept="application/json,.json" disabled={submitting} onChange={(event) => void loadReport(event.target.files?.[0], "syft", setSyftReport, setSyftName)} /><small>{syftName || "Choose the SBOM generated by Syft."}</small></label>
+        <label className="scan-file"><span>Grype JSON</span><input type="file" accept="application/json,.json" disabled={submitting} onChange={(event) => void loadReport(event.target.files?.[0], "grype", setGrypeReport, setGrypeName)} /><small>{grypeName || "Choose the matching Grype vulnerability report."}</small></label>
+      </div>
+      <div className="vulnerability-import-actions">
+        <label className="authoritative-toggle"><input type="checkbox" checked={authoritative} onChange={(event) => setAuthoritative(event.target.checked)} /><span><strong>Authoritative complete scan</strong><small>Allows a complete Grype report to resolve this scanner source’s missing prior observations.</small></span></label>
+        <button className="primary-action" disabled={submitting || !targetAssetId || !syftReport || !grypeReport} onClick={() => void submitImport()}>{submitting ? "Importing…" : "Import evidence"}</button>
+      </div>
+      {message && <div className="vulnerability-import-status complete"><CircleCheck />{message}</div>}
+      {error && <div className="vulnerability-import-status error"><CircleAlert />{error}</div>}
+    </section>
+  );
 }
 
 function VulnerabilityMetric({ icon: Icon, tone, label, value, detail }: { icon: LucideIcon; tone: string; label: string; value: number | string; detail: string }) {

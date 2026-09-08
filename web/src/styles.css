@@ -172,6 +172,18 @@ button { color: inherit; }
 .finding-history { padding: 2px 0 2px 8px; }.finding-history > div { min-height: 76px; border-left: 1px solid #dce2e7; padding: 7px 0 14px 25px; position: relative; display: flex; }.history-dot { position: absolute; left: -5px; top: 12px; width: 9px; height: 9px; border: 2px solid white; border-radius: 50%; background: #8c98a7; box-shadow: 0 0 0 1px #c9d0d7; }.history-dot.open { background: var(--coral); }.history-dot.resolved { background: var(--green); }.finding-history div > div { display: flex; flex-direction: column; }.finding-history strong { font-size: 10px; }.finding-history small { margin-top: 3px; color: #8a95a3; font-size: 8px; }.finding-history p { margin: 7px 0 0; color: #657184; font-size: 9px; }
 
 .vulnerability-metric-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; }
+.vulnerability-import-panel { overflow: hidden; }
+.vulnerability-import-copy { padding: 20px 22px 16px; border-bottom: 1px solid var(--line); }
+.vulnerability-import-copy h3 { margin: 5px 0 4px; font: 700 18px "Manrope",sans-serif; }
+.vulnerability-import-copy p { max-width: 920px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.vulnerability-import-fields { padding: 16px 22px; display: grid; grid-template-columns: minmax(220px,1fr) minmax(220px,1fr) minmax(220px,1fr); gap: 12px; }
+.vulnerability-import-fields label { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.vulnerability-import-fields label > span { color: #536174; font-size: 10px; font-weight: 750; }
+.vulnerability-import-fields select,.vulnerability-import-fields input[type="file"] { min-height: 40px; padding: 8px 10px; border: 1px solid #d4dce3; border-radius: 8px; background: white; color: var(--ink); font-size: 10px; }
+.vulnerability-import-fields small { color: #778596; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vulnerability-import-actions { padding: 13px 22px 17px; border-top: 1px solid #edf0f2; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.authoritative-toggle { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }.authoritative-toggle input { margin-top: 3px; }.authoritative-toggle > span { display: flex; flex-direction: column; }.authoritative-toggle strong { font-size: 11px; }.authoritative-toggle small { margin-top: 2px; color: var(--muted); font-size: 9px; }
+.vulnerability-import-status { margin: 0 22px 17px; padding: 10px 12px; border-radius: 8px; display: flex; align-items: center; gap: 8px; font-size: 10px; font-weight: 650; }.vulnerability-import-status svg { width: 16px; }.vulnerability-import-status.complete { background: var(--green-soft); color: var(--green); }.vulnerability-import-status.error { background: #fff0ef; color: #b23e3e; }
 .vulnerability-metric { min-height: 108px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #fff; display: flex; align-items: center; gap: 14px; box-shadow: var(--shadow); }
 .vulnerability-metric > span { width: 39px; height: 39px; flex: none; border-radius: 10px; display: grid; place-items: center; }.vulnerability-metric > span svg { width: 18px; }
 .vulnerability-metric.critical > span { background: #ffebeb; color: #b83e3e; }.vulnerability-metric.high > span { background: #fff0e5; color: #bd602d; }.vulnerability-metric.fixable > span { background: var(--green-soft); color: var(--green); }.vulnerability-metric.exploit > span { background: var(--violet-soft); color: var(--violet); }

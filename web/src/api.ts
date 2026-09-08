@@ -32,6 +32,7 @@ import type {
   Summary,
   Vulnerability,
   VulnerabilityDetail,
+  VulnerabilityImportJob,
   VulnerabilitySummary,
 } from "./types";
 
@@ -211,6 +212,17 @@ export const api = {
   vulnerabilities: () => request<{ items: Vulnerability[] }>("/v1/vulnerabilities?limit=500"),
   vulnerability: (id: string) =>
     request<VulnerabilityDetail>(`/v1/vulnerabilities/${id}`),
+  createVulnerabilityImport: (input: {
+    target_asset_id: string;
+    syft_report: Record<string, unknown>;
+    grype_report: Record<string, unknown>;
+    authoritative: boolean;
+  }) => request<{ id: string; state: VulnerabilityImportJob["state"] }>(
+    "/v1/vulnerabilities/imports",
+    { method: "POST", body: JSON.stringify(input) },
+  ),
+  vulnerabilityImport: (id: string) =>
+    request<VulnerabilityImportJob>(`/v1/vulnerabilities/imports/${id}`),
   issueSummary: () => request<IssueSummary>("/v1/issues/summary"),
   issues: () => request<{ items: Issue[] }>("/v1/issues?limit=500"),
   issue: (id: string) => request<IssueDetail>(`/v1/issues/${id}`),
