@@ -48,6 +48,8 @@ from denali.connectors.aws_agentcore import (
 )
 from denali.connectors.aws_bedrock import AwsBedrockRegionConnector
 from denali.connectors.aws_bedrock_activity import AwsBedrockActivityConnector
+from denali.connectors.aws_deployment_iam_posture import AwsDeploymentIamPostureConnector
+from denali.connectors.aws_stack import _model_entries
 from denali.domain import (
     AssertionType,
     AssetAssertion,
@@ -67,7 +69,20 @@ CAPABILITIES = ConnectorCapabilities(inventory=True, relationships=True)
 MAX_PAGES = 100
 MAX_RESOURCES = 10_000
 PAGE_SIZE = 100
-_MODEL_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*(?:MODEL_ID|MODEL_NAME|ENDPOINT_NAME)$")
+_CLASSIFICATION_MODEL_KEY_RE = re.compile(
+    r"^[A-Z][A-Z0-9_]*(?:MODEL_ID|MODEL_NAME|ENDPOINT_NAME)$"
+)
+_BEDROCK_MODEL_PREFIXES = (
+    "global.",
+    "us.",
+    "eu.",
+    "apac.",
+    "anthropic.",
+    "amazon.",
+    "cohere.",
+    "meta.",
+    "mistral.",
+)
 
 _SERVICES = {
     "lambda": ("aws_lambda_deployment_inventory", "aws_lambda_deployment_relationships"),
@@ -84,6 +99,8 @@ class InventorySink(Protocol):
     def ingest(self, tenant_id: str, batch: InventoryBatch) -> dict[str, int]: ...
 
     def ingest_activity(self, tenant_id: str, batch: Any) -> dict[str, int]: ...
+
+    def ingest_findings(self, tenant_id: str, batch: Any) -> dict[str, int]: ...
 
 
 class AwsDeploymentDiscoveryError(RuntimeError):
@@ -145,14 +162,24 @@ class AwsConnectionDeploymentCollector:
         failed = partial = 0
         for region in regions:
             inventory_batches: list[InventoryBatch] = []
+            posture_batches: list[Any] = []
             if AWS_SCOPE_CODE_TO_CLOUD in scopes:
-                inventory_batches.append(
-                    AwsDeploymentConnector(
+                deployment_batch = AwsDeploymentConnector(
+                    account_id=account_id,
+                    region=region,
+                    partition=str(configuration.get("partition", "aws")),
+                    session=session,
+                ).collect(connection_id=str(connection["id"]))
+                inventory_batches.append(deployment_batch)
+                posture_batches.append(
+                    AwsDeploymentIamPostureConnector(
                         account_id=account_id,
                         region=region,
-                        partition=str(configuration.get("partition", "aws")),
-                        session=session,
-                    ).collect(connection_id=str(connection["id"]))
+                        iam_client=session.client("iam"),
+                    ).collect(
+                        deployment_batch,
+                        connection_id=str(connection["id"]),
+                    )
                 )
             if AWS_SCOPE_BEDROCK_AGENTS in scopes:
                 inventory_batches.append(
@@ -185,6 +212,8 @@ class AwsConnectionDeploymentCollector:
                 )
             for batch in inventory_batches:
                 repository.ingest(tenant_id, batch)
+            for batch in posture_batches:
+                repository.ingest_findings(tenant_id, batch)
             activity_count = 0
             activity_coverage: tuple[Coverage, ...] = ()
             if AWS_SCOPE_BEDROCK_ACTIVITY in scopes:
@@ -201,8 +230,10 @@ class AwsConnectionDeploymentCollector:
                 repository.ingest_activity(tenant_id, activity_batch)
                 activity_count = len(activity_batch.activities)
                 activity_coverage = activity_batch.coverage
-            all_coverage = [item for batch in inventory_batches for item in batch.coverage] + list(
-                activity_coverage
+            all_coverage = (
+                [item for batch in inventory_batches for item in batch.coverage]
+                + [item for batch in posture_batches for item in batch.coverage]
+                + list(activity_coverage)
             )
             states = {item.state for item in all_coverage}
             if CoverageState.FAILED in states:
@@ -224,6 +255,7 @@ class AwsConnectionDeploymentCollector:
                         for assertion in batch.assets
                     ),
                     "activity_events": activity_count,
+                    "iam_findings": sum(len(batch.findings) for batch in posture_batches),
                 }
             )
         completed_at = datetime.now(UTC).isoformat()
@@ -307,6 +339,16 @@ class AwsDeploymentConnector:
                         relationship_plane,
                         workload.evidence,
                     )
+                for model in _model_assertions(parsed, observed_at, inventory_plane):
+                    assets[(model.asset, inventory_plane)] = model
+                    _relationship(
+                        relationships,
+                        workload.asset,
+                        model.asset,
+                        RelationshipKind.USES,
+                        relationship_plane,
+                        model.evidence,
+                    )
             state = CoverageState.PARTIAL if warnings else CoverageState.COMPLETE
             detail = "; ".join(
                 [
@@ -356,6 +398,7 @@ class AwsDeploymentConnector:
                 continue
             environment = config.get("Environment", {}).get("Variables", {})
             model_keys = _model_keys(environment)
+            models = _bedrock_model_entries(environment)
             logical_id = _tag_value(tags, "aws:cloudformation:logical-id")
             output.append(
                 self._parsed(
@@ -376,6 +419,7 @@ class AwsDeploymentConnector:
                     },
                     ai_classification=_tagged(tags) or bool(model_keys),
                     model_keys=model_keys,
+                    models=models,
                     role_arns=[_text(config.get("Role"))],
                     extra={
                         "runtime": _text(config.get("Runtime")),
@@ -408,6 +452,7 @@ class AwsDeploymentConnector:
             if not isinstance(task, dict):
                 warnings.append("ecs:DescribeTaskDefinition returned an invalid shape")
                 continue
+            models: dict[str, str] = {}
             model_keys: set[str] = set()
             containers: list[str] = []
             images: list[str] = []
@@ -418,6 +463,15 @@ class AwsDeploymentConnector:
                     containers.append(str(container["name"]))
                 if _text(container.get("image")):
                     images.append(str(container["image"]))
+                models.update(
+                    _bedrock_model_entries(
+                        {
+                            item.get("name"): item.get("value")
+                            for item in container.get("environment", [])
+                            if isinstance(item, dict)
+                        }
+                    )
+                )
                 model_keys.update(
                     _model_keys(
                         {
@@ -449,6 +503,7 @@ class AwsDeploymentConnector:
                     },
                     ai_classification=_tagged(tags) or bool(model_keys),
                     model_keys=sorted(model_keys),
+                    models=models,
                     role_arns=[_text(task.get("taskRoleArn"))],
                     extra={
                         "container_names": sorted(set(containers)),
@@ -489,6 +544,7 @@ class AwsDeploymentConnector:
                     identifier=("cluster_name", name),
                     ai_classification=_tagged(cluster.get("tags", {})),
                     model_keys=[],
+                    models={},
                     role_arns=[_text(cluster.get("roleArn"))],
                     extra={
                         "version": _text(cluster.get("version")),
@@ -539,6 +595,7 @@ class AwsDeploymentConnector:
                     identifier=("endpoint_name", name),
                     ai_classification=True,
                     model_keys=[],
+                    models={},
                     role_arns=roles,
                     extra={
                         "endpoint_config_name": config_name,
@@ -630,6 +687,37 @@ def _assertions(
         for role in sorted({role for role in parsed["role_arns"] if isinstance(role, str) and role})
     )
     return cloud, workload, identities
+
+
+def _model_assertions(
+    parsed: dict[str, Any], observed_at: datetime, plane: str
+) -> tuple[AssetAssertion, ...]:
+    assertions: list[AssetAssertion] = []
+    for configuration_key, model_id in sorted(parsed.get("models", {}).items()):
+        model_ref = AssetRef(AssetKind.AI_MODEL, f"aws:bedrock:model:{model_id}")
+        evidence = Evidence(
+            source_type="aws_control_plane",
+            locator=f"aws://{parsed['service']}/{parsed['region']}/{parsed['arn']}",
+            observed_at=observed_at,
+            payload={
+                "resource_arn": parsed["arn"],
+                "model_id": model_id,
+                "configuration_key": configuration_key,
+                "classification": "allow_listed_bedrock_model_configuration",
+            },
+        )
+        assertions.append(
+            AssetAssertion(
+                asset=model_ref,
+                coverage_plane=plane,
+                display_name=model_id,
+                assertion_type=AssertionType.OBSERVED,
+                confidence=1.0,
+                evidence=evidence,
+                attributes={"provider": "aws_bedrock", "model_id": model_id},
+            )
+        )
+    return tuple(assertions)
 
 
 def _relationship(
@@ -784,11 +872,25 @@ def _bedrock_logging_batch(
     )
 
 
+def _bedrock_model_entries(values: Any) -> dict[str, str]:
+    """Retain only allow-listed model identifiers that can be attributed to Bedrock."""
+
+    return {
+        key: value
+        for key, value in _model_entries(values).items()
+        if "BEDROCK" in key
+        or value.startswith(_BEDROCK_MODEL_PREFIXES)
+        or value.startswith(("arn:aws:bedrock:", "arn:aws-us-gov:bedrock:", "arn:aws-cn:bedrock:"))
+    }
+
+
 def _model_keys(values: Any) -> list[str]:
     if not isinstance(values, dict):
         return []
     return sorted(
-        str(key) for key in values if isinstance(key, str) and _MODEL_KEY_RE.fullmatch(key)
+        str(key)
+        for key in values
+        if isinstance(key, str) and _CLASSIFICATION_MODEL_KEY_RE.fullmatch(key)
     )
 
 

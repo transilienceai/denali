@@ -24,12 +24,17 @@ task families become `ai_workload` assets only when they expose the explicit
 `denali_ai_workload=true` tag or an allow-listed model/endpoint environment-variable name.
 EKS clusters require the explicit tag because cluster existence alone does not prove an AI
 workload. SageMaker endpoints are intrinsically model-serving resources and are eligible by
-type. Environment values, arbitrary tag values, credentials, code, prompts, and responses are
-never retained.
+type. Arbitrary environment values, tag values, credentials, code, prompts, and responses are
+never retained. The only environment values retained are syntactically bounded model identifiers
+from allow-listed `*_MODEL_ID` keys when the key or identifier attributes the model to Bedrock.
 
 Eligible workloads emit `HOSTED_ON` relationships to their cloud resource and `RUNS_AS`
 relationships when Lambda role, ECS task role, EKS cluster role, or SageMaker model execution
-role evidence is independently observed.
+role evidence is independently observed. A retained Bedrock identifier emits an observed `USES`
+relationship from the workload to that exact model. Denali then reads only the linked execution
+role's inline and attached IAM policies. A wildcard Bedrock invocation resource produces the
+`DENALI-AWS-AI-IAM-001` finding; a denied or malformed IAM read makes this independent posture
+plane partial and cannot become an empty result.
 
 ## Exact runtime identity contracts
 
