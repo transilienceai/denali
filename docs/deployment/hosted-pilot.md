@@ -108,6 +108,20 @@ dispatches the first provider collection; manual collection remains available fo
 or refresh. Successful cloud collection refreshes dependent GitHub correlation and tenant rule
 evaluation as specified by [ADR 0030](../architecture/0030-hosted-evidence-orchestration.md).
 
+After a reviewed release changes validation or collection orchestration, an operator may enqueue a
+bounded refresh of all active connections from the exact deployed `main` revision:
+
+```bash
+modal run --env denali-prod modal_app.py::refresh_active_connections --limit 100
+modal run --env denali-prod modal_app.py::active_connection_status --limit 100
+```
+
+The refresh function creates the same durable validation jobs as the authenticated API and relies
+on the normal healthy-validation hook for collection. It neither accepts a tenant identifier nor
+edits connection evidence directly. The status function prints only structured tenant/connection
+identifiers, provider, health, and job states; it never prints names, credentials, or provider
+payloads. Run it only from clean, current `main` after the production workflow succeeds.
+
 For AWS, prefer Modal OIDC. Configure AWS to trust `https://oidc.modal.com`, create a
 least-privilege role limited to the Denali Modal workspace/application, and set
 `DENALI_MODAL_AWS_ROLE_ARN`. The runtime exposes Modal's short-lived identity token through

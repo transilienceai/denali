@@ -327,6 +327,19 @@ def test_clerk_tenants_cannot_cross_read_or_mutate_evidence_and_jobs(repository)
     )
     assert repo.list_healthy_connection_ids(alpha, provider="aws") == [connection_id]
     assert repo.list_healthy_connection_ids(beta, provider="aws") == []
+    maintenance_refs = repo.list_active_connection_refs(limit=500)
+    assert {
+        "tenant_id": alpha,
+        "connection_id": connection_id,
+        "provider": "aws",
+        "health_state": "healthy",
+    } in maintenance_refs
+    assert all(
+        set(reference) == {"tenant_id", "connection_id", "provider", "health_state"}
+        for reference in maintenance_refs
+    )
+    with pytest.raises(ValueError, match="maintenance limit"):
+        repo.list_active_connection_refs(limit=0)
     assert repo.get_connection(beta, connection_id) is None
     assert repo.connection_validation_job_state(beta, connection_id) == "idle"
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
@@ -373,6 +386,10 @@ def test_connection_validation_jobs_are_deduplicated_and_expire(repository) -> N
     assert duplicate_created is False
     assert duplicate["id"] == job["id"]
     assert repo.connection_validation_job_state(tenant, connection_id) == "running"
+    assert repo.connection_validation_status(tenant, connection_id) == {
+        "state": "running",
+        "last_result": None,
+    }
 
     claimed = repo.claim_connection_validation_job(str(job["id"]), lease_seconds=60)
     assert claimed is not None
@@ -380,6 +397,10 @@ def test_connection_validation_jobs_are_deduplicated_and_expire(repository) -> N
     assert repo.claim_connection_validation_job(str(job["id"]), lease_seconds=60) is None
     repo.complete_connection_validation_job(str(job["id"]))
     assert repo.connection_validation_job_state(tenant, connection_id) == "idle"
+    completed_status = repo.connection_validation_status(tenant, connection_id)
+    assert completed_status["state"] == "idle"
+    assert completed_status["last_result"]["state"] == "succeeded"
+    assert completed_status["last_result"]["completed_at"]
 
     stale, stale_created = repo.create_connection_validation_job(
         tenant,
@@ -406,6 +427,9 @@ def test_connection_validation_jobs_are_deduplicated_and_expire(repository) -> N
         ).fetchone()
     assert state == "failed"
     assert error_summary == "Validation dispatch timed out."
+    assert repo.connection_validation_status(tenant, connection_id)["last_result"][
+        "state"
+    ] == "failed"
 
 
 def test_entra_consent_state_and_collection_jobs_are_tenant_bound_and_durable(
