@@ -212,3 +212,6 @@ are separate acceptance planes; one cannot stand in for the other.
 - Customer cloud access is revocable at the provider and does not require Denali to retain
   long-lived customer secrets.
 - Durable validation and provider collection survive API-container replacement and scale-out.
+- Healthy validation now starts the first durable provider collection, and successful collection
+  refreshes dependent source correlation and tenant rule evaluation as specified by
+  [ADR 0030](0030-hosted-evidence-orchestration.md).

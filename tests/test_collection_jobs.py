@@ -40,9 +40,7 @@ class DurableCollectionRepository:
     ) -> dict[str, Any] | None:
         return {"id": connection_id, "provider": "entra", "lifecycle_state": "active"}
 
-    def complete_connection_collection_job(
-        self, job_id: str, result: dict[str, Any]
-    ) -> None:
+    def complete_connection_collection_job(self, job_id: str, result: dict[str, Any]) -> None:
         self.completed = result
         self.job["state"] = "succeeded"
 
@@ -127,9 +125,7 @@ def test_collection_job_retries_transient_timeout_and_worker_failure(failure: Ex
 
     assert collector.calls == 2
     assert repository.job["state"] == "succeeded"
-    assert repository.failures == [
-        "Collection worker could not complete the declared read planes."
-    ]
+    assert repository.failures == ["Collection worker could not complete the declared read planes."]
 
 
 def test_collection_job_stops_after_bounded_failures_without_leaking_error() -> None:
@@ -152,3 +148,51 @@ def test_collection_job_stops_after_bounded_failures_without_leaking_error() -> 
     assert collector.calls == 3
     assert repository.job["state"] == "failed"
     assert all("secret-provider" not in summary for summary in repository.failures)
+
+
+def test_successful_collection_runs_post_processing_before_completion() -> None:
+    repository = DurableCollectionRepository(collection_kind="gcp_deployments")
+    calls: list[tuple[str, str, str, dict[str, Any]]] = []
+
+    run_durable_collection_job(
+        repository,
+        {"gcp_deployments": Collector()},
+        "job-fixture",
+        on_succeeded=lambda *values: calls.append(values),
+    )
+
+    assert calls == [
+        (
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "11111111-1111-4111-8111-111111111111",
+            "gcp_deployments",
+            {
+                "state": "complete",
+                "connection_id": "11111111-1111-4111-8111-111111111111",
+            },
+        )
+    ]
+    assert repository.job["state"] == "succeeded"
+
+
+def test_failed_post_processing_retries_the_durable_collection() -> None:
+    repository = DurableCollectionRepository()
+    collector = Collector()
+    attempts = 0
+
+    def post_process(*_values: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary evaluation failure")
+
+    run_durable_collection_job(
+        repository,
+        {"entra_ai": collector},
+        "job-fixture",
+        on_succeeded=post_process,
+    )
+
+    assert collector.calls == 2
+    assert attempts == 2
+    assert repository.job["state"] == "succeeded"

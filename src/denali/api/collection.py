@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ def run_durable_collection_job(
     *,
     lease_seconds: int = 2700,
     max_attempts: int = 3,
+    on_succeeded: Callable[[str, str, str, dict[str, Any]], None] | None = None,
 ) -> None:
     """Claim and execute a durable collection job with bounded idempotent retries."""
 
@@ -62,6 +63,8 @@ def run_durable_collection_job(
                 connection=target,
                 repository=repository,
             )
+            if on_succeeded is not None:
+                on_succeeded(tenant_id, connection_id, collection_kind, result)
             repository.complete_connection_collection_job(job_id, result)
             return
         except Exception as error:

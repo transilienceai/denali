@@ -98,12 +98,53 @@ def validation_worker(job_id: str) -> None:
         job_id,
         timeout_seconds=int(os.environ.get("DENALI_AWS_ONBOARDING_VALIDATION_SECONDS", "900")),
         retry_seconds=int(os.environ.get("DENALI_AWS_ONBOARDING_RETRY_SECONDS", "10")),
+        on_healthy=_queue_primary_collection,
     )
 
 
 def _dispatch_validation(job_id: str) -> str:
     call = validation_worker.spawn(job_id)
     return call.object_id
+
+
+_PRIMARY_COLLECTION_KINDS = {
+    "aws": "aws_deployments",
+    "azure": "azure_deployments",
+    "entra": "entra_ai",
+    "gcp": "gcp_deployments",
+    "github": "github_source",
+}
+
+
+def _queue_collection(repository, tenant_id: str, connection_id: str, kind: str) -> None:
+    job, created = repository.create_connection_collection_job(
+        tenant_id, connection_id, collection_kind=kind
+    )
+    if not created:
+        return
+    job_id = str(job["id"])
+    try:
+        call = collection_worker.spawn(job_id)
+        repository.set_connection_collection_call_id(job_id, call.object_id)
+    except Exception:
+        repository.fail_connection_collection_job(
+            job_id, "Unable to dispatch automatic collection worker."
+        )
+        raise
+
+
+def _queue_primary_collection(tenant_id: str, connection_id: str, provider: str) -> None:
+    from denali.store.repository import PostgresInventoryRepository
+
+    kind = _PRIMARY_COLLECTION_KINDS.get(provider)
+    if kind is None:
+        raise RuntimeError("validated provider has no collection workflow")
+    _queue_collection(
+        PostgresInventoryRepository(os.environ["DENALI_DSN"]),
+        tenant_id,
+        connection_id,
+        kind,
+    )
 
 
 @app.function(
@@ -140,7 +181,28 @@ def collection_worker(job_id: str) -> None:
             "github_source": GitHubRepositoryCollector(github_app) if github_app else None,
         },
         job_id,
+        on_succeeded=_after_collection_succeeded,
     )
+
+
+def _after_collection_succeeded(
+    tenant_id: str,
+    _connection_id: str,
+    collection_kind: str,
+    _result: dict[str, object],
+) -> None:
+    """Refresh dependent source correlation and tenant-wide derived conclusions."""
+
+    from denali.store.repository import PostgresInventoryRepository
+
+    repository = PostgresInventoryRepository(os.environ["DENALI_DSN"])
+    if collection_kind in {"aws_deployments", "azure_deployments", "gcp_deployments"}:
+        for github_connection_id in repository.list_healthy_connection_ids(
+            tenant_id, provider="github"
+        ):
+            _queue_collection(repository, tenant_id, github_connection_id, "github_source")
+    repository.evaluate_runtime_detections(tenant_id)
+    repository.evaluate_issues(tenant_id)
 
 
 def _dispatch_collection(job_id: str) -> str:

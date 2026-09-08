@@ -10,6 +10,7 @@ from denali.connectors.gcp_deployments import (
     GcpConnectionDeploymentCollector,
     GcpDeploymentConnector,
     GcpDeploymentDiscoveryError,
+    _gcp_ai_inventory_batch,
 )
 from denali.domain import AssetKind, CoverageState, RelationshipKind
 
@@ -68,9 +69,7 @@ def function_asset() -> dict[str, Any]:
                 "state": "ACTIVE",
                 "updateTime": "2026-08-31T12:00:00Z",
                 "serviceConfig": {
-                    "serviceAccountEmail": (
-                        f"{name}@{PROJECT}.iam.gserviceaccount.com"
-                    ),
+                    "serviceAccountEmail": (f"{name}@{PROJECT}.iam.gserviceaccount.com"),
                     "revision": f"{name}-00001-xyz",
                     "uri": f"https://{name}.example.test",
                     "environmentVariables": {"API_TOKEN": "do-not-persist"},
@@ -99,9 +98,7 @@ def run_asset_v1() -> dict[str, Any]:
                 "spec": {
                     "template": {
                         "spec": {
-                            "serviceAccountName": (
-                                f"{name}@{PROJECT}.iam.gserviceaccount.com"
-                            ),
+                            "serviceAccountName": (f"{name}@{PROJECT}.iam.gserviceaccount.com"),
                             "containers": [
                                 {
                                     "image": f"gcr.io/{PROJECT}/{name}@sha256:def",
@@ -125,8 +122,7 @@ def gke_cluster() -> dict[str, Any]:
     name = "model-cluster"
     return {
         "name": (
-            f"//container.googleapis.com/projects/{PROJECT}/locations/"
-            f"us-central1/clusters/{name}"
+            f"//container.googleapis.com/projects/{PROJECT}/locations/us-central1/clusters/{name}"
         ),
         "assetType": GKE_CLUSTER_ASSET_TYPE,
         "ancestors": ["projects/123456789012"],
@@ -174,9 +170,7 @@ def test_collects_bounded_gcp_deployments_without_environment_values() -> None:
         (PROJECT, GKE_CLUSTER_ASSET_TYPE),
     ]
     workloads = [item for item in batch.assets if item.asset.kind is AssetKind.AI_WORKLOAD]
-    cloud_resources = [
-        item for item in batch.assets if item.asset.kind is AssetKind.CLOUD_RESOURCE
-    ]
+    cloud_resources = [item for item in batch.assets if item.asset.kind is AssetKind.CLOUD_RESOURCE]
     assert {item.display_name for item in workloads} == {
         "denali-ai",
         "denali-function",
@@ -194,13 +188,9 @@ def test_collects_bounded_gcp_deployments_without_environment_values() -> None:
         "location": ["us-central1"],
         "service_name": ["denali-ai"],
     }
-    assert run_workload.attributes["deployment_artifact"]["image"].endswith(
-        "@sha256:abc"
-    )
+    assert run_workload.attributes["deployment_artifact"]["image"].endswith("@sha256:abc")
     assert run_workload.attributes["model_configuration_keys"] == ["VERTEX_MODEL_ID"]
-    assert run_workload.attributes["model_configuration"] == {
-        "VERTEX_MODEL_ID": "gemini-2.5-flash"
-    }
+    assert run_workload.attributes["model_configuration"] == {"VERTEX_MODEL_ID": "gemini-2.5-flash"}
     serialized = repr(batch)
     assert "secret-model-value" not in serialized
     assert "do-not-persist" not in serialized
@@ -219,9 +209,7 @@ def test_collects_bounded_gcp_deployments_without_environment_values() -> None:
 
 def test_asset_type_failures_are_isolated_by_coverage_plane() -> None:
     class PartiallyBrokenClient(FakeAssetClient):
-        def list_assets(
-            self, *, project_id: str, asset_type: str
-        ) -> tuple[dict[str, Any], ...]:
+        def list_assets(self, *, project_id: str, asset_type: str) -> tuple[dict[str, Any], ...]:
             if asset_type == CLOUD_RUN_ASSET_TYPE:
                 raise GcpDeploymentDiscoveryError("cloudasset:ListAssets:403")
             return (function_asset(),)
@@ -261,9 +249,7 @@ def test_exact_resource_name_boundary_excludes_other_project_services() -> None:
         "gemini-2.5-flash",
         f"summit@{PROJECT}.iam.gserviceaccount.com",
     }
-    run_coverage = next(
-        item for item in batch.coverage if item.plane == CLOUD_RUN_INVENTORY_PLANE
-    )
+    run_coverage = next(item for item in batch.coverage if item.plane == CLOUD_RUN_INVENTORY_PLANE)
     assert "selected 1 by exact resource name" in (run_coverage.detail or "")
 
 
@@ -290,9 +276,7 @@ def test_mismatched_resource_identity_is_partial_and_not_ingested() -> None:
     by_plane = {item.plane: item for item in batch.coverage}
 
     assert by_plane[CLOUD_RUN_INVENTORY_PLANE].state is CoverageState.PARTIAL
-    assert "escaped the selected project" in (
-        by_plane[CLOUD_RUN_INVENTORY_PLANE].detail or ""
-    )
+    assert "escaped the selected project" in (by_plane[CLOUD_RUN_INVENTORY_PLANE].detail or "")
     assert batch.assets == ()
 
 
@@ -345,7 +329,7 @@ def test_connection_collector_uses_selected_project_number_and_persists_batch() 
 
     sink = Sink()
     collector = GcpConnectionDeploymentCollector(
-        asset_client_factory=lambda principal: (principals.append(principal) or client)
+        asset_client_factory=lambda principal: principals.append(principal) or client
     )
     result = collector.collect(
         tenant_id="tenant",
@@ -354,13 +338,9 @@ def test_connection_collector_uses_selected_project_number_and_persists_batch() 
             "provider": "gcp",
             "lifecycle_state": "active",
             "declared_scopes": ["gcp.code_to_cloud"],
-            "credential_reference": {
-                "principal_email": "denali@operator.iam.gserviceaccount.com"
-            },
+            "credential_reference": {"principal_email": "denali@operator.iam.gserviceaccount.com"},
             "configuration": {
-                "projects": [
-                    {"id": PROJECT, "number": "123456789012", "name": "Denali Test"}
-                ],
+                "projects": [{"id": PROJECT, "number": "123456789012", "name": "Denali Test"}],
                 "resource_names": [
                     f"//run.googleapis.com/projects/{PROJECT}/locations/us-central1/services/denali-ai"
                 ],
@@ -384,3 +364,41 @@ def test_connection_collector_uses_selected_project_number_and_persists_batch() 
     }
     assert result["state"] == "complete"
     assert result["projects"][0]["ai_workloads"] == 1
+
+
+def test_ai_inventory_maps_exact_cloud_asset_types_without_raw_resource_payloads() -> None:
+    asset_type = "aiplatform.googleapis.com/Model"
+    natural_key = (
+        f"//aiplatform.googleapis.com/projects/{PROJECT}/locations/us-central1/models/123456"
+    )
+    client = FakeAssetClient(
+        {
+            asset_type: (
+                {
+                    "name": natural_key,
+                    "assetType": asset_type,
+                    "resource": {
+                        "data": {
+                            "displayName": "Gemini tuned model",
+                            "encryptionSpec": {"kmsKeyName": "must-not-be-retained"},
+                        }
+                    },
+                },
+            )
+        }
+    )
+
+    batch = _gcp_ai_inventory_batch(
+        project_id=PROJECT,
+        project_number="123456789012",
+        connection_id="connection",
+        client=client,
+        plane="gcp_vertex_ai_development_inventory",
+        asset_types=(asset_type,),
+    )
+
+    assert len(batch.assets) == 1
+    assert batch.assets[0].asset.kind is AssetKind.AI_MODEL
+    assert batch.assets[0].asset.natural_key == natural_key
+    assert "must-not-be-retained" not in str(batch)
+    assert batch.coverage[0].state is CoverageState.COMPLETE

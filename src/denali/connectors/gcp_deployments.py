@@ -6,14 +6,19 @@ import argparse
 import os
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from denali.connections.gcp import (
+    GCP_SCOPE_AGENT_BUILDER,
+    GCP_SCOPE_AI_ACTIVITY,
     GCP_SCOPE_CODE_TO_CLOUD,
+    GCP_SCOPE_VERTEX_AI,
+    authorized_gcp_credential,
     authorized_gcp_request,
     valid_gcp_project_id,
 )
+from denali.connectors.gcp_vertex_activity import GcpVertexActivityConnector
 from denali.domain import (
     AssertionType,
     AssetAssertion,
@@ -45,10 +50,64 @@ MAX_ASSETS_PER_TYPE = 10_000
 MAX_PAGES_PER_TYPE = 100
 PAGE_SIZE = 1_000
 
+_GCP_AI_PLANES = {
+    GCP_SCOPE_VERTEX_AI: (
+        (
+            "gcp_vertex_ai_runtime_inventory",
+            (
+                "aiplatform.googleapis.com/Endpoint",
+                "aiplatform.googleapis.com/ReasoningEngine",
+                "aiplatform.googleapis.com/CachedContent",
+            ),
+        ),
+        (
+            "gcp_vertex_ai_development_inventory",
+            (
+                "aiplatform.googleapis.com/Model",
+                "aiplatform.googleapis.com/Dataset",
+                "aiplatform.googleapis.com/PipelineJob",
+                "aiplatform.googleapis.com/CustomJob",
+                "aiplatform.googleapis.com/NotebookRuntime",
+            ),
+        ),
+    ),
+    GCP_SCOPE_AGENT_BUILDER: (
+        (
+            "gcp_agent_builder_inventory",
+            (
+                "discoveryengine.googleapis.com/Assistant",
+                "discoveryengine.googleapis.com/DataStore",
+                "discoveryengine.googleapis.com/Engine",
+            ),
+        ),
+        (
+            "gcp_dialogflow_inventory",
+            (
+                "dialogflow.googleapis.com/Agent",
+                "dialogflow.googleapis.com/ConversationProfile",
+                "dialogflow.googleapis.com/KnowledgeBase",
+            ),
+        ),
+    ),
+}
+
+_GCP_AI_KINDS = {
+    "aiplatform.googleapis.com/Endpoint": AssetKind.AI_WORKLOAD,
+    "aiplatform.googleapis.com/ReasoningEngine": AssetKind.AI_AGENT,
+    "aiplatform.googleapis.com/Model": AssetKind.AI_MODEL,
+    "aiplatform.googleapis.com/Dataset": AssetKind.AI_DATASTORE,
+    "aiplatform.googleapis.com/PipelineJob": AssetKind.AI_PIPELINE,
+    "aiplatform.googleapis.com/CustomJob": AssetKind.AI_WORKLOAD,
+    "discoveryengine.googleapis.com/Assistant": AssetKind.AI_AGENT,
+    "discoveryengine.googleapis.com/DataStore": AssetKind.AI_DATASTORE,
+    "discoveryengine.googleapis.com/Engine": AssetKind.AI_APPLICATION,
+    "dialogflow.googleapis.com/Agent": AssetKind.AI_AGENT,
+    "dialogflow.googleapis.com/ConversationProfile": AssetKind.AI_APPLICATION,
+    "dialogflow.googleapis.com/KnowledgeBase": AssetKind.AI_DATASTORE,
+}
+
 _MODEL_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*MODEL_ID$")
-_SAFE_MODEL_VALUE_KEYS = frozenset(
-    {"VERTEX_MODEL_ID", "GEMINI_MODEL_ID", "GOOGLE_MODEL_ID"}
-)
+_SAFE_MODEL_VALUE_KEYS = frozenset({"VERTEX_MODEL_ID", "GEMINI_MODEL_ID", "GOOGLE_MODEL_ID"})
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
 _RESOURCE_NAMES = {
     CLOUD_RUN_ASSET_TYPE: re.compile(
@@ -76,6 +135,8 @@ class GcpAssetClient(Protocol):
 
 class InventorySink(Protocol):
     def ingest(self, tenant_id: str, batch: InventoryBatch) -> dict[str, int]: ...
+
+    def ingest_activity(self, tenant_id: str, batch: Any) -> dict[str, int]: ...
 
 
 class GcpCloudAssetRestClient:
@@ -109,9 +170,7 @@ class GcpCloudAssetRestClient:
                     f"cloudasset:ListAssets:{_safe_error_code(error)}"
                 ) from None
             if not isinstance(payload, dict) or not isinstance(payload.get("assets", []), list):
-                raise GcpDeploymentDiscoveryError(
-                    "cloudasset:ListAssets:invalid_response_shape"
-                )
+                raise GcpDeploymentDiscoveryError("cloudasset:ListAssets:invalid_response_shape")
             for item in payload.get("assets", []):
                 if isinstance(item, dict):
                     records.append(item)
@@ -123,13 +182,9 @@ class GcpCloudAssetRestClient:
             if next_token is None or next_token == "":
                 return tuple(records)
             if not isinstance(next_token, str):
-                raise GcpDeploymentDiscoveryError(
-                    "cloudasset:ListAssets:invalid_page_token"
-                )
+                raise GcpDeploymentDiscoveryError("cloudasset:ListAssets:invalid_page_token")
             page_token = next_token
-        raise GcpDeploymentDiscoveryError(
-            f"cloudasset:ListAssets:page_limit_{MAX_PAGES_PER_TYPE}"
-        )
+        raise GcpDeploymentDiscoveryError(f"cloudasset:ListAssets:page_limit_{MAX_PAGES_PER_TYPE}")
 
 
 class GcpConnectionDeploymentCollector:
@@ -154,8 +209,14 @@ class GcpConnectionDeploymentCollector:
             raise ValueError("connection is not a Google Cloud connection")
         if connection.get("lifecycle_state") != "active":
             raise ValueError("disabled Google Cloud connections cannot collect")
-        if GCP_SCOPE_CODE_TO_CLOUD not in connection.get("declared_scopes", []):
-            raise ValueError("Google Cloud code-to-cloud scope is not declared")
+        scopes = set(connection.get("declared_scopes", []))
+        if not scopes & {
+            GCP_SCOPE_CODE_TO_CLOUD,
+            GCP_SCOPE_AI_ACTIVITY,
+            GCP_SCOPE_VERTEX_AI,
+            GCP_SCOPE_AGENT_BUILDER,
+        }:
+            raise ValueError("Google Cloud connection has no supported collection scope")
         configuration = connection.get("configuration", {})
         projects = configuration.get("projects", [])
         configured_resource_names = configuration.get("resource_names")
@@ -172,9 +233,7 @@ class GcpConnectionDeploymentCollector:
         if configured_display_names is not None and (
             not isinstance(configured_display_names, dict)
             or any(
-                not isinstance(key, str)
-                or not isinstance(value, str)
-                or not value.strip()
+                not isinstance(key, str) or not isinstance(value, str) or not value.strip()
                 for key, value in configured_display_names.items()
             )
         ):
@@ -187,6 +246,13 @@ class GcpConnectionDeploymentCollector:
                 )
 
         client = self._asset_client_factory(principal)
+        activity_credentials = None
+        cloud_logging = None
+        if GCP_SCOPE_AI_ACTIVITY in scopes:
+            from google.cloud import logging as cloud_logging_module
+
+            activity_credentials = authorized_gcp_credential(principal)
+            cloud_logging = cloud_logging_module
         project_results: list[dict[str, Any]] = []
         failed = 0
         partial = 0
@@ -197,19 +263,55 @@ class GcpConnectionDeploymentCollector:
                 failed += 1
                 project_results.append({"project_id": str(project_id), "state": "failed"})
                 continue
-            batch = GcpDeploymentConnector(
-                project_id=project_id,
-                project_number=project_number,
-                asset_client=client,
-                included_resource_names=(
-                    tuple(configured_resource_names)
-                    if configured_resource_names is not None
-                    else None
-                ),
-                resource_display_names=configured_display_names,
-            ).collect(connection_id=str(connection["id"]))
-            repository.ingest(tenant_id, batch)
-            states = {item.state for item in batch.coverage}
+            batch = None
+            all_coverage: list[Coverage] = []
+            ai_inventory_assets = 0
+            for scope_name, plane_groups in _GCP_AI_PLANES.items():
+                if scope_name not in scopes:
+                    continue
+                for plane, asset_types in plane_groups:
+                    ai_batch = _gcp_ai_inventory_batch(
+                        project_id=project_id,
+                        project_number=project_number,
+                        connection_id=str(connection["id"]),
+                        client=client,
+                        plane=plane,
+                        asset_types=asset_types,
+                    )
+                    repository.ingest(tenant_id, ai_batch)
+                    ai_inventory_assets += len(ai_batch.assets)
+                    all_coverage.extend(ai_batch.coverage)
+            if GCP_SCOPE_CODE_TO_CLOUD in scopes:
+                batch = GcpDeploymentConnector(
+                    project_id=project_id,
+                    project_number=project_number,
+                    asset_client=client,
+                    included_resource_names=(
+                        tuple(configured_resource_names)
+                        if configured_resource_names is not None
+                        else None
+                    ),
+                    resource_display_names=configured_display_names,
+                ).collect(connection_id=str(connection["id"]))
+                repository.ingest(tenant_id, batch)
+                all_coverage.extend(batch.coverage)
+            activity_count = 0
+            if GCP_SCOPE_AI_ACTIVITY in scopes and cloud_logging is not None:
+                end_time = datetime.now(UTC)
+                activity_batch = GcpVertexActivityConnector(
+                    project_id=project_id,
+                    logging_client=cloud_logging.Client(
+                        project=project_id, credentials=activity_credentials
+                    ),
+                ).collect(
+                    start_time=end_time - timedelta(hours=24),
+                    end_time=end_time,
+                    connection_id=str(connection["id"]),
+                )
+                repository.ingest_activity(tenant_id, activity_batch)
+                activity_count = len(activity_batch.activities)
+                all_coverage.extend(activity_batch.coverage)
+            states = {item.state for item in all_coverage}
             if CoverageState.FAILED in states:
                 state = "failed"
                 failed += 1
@@ -223,19 +325,17 @@ class GcpConnectionDeploymentCollector:
                     "project_id": project_id,
                     "project_number": project_number,
                     "state": state,
-                    "assets": len(batch.assets),
+                    "assets": (len(batch.assets) if batch else 0) + ai_inventory_assets,
                     "ai_workloads": sum(
-                        item.asset.kind is AssetKind.AI_WORKLOAD for item in batch.assets
+                        item.asset.kind is AssetKind.AI_WORKLOAD
+                        for item in (batch.assets if batch else ())
                     ),
+                    "activity_events": activity_count,
                 }
             )
         completed_at = datetime.now(UTC).isoformat()
         overall_state = (
-            "failed"
-            if failed == len(projects)
-            else "partial"
-            if failed or partial
-            else "complete"
+            "failed" if failed == len(projects) else "partial" if failed or partial else "complete"
         )
         return {
             "connection_id": str(connection["id"]),
@@ -369,15 +469,10 @@ class GcpDeploymentConnector:
                         workload_assertion.evidence,
                     )
                 for configuration_key, model_id in parsed["model_configuration"].items():
-                    model_ref = AssetRef(
-                        AssetKind.AI_MODEL, f"gcp:vertex:model:{model_id}"
-                    )
+                    model_ref = AssetRef(AssetKind.AI_MODEL, f"gcp:vertex:model:{model_id}")
                     model_evidence = Evidence(
                         source_type="gcp_cloud_asset_inventory",
-                        locator=(
-                            f"gcp://cloudasset/"
-                            f"{parsed['natural_key'].removeprefix('//')}"
-                        ),
+                        locator=(f"gcp://cloudasset/{parsed['natural_key'].removeprefix('//')}"),
                         observed_at=observed_at,
                         payload={
                             "model_id": model_id,
@@ -459,6 +554,101 @@ class GcpDeploymentConnector:
             confidence=1.0,
             evidence=evidence,
         )
+
+
+def _gcp_ai_inventory_batch(
+    *,
+    project_id: str,
+    project_number: str,
+    connection_id: str,
+    client: GcpAssetClient,
+    plane: str,
+    asset_types: tuple[str, ...],
+) -> InventoryBatch:
+    observed_at = datetime.now(UTC)
+    scope = f"gcp:project:{project_id}"
+    assertions: list[AssetAssertion] = []
+    warnings: list[str] = []
+    failed_types = 0
+    for asset_type in asset_types:
+        try:
+            records = client.list_assets(project_id=project_id, asset_type=asset_type)
+        except GcpDeploymentDiscoveryError as error:
+            failed_types += 1
+            warnings.append(str(error))
+            continue
+        for position, raw in enumerate(records):
+            natural_key = raw.get("name") if isinstance(raw, dict) else None
+            observed_type = raw.get("assetType") if isinstance(raw, dict) else None
+            if observed_type != asset_type or not isinstance(natural_key, str):
+                warnings.append(f"{asset_type} item {position}: invalid resource identity")
+                continue
+            project_markers = (f"/projects/{project_id}/", f"/projects/{project_number}/")
+            if not any(marker in natural_key for marker in project_markers):
+                warnings.append(f"{asset_type} item {position}: resource escaped project")
+                continue
+            resource = raw.get("resource") if isinstance(raw.get("resource"), dict) else {}
+            data = resource.get("data") if isinstance(resource.get("data"), dict) else {}
+            display_name = next(
+                (
+                    value
+                    for value in (data.get("displayName"), data.get("name"))
+                    if isinstance(value, str) and value
+                ),
+                natural_key.rsplit("/", 1)[-1],
+            )
+            evidence = Evidence(
+                source_type="gcp_cloud_asset_inventory",
+                locator=f"gcp://cloudasset/{natural_key.removeprefix('//')}",
+                observed_at=observed_at,
+                payload={
+                    "project_id": project_id,
+                    "project_number": project_number,
+                    "asset_type": asset_type,
+                    "resource_name": natural_key,
+                },
+            )
+            assertions.append(
+                AssetAssertion(
+                    asset=AssetRef(
+                        _GCP_AI_KINDS.get(asset_type, AssetKind.CLOUD_RESOURCE), natural_key
+                    ),
+                    coverage_plane=plane,
+                    display_name=display_name,
+                    assertion_type=AssertionType.OBSERVED,
+                    confidence=1.0,
+                    evidence=evidence,
+                    attributes={
+                        "provider": "gcp",
+                        "project_id": project_id,
+                        "project_number": project_number,
+                        "asset_type": asset_type,
+                        "resource_name": natural_key,
+                    },
+                )
+            )
+    state = (
+        CoverageState.FAILED
+        if failed_types == len(asset_types)
+        else CoverageState.PARTIAL
+        if failed_types or warnings
+        else CoverageState.COMPLETE
+    )
+    detail = "; ".join(
+        [
+            f"Observed {len(assertions)} resources across {len(asset_types)} AI resource types.",
+            *warnings[:10],
+        ]
+    )
+    return InventoryBatch(
+        connector_id="denali.gcp_ai_inventory",
+        connection_id=connection_id,
+        run_id=f"gcp-ai-inventory-{plane}-{project_id}-{observed_at.isoformat()}",
+        scope_key=scope,
+        collected_at=observed_at,
+        coverage=(Coverage(plane, state, scope, detail),),
+        assets=tuple(assertions),
+    )
 
 
 def _parse_asset(
@@ -623,9 +813,7 @@ def _asset_assertions(
     if not parsed["classification"]:
         return cloud_ref, cloud_assertion, None, None
 
-    identifier_name = (
-        "service_name" if parsed["service"] == "cloud_run" else "function_name"
-    )
+    identifier_name = "service_name" if parsed["service"] == "cloud_run" else "function_name"
     deployment_identifiers = {
         "project": [parsed["project_id"]],
         "location": [parsed["location"]],
@@ -758,9 +946,7 @@ def _normalize_cloud_run_data(
     if namespace not in {project_id, project_number}:
         raise ValueError("Cloud Run namespace did not match the selected project")
     revision_template = spec.get("template")
-    revision_spec = (
-        revision_template.get("spec") if isinstance(revision_template, dict) else None
-    )
+    revision_spec = revision_template.get("spec") if isinstance(revision_template, dict) else None
     revision_spec = revision_spec if isinstance(revision_spec, dict) else {}
     conditions = status.get("conditions") if isinstance(status.get("conditions"), list) else []
     ready = next(

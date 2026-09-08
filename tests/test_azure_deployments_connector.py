@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from denali.connectors.azure_deployments import (
@@ -10,6 +11,8 @@ from denali.connectors.azure_deployments import (
     AzureDeploymentConnector,
     AzureDeploymentDiscoveryError,
     AzureResourceGraphRestClient,
+    _azure_ai_activity_batch,
+    _azure_ai_inventory_batch,
 )
 from denali.domain import AssetKind, CoverageState, RelationshipKind
 
@@ -140,9 +143,7 @@ def test_collects_bounded_azure_deployments_without_configuration_values() -> No
         (SUBSCRIPTION, AKS_CLUSTER_RESOURCE_TYPE),
     ]
     workloads = [item for item in batch.assets if item.asset.kind is AssetKind.AI_WORKLOAD]
-    cloud_resources = [
-        item for item in batch.assets if item.asset.kind is AssetKind.CLOUD_RESOURCE
-    ]
+    cloud_resources = [item for item in batch.assets if item.asset.kind is AssetKind.CLOUD_RESOURCE]
     assert {item.display_name for item in workloads} == {
         "denali-ai",
         "denali-function",
@@ -161,9 +162,7 @@ def test_collects_bounded_azure_deployments_without_configuration_values() -> No
         "container_app_name": ["denali-ai"],
     }
     assert app.attributes["deployment_artifact"]["image"].endswith("@sha256:abc")
-    assert app.attributes["model_configuration_keys"] == [
-        "AZURE_OPENAI_DEPLOYMENT_ID"
-    ]
+    assert app.attributes["model_configuration_keys"] == ["AZURE_OPENAI_DEPLOYMENT_ID"]
     serialized = repr(batch)
     assert "secret-deployment" not in serialized
     assert "must-not-persist" not in serialized
@@ -190,9 +189,7 @@ def test_resource_type_failures_are_isolated_by_coverage_plane() -> None:
 
     assert by_plane[CONTAINER_APP_INVENTORY_PLANE].state is CoverageState.FAILED
     assert by_plane[FUNCTION_APP_INVENTORY_PLANE].state is CoverageState.COMPLETE
-    assert "AuthorizationFailed" in (
-        by_plane[CONTAINER_APP_INVENTORY_PLANE].detail or ""
-    )
+    assert "AuthorizationFailed" in (by_plane[CONTAINER_APP_INVENTORY_PLANE].detail or "")
 
 
 def test_mismatched_resource_identity_is_partial_and_not_ingested() -> None:
@@ -276,3 +273,87 @@ def test_connection_collector_requires_scope_and_reports_each_subscription() -> 
     assert result["subscription_count"] == 1
     assert result["subscriptions"][0]["ai_workloads"] == 1
     assert len(ingested) == 1
+
+
+def test_ai_inventory_keeps_exact_resource_boundary_without_raw_properties() -> None:
+    resource_type = "microsoft.botservice/botservices"
+    resource_id = (
+        f"/subscriptions/{SUBSCRIPTION}/resourceGroups/Denali-Test/providers/"
+        "Microsoft.BotService/botServices/support-agent"
+    )
+    client = FakeResourceClient(
+        {
+            resource_type: (
+                {
+                    "id": resource_id,
+                    "name": "support-agent",
+                    "type": resource_type,
+                    "location": "global",
+                    "subscriptionId": SUBSCRIPTION,
+                    "properties": {"endpoint": "must-not-be-retained"},
+                },
+            )
+        }
+    )
+
+    batch = _azure_ai_inventory_batch(
+        subscription_id=SUBSCRIPTION,
+        connection_id="connection",
+        client=client,
+        plane="azure_bot_services",
+        resource_type=resource_type,
+        kind=AssetKind.AI_AGENT,
+    )
+
+    assert len(batch.assets) == 1
+    assert batch.assets[0].asset.kind is AssetKind.AI_AGENT
+    assert batch.assets[0].asset.natural_key == resource_id.lower()
+    assert "must-not-be-retained" not in str(batch)
+    assert batch.coverage[0].state is CoverageState.COMPLETE
+
+
+def test_ai_activity_is_bounded_to_known_providers_and_omits_callers() -> None:
+    now = datetime.now(UTC)
+
+    class ActivityClient(FakeResourceClient):
+        def list_activity(self, **_kwargs: Any) -> tuple[dict[str, Any], ...]:
+            return (
+                {
+                    "eventDataId": "event-1",
+                    "eventTimestamp": now.isoformat(),
+                    "resourceProviderName": {"value": "Microsoft.CognitiveServices"},
+                    "operationName": {
+                        "value": "Microsoft.CognitiveServices/accounts/write",
+                        "localizedValue": "Update AI services account",
+                    },
+                    "status": {"value": "Succeeded"},
+                    "caller": "must-not-be-retained@example.com",
+                    "resourceId": (
+                        f"/subscriptions/{SUBSCRIPTION}/resourceGroups/test/providers/"
+                        "Microsoft.CognitiveServices/accounts/ai"
+                    ),
+                },
+                {
+                    "eventDataId": "event-2",
+                    "eventTimestamp": now.isoformat(),
+                    "resourceProviderName": {"value": "Microsoft.Storage"},
+                    "operationName": {
+                        "value": "Microsoft.Storage/storageAccounts/write",
+                        "localizedValue": "Update storage account",
+                    },
+                    "status": {"value": "Succeeded"},
+                },
+            )
+
+    batch = _azure_ai_activity_batch(
+        subscription_id=SUBSCRIPTION,
+        connection_id="connection",
+        client=ActivityClient({}),
+        start_time=now - timedelta(hours=24),
+        end_time=now,
+    )
+
+    assert len(batch.activities) == 1
+    assert batch.activities[0].source_uid == "event-1"
+    assert "must-not-be-retained" not in str(batch)
+    assert batch.coverage[0].state is CoverageState.COMPLETE

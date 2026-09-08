@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from denali.connectors.aws_deployments import AwsDeploymentConnector
+from denali.connectors.aws_deployments import (
+    AwsDeploymentConnector,
+    _agentcore_batch,
+    _bedrock_logging_batch,
+)
 from denali.domain import AssetKind, CoverageState, RelationshipKind
 
 
@@ -24,7 +28,11 @@ class LambdaClient:
         }
 
     def list_tags(self, **kwargs: Any) -> dict[str, Any]:
-        return {"Tags": {}}
+        return {
+            "Tags": {
+                "aws:cloudformation:logical-id": "AgentFunctionA1B2C3D4",
+            }
+        }
 
 
 class EcsClient:
@@ -46,7 +54,12 @@ class EcsClient:
                     }
                 ],
             },
-            "tags": [],
+            "tags": [
+                {
+                    "key": "aws:cloudformation:logical-id",
+                    "value": "WorkerTaskDefinitionA1B2C3D4",
+                }
+            ],
         }
 
 
@@ -117,8 +130,20 @@ def test_collects_four_explicit_aws_deployment_contracts_without_secret_values()
         for item in workloads
     }
     assert identities == {
-        ("serverless_function", ("account_id", "region", "function_name")),
-        ("container_task", ("account_id", "region", "task_family")),
+        (
+            "serverless_function",
+            ("account_id", "region", "function_name", "cloudformation_logical_id"),
+        ),
+        (
+            "container_task",
+            (
+                "account_id",
+                "region",
+                "task_family",
+                "cloudformation_logical_id",
+                "container_name",
+            ),
+        ),
         ("kubernetes_cluster", ("account_id", "region", "cluster_name")),
         ("model_endpoint", ("account_id", "region", "endpoint_name")),
     }
@@ -131,3 +156,37 @@ def test_collects_four_explicit_aws_deployment_contracts_without_secret_values()
         if item.asset.kind is AssetKind.CLOUD_RESOURCE and item.display_name == "ordinary"
     ]
     assert len(ordinary) == 1
+
+
+def test_agentcore_marks_sdk_unsupported_regions_without_false_failures() -> None:
+    class UnsupportedSession:
+        def get_available_regions(self, *_args: Any, **_kwargs: Any) -> list[str]:
+            return ["us-east-1"]
+
+    batch = _agentcore_batch(
+        session=UnsupportedSession(),
+        account_id="123456789012",
+        region="ap-east-1",
+        partition="aws",
+        connection_id="connection",
+    )
+
+    assert {item.state for item in batch.coverage} == {CoverageState.NOT_SUPPORTED}
+    assert batch.assets == ()
+
+
+def test_bedrock_logging_records_presence_without_configuration_payload() -> None:
+    class Client:
+        def get_model_invocation_logging_configuration(self) -> dict[str, Any]:
+            return {"loggingConfig": {"cloudWatchConfig": {"logGroupName": "private"}}}
+
+    batch = _bedrock_logging_batch(
+        account_id="123456789012",
+        region="us-east-1",
+        connection_id="connection",
+        client=Client(),
+    )
+
+    assert batch.coverage[0].state is CoverageState.COMPLETE
+    assert "present" in (batch.coverage[0].detail or "")
+    assert "private" not in str(batch)

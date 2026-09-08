@@ -560,6 +560,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
                 open_by_exploit_state: {},
               }}
               vulnerabilities={vulnerabilities}
+              coverage={coverage}
               navigation={filterNavigation}
               onOpenVulnerability={(id) => openDrawer("vulnerability", id)}
             />
@@ -575,6 +576,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
             <CodeToCloud
               deployments={deployments}
               observations={codeToCloudObservations}
+              coverage={coverage}
               onOpenAsset={(id) => openDrawer("asset", id)}
               onOpenFinding={(id) => openDrawer("finding", id)}
               onOpenVulnerability={(id) => openDrawer("vulnerability", id)}
@@ -583,6 +585,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
             <RuntimeActivityPage
               summary={activitySummary ?? { total: 0, last_24h: 0, providers: 0, failures: 0, fixture_total: 0, by_category: {} }}
               activities={activities}
+              coverage={coverage}
               includeFixtures={includeActivityFixtures}
               navigation={filterNavigation}
               onToggleFixtures={toggleActivityFixtures}
@@ -812,6 +815,12 @@ function Dashboard({
     .sort((left, right) => (severityRank[right.severity] ?? 0) - (severityRank[left.severity] ?? 0) || right.confidence - left.confidence)[0];
   const criticalVulnerabilityOccurrences = vulnerabilitySummary.open_by_severity.critical ?? 0;
   const fixableVulnerabilityOccurrences = vulnerabilitySummary.open_by_fix_state.fixed ?? 0;
+  const vulnerabilityAssessed = coverage.some(
+    (item) => item.plane === "vulnerabilities" && !item.connector_id.includes("demo"),
+  );
+  const activityAssessed = coverage.some(
+    (item) => ["runtime_activity", "bedrock_management_activity", "vertex_cloud_audit_activity", "azure_ai_management_activity", "entra_ai_signins", "entra_ai_directory_audits"].includes(item.plane) && !item.connector_id.includes("demo"),
+  );
   const timestamps = [
     ...assets.map((asset) => asset.last_seen_at),
     ...coverage.map((item) => item.collected_at),
@@ -866,8 +875,8 @@ function Dashboard({
               <span className="priority-number">03</span>
               <span className="priority-copy">
                 <small>AI STACK EXPOSURE</small>
-                <strong>{vulnerabilitySummary.open_vulnerability_ids} distinct open vulnerabilities</strong>
-                <span>{criticalVulnerabilityOccurrences} critical occurrences · {fixableVulnerabilityOccurrences} with a scanner-provided fix</span>
+                <strong>{vulnerabilityAssessed ? `${vulnerabilitySummary.open_vulnerability_ids} distinct open vulnerabilities` : "Vulnerability exposure has not been assessed"}</strong>
+                <span>{vulnerabilityAssessed ? `${criticalVulnerabilityOccurrences} critical occurrences · ${fixableVulnerabilityOccurrences} with a scanner-provided fix` : "Import a bounded SBOM and vulnerability scan before interpreting exposure."}</span>
               </span>
               <ChevronRight size={19} />
             </button>
@@ -909,7 +918,7 @@ function Dashboard({
         <MetricCard icon={Boxes} color="coral" label="Known resources" value={summary.total} detail={`${kinds.length} normalized resource types`} onClick={() => onViewInventory()} />
         <MetricCard icon={CircleHelp} color="amber" label="AI workloads to review" value={unreviewedWorkloads} detail="Governance state not yet decided" onClick={() => onViewInventory("ai_workload")} />
         <MetricCard icon={ShieldCheck} color="green" label="Proven deployments" value={provenDeployments} detail="Exact source + cloud identity" onClick={() => onNavigate("codeToCloud")} />
-        <MetricCard icon={Activity} color="blue" label="Runtime observations" value={activitySummary.total} detail={`${activitySummary.last_24h} observed in the last 24 hours`} onClick={() => onNavigate("runtime")} />
+        <MetricCard icon={Activity} color="blue" label="Runtime observations" value={activityAssessed ? activitySummary.total : "N/A"} detail={activityAssessed ? `${activitySummary.last_24h} observed in the last 24 hours` : "No non-fixture activity coverage"} onClick={() => onNavigate("runtime")} />
       </section>
 
       <section className="dashboard-grid">
@@ -1129,8 +1138,8 @@ function Findings({
   </div>;
 }
 
-function FindingMetric({ severity, count }: { severity: FindingSeverity; count: number }) {
-  return <div className={`finding-metric severity-${severity}`}><span className="severity-mark"><CircleAlert /></span><div><span>{titleCase(severity)}</span><strong>{count}</strong><small>open {count === 1 ? "finding" : "findings"}</small></div></div>;
+function FindingMetric({ severity, count }: { severity: FindingSeverity; count: number | string }) {
+  return <div className={`finding-metric severity-${severity}`}><span className="severity-mark"><CircleAlert /></span><div><span>{titleCase(severity)}</span><strong>{count}</strong><small>{typeof count === "number" ? `open ${count === 1 ? "finding" : "findings"}` : "not evaluated"}</small></div></div>;
 }
 
 function FindingTableRow({ finding, onClick }: { finding: Finding; onClick: () => void }) {
@@ -1204,11 +1213,13 @@ function FindingHistory({ detail }: { detail: FindingDetail }) {
 function Vulnerabilities({
   summary,
   vulnerabilities,
+  coverage,
   navigation,
   onOpenVulnerability,
 }: {
   summary: VulnerabilitySummary;
   vulnerabilities: Vulnerability[];
+  coverage: Coverage[];
   navigation: FilterNavigation;
   onOpenVulnerability: (id: string) => void;
 }) {
@@ -1227,14 +1238,19 @@ function Vulnerabilities({
   const fixable = summary.open_by_fix_state.fixed ?? 0;
   const exploited = (summary.open_by_exploit_state.known_exploited ?? 0) +
     (summary.open_by_exploit_state.public_exploit ?? 0);
+  const assessed = coverage.some(
+    (item) => item.plane === "vulnerabilities" && !item.connector_id.includes("demo"),
+  );
+  const metricValue = (value: number) => assessed ? value : "N/A";
+  const metricDetail = assessed ? "affected occurrences" : "not assessed";
 
   return <div className="page-stack vulnerabilities-page">
-    <section className="page-intro"><div><span className="eyebrow">SBOM-FIRST EXPOSURE</span><h2>Vulnerabilities in the AI stack</h2><p>Scanner-neutral vulnerabilities mapped to exact component occurrences and the AI workloads that contain them.</p></div><div className="result-count"><strong>{summary.open_vulnerability_ids}</strong><span>distinct open vulnerabilities</span><small>{summary.by_state.open ?? 0} affected component occurrences</small></div></section>
+    <section className="page-intro"><div><span className="eyebrow">SBOM-FIRST EXPOSURE</span><h2>Vulnerabilities in the AI stack</h2><p>Scanner-neutral vulnerabilities mapped to exact component occurrences and the AI workloads that contain them.</p></div><div className="result-count"><strong>{assessed ? summary.open_vulnerability_ids : "N/A"}</strong><span>{assessed ? "distinct open vulnerabilities" : "vulnerability coverage"}</span><small>{assessed ? `${summary.by_state.open ?? 0} affected component occurrences` : "No non-fixture scan imported"}</small></div></section>
     <section className="vulnerability-metric-grid">
-      <VulnerabilityMetric icon={CircleAlert} tone="critical" label="Critical" value={summary.open_by_severity.critical ?? 0} detail="affected occurrences" />
-      <VulnerabilityMetric icon={CircleAlert} tone="high" label="High" value={summary.open_by_severity.high ?? 0} detail="affected occurrences" />
-      <VulnerabilityMetric icon={ShieldCheck} tone="fixable" label="Fix available" value={fixable} detail="affected occurrences" />
-      <VulnerabilityMetric icon={Bug} tone="exploit" label="Exploit evidence" value={exploited} detail="affected occurrences" />
+      <VulnerabilityMetric icon={CircleAlert} tone="critical" label="Critical" value={metricValue(summary.open_by_severity.critical ?? 0)} detail={metricDetail} />
+      <VulnerabilityMetric icon={CircleAlert} tone="high" label="High" value={metricValue(summary.open_by_severity.high ?? 0)} detail={metricDetail} />
+      <VulnerabilityMetric icon={ShieldCheck} tone="fixable" label="Fix available" value={metricValue(fixable)} detail={metricDetail} />
+      <VulnerabilityMetric icon={Bug} tone="exploit" label="Exploit evidence" value={metricValue(exploited)} detail={metricDetail} />
     </section>
     <section className="panel vulnerabilities-panel">
       <div className="filterbar">
@@ -1254,7 +1270,7 @@ function Vulnerabilities({
   </div>;
 }
 
-function VulnerabilityMetric({ icon: Icon, tone, label, value, detail }: { icon: LucideIcon; tone: string; label: string; value: number; detail: string }) {
+function VulnerabilityMetric({ icon: Icon, tone, label, value, detail }: { icon: LucideIcon; tone: string; label: string; value: number | string; detail: string }) {
   return <div className={`vulnerability-metric ${tone}`}><span><Icon /></span><div><small>{label}</small><strong>{value}</strong><em>{detail}</em></div></div>;
 }
 
@@ -1358,13 +1374,14 @@ function Issues({
   const evaluation = aggregateIssueEvaluations(evaluations);
   const confirmed = evaluations.reduce((total, item) => total + item.confirmed_issues, 0);
   const incomplete = evaluations.reduce((total, item) => total + item.incomplete_candidates, 0);
+  const evaluated = evaluation !== null;
 
   return <div className="page-stack issues-page">
-    <section className="page-intro"><div><span className="eyebrow">CONFIRMED CONSEQUENCES</span><h2>Prioritize what can actually happen.</h2><p>Denali combines independently observed inventory, findings, relationships, detections, and activity only when exact identifiers and explicit evidence support the conclusion.</p></div><div className="result-count"><strong>{summary.by_state.open ?? 0}</strong><span>open issues</span></div></section>
+    <section className="page-intro"><div><span className="eyebrow">CONFIRMED CONSEQUENCES</span><h2>Prioritize what can actually happen.</h2><p>Denali combines independently observed inventory, findings, relationships, detections, and activity only when exact identifiers and explicit evidence support the conclusion.</p></div><div className="result-count"><strong>{evaluated ? summary.by_state.open ?? 0 : "N/A"}</strong><span>{evaluated ? "open issues" : "issue evaluation"}</span></div></section>
     <section className="issue-metric-grid">
-      <FindingMetric severity="critical" count={summary.open_by_severity.critical ?? 0} />
-      <FindingMetric severity="high" count={summary.open_by_severity.high ?? 0} />
-      <div className="issue-signal-card"><span className="issue-signal-icon confirmed"><Gauge /></span><div><span>Confirmed issues</span><strong>{confirmed}</strong><small>Paths and temporal correlations</small></div></div>
+      <FindingMetric severity="critical" count={evaluated ? summary.open_by_severity.critical ?? 0 : "N/A"} />
+      <FindingMetric severity="high" count={evaluated ? summary.open_by_severity.high ?? 0 : "N/A"} />
+      <div className="issue-signal-card"><span className="issue-signal-icon confirmed"><Gauge /></span><div><span>Confirmed issues</span><strong>{evaluated ? confirmed : "N/A"}</strong><small>{evaluated ? "Paths and temporal correlations" : "Not evaluated"}</small></div></div>
       <div className="issue-signal-card"><span className={`issue-signal-icon ${incomplete ? "attention" : "complete"}`}>{incomplete ? <CircleHelp /> : <ShieldCheck />}</span><div><span>Correlation coverage</span><strong>{evaluation ? titleCase(evaluation.state) : "Not run"}</strong><small>{incomplete ? `${incomplete} incomplete candidates` : "No hidden path gaps"}</small></div></div>
     </section>
     <section className={`issue-coverage-banner ${evaluation?.state ?? "unknown"}`}>
@@ -1483,12 +1500,14 @@ function IssueEvidence({ detail }: { detail: IssueDetail }) {
 function CodeToCloud({
   deployments,
   observations,
+  coverage,
   onOpenAsset,
   onOpenFinding,
   onOpenVulnerability,
 }: {
   deployments: CodeToCloudDeployment[];
   observations: CodeToCloudObservation[];
+  coverage: Coverage[];
   onOpenAsset: (id: string) => void;
   onOpenFinding: (id: string) => void;
   onOpenVulnerability: (id: string) => void;
@@ -1506,6 +1525,14 @@ function CodeToCloud({
     }),
     { declarations: 0, proven: 0, ambiguous: 0, unmatched: 0 },
   );
+  const latestCloudCollection = coverage
+    .filter((item) => ["denali.aws_deployments", "denali.azure_deployments", "denali.gcp_deployments"].includes(item.connector_id))
+    .reduce<string | null>((latest, item) => !latest || item.collected_at > latest ? item.collected_at : latest, null);
+  const latestAnalysis = observations.reduce<string | null>(
+    (latest, item) => item.analysis_collected_at && (!latest || item.analysis_collected_at > latest) ? item.analysis_collected_at : latest,
+    null,
+  );
+  const correlationStale = Boolean(latestCloudCollection && (!latestAnalysis || latestCloudCollection > latestAnalysis));
 
   return <div className="page-stack code-to-cloud-page">
     <section className="page-intro">
@@ -1520,15 +1547,15 @@ function CodeToCloud({
       <div className="lineage-metric"><span className="lineage-metric-icon identity"><Fingerprint /></span><div><small>Execution identities</small><strong>{deployments.filter((item) => item.identity).length}</strong><em>Independently observed roles</em></div></div>
     </section>
 
-    <section className="lineage-trust-banner">
-      <ShieldCheck />
-      <div><strong>{deployments.length} deterministic deployment links</strong><p>Each link requires literal source identifiers to match independently observed, provider-scoped runtime identifiers. Shared model names can corroborate a link, but never create one.</p></div>
-      <span>100% correlation confidence</span>
+    <section className={`lineage-trust-banner ${correlationStale ? "attention" : ""}`}>
+      {correlationStale ? <CircleHelp /> : <ShieldCheck />}
+      <div><strong>{deployments.length} deterministic deployment links</strong><p>{correlationStale ? "Cloud inventory is newer than repository analysis. Automatic source re-correlation is pending; current unmatched counts may be stale." : "Each link requires literal source identifiers to match independently observed, provider-scoped runtime identifiers. Shared model names can corroborate a link, but never create one."}</p></div>
+      <span>{correlationStale ? "RE-CORRELATION PENDING" : deployments.length > 0 ? "EXACT IDENTIFIER MATCHES" : "NO LINKS EMITTED"}</span>
     </section>
 
     <section className="panel correlation-observability">
       <div className="correlation-observability-head"><div><span className="eyebrow">CORRELATION COVERAGE</span><h3>Every candidate has a disposition.</h3><p>Source collection and analysis health stay separate from proven deployment links.</p></div><div><strong>{correlationTotals.declarations}</strong><span>declarations evaluated</span></div></div>
-      <div className="correlation-status-grid"><div className="proven"><small>Proven</small><strong>{correlationTotals.proven}</strong><span>Exact code + control-plane join</span></div><div className="ambiguous"><small>Ambiguous</small><strong>{correlationTotals.ambiguous}</strong><span>No relationship emitted</span></div><div><small>Unmatched</small><strong>{correlationTotals.unmatched}</strong><span>No eligible observed workload</span></div><div><small>Repositories</small><strong>{observations.length}</strong><span>{observations.filter((item) => item.source_state === "failed" || item.analysis_state === "failed").length} failed collections</span></div></div>
+      <div className="correlation-status-grid"><div className="proven"><small>Proven</small><strong>{correlationTotals.proven}</strong><span>Exact code + control-plane join</span></div><div className="ambiguous"><small>Ambiguous</small><strong>{correlationTotals.ambiguous}</strong><span>No relationship emitted</span></div><div><small>Unmatched</small><strong>{correlationTotals.unmatched}</strong><span>No exact current identifier match</span></div><div><small>Repositories</small><strong>{observations.length}</strong><span>{observations.filter((item) => item.source_state === "failed" || item.analysis_state === "failed").length} failed collections</span></div></div>
       {observations.length > 0 ? <div className="correlation-observation-list">{observations.map((observation) => <details key={`${observation.connection_id}:${observation.repository_natural_key}`} open={observation.source_state === "failed" || observation.analysis_state === "partial" || observation.analysis_state === "failed"}><summary><span className={`correlation-observation-state ${observation.source_state === "failed" || observation.analysis_state === "failed" ? "failed" : observation.analysis_state === "partial" ? "partial" : "complete"}`}>{observation.source_state === "failed" || observation.analysis_state === "failed" ? <CircleAlert /> : observation.analysis_state === "partial" ? <CircleHelp /> : <CircleCheck />}</span><span><strong>{observation.repository_name ?? observation.repository_natural_key}</strong><small>{observation.evidence?.payload.commit ? `Revision ${String(observation.evidence.payload.commit).slice(0, 12)}` : "Revision unavailable"}</small></span><span className="correlation-observation-counts"><b>{observation.correlation_summary?.proven ?? 0} proven</b><small>{observation.correlation_summary?.ambiguous ?? 0} ambiguous · {observation.correlation_summary?.unmatched ?? 0} unmatched</small></span></summary><div className="correlation-candidates">{observation.source_detail && <p><CircleAlert /> Source: {titleCase(observation.source_detail)}</p>}{observation.analysis_detail && <p><CircleHelp /> Analysis: {observation.analysis_detail}</p>}{observation.correlation_candidates.map((candidate, index) => <div key={`${candidate.source_path}:${candidate.source_line}:${index}`} className={candidate.status}><span>{candidate.status === "proven" ? <CircleCheck /> : candidate.status === "ambiguous" ? <CircleHelp /> : <CircleAlert />}</span><div><strong>{candidate.deployment_identifier}</strong><small>{titleCase(candidate.service)} · {candidate.source_path}:{candidate.source_line}</small><code>{candidate.matched_workloads.length > 0 ? candidate.matched_workloads.join(" · ") : "No exact observed workload match"}</code></div><b>{titleCase(candidate.status)}</b></div>)}</div></details>)}</div> : <div className="correlation-observability-empty"><CircleHelp /><span><strong>No repository analysis recorded</strong><small>Use Collect source & correlate on a configured GitHub connection.</small></span></div>}
     </section>
 
@@ -1886,6 +1913,7 @@ function entraConnectionLabel(connectionId: string): string {
 function RuntimeActivityPage({
   summary,
   activities,
+  coverage,
   includeFixtures,
   navigation,
   onToggleFixtures,
@@ -1893,6 +1921,7 @@ function RuntimeActivityPage({
 }: {
   summary: RuntimeActivitySummary;
   activities: RuntimeActivity[];
+  coverage: Coverage[];
   includeFixtures: boolean;
   navigation: FilterNavigation;
   onToggleFixtures: () => void;
@@ -1907,14 +1936,26 @@ function RuntimeActivityPage({
       (category === "all" || item.category === category) &&
       (outcome === "all" || item.outcome === outcome);
   }), [activities, category, outcome, search]);
+  const activityPlanes = new Set([
+    "runtime_activity",
+    "bedrock_management_activity",
+    "vertex_cloud_audit_activity",
+    "azure_ai_management_activity",
+    "entra_ai_signins",
+    "entra_ai_directory_audits",
+  ]);
+  const assessed = coverage.some(
+    (item) => activityPlanes.has(item.plane) && !item.connector_id.includes("demo"),
+  );
+  const metricValue = (value: number) => assessed ? value : "N/A";
 
   return <div className="page-stack runtime-page">
-    <section className="page-intro"><div><span className="eyebrow">OBSERVED BEHAVIOR</span><h2>See how AI is actually used.</h2><p>Provider-neutral model, agent, tool, and AI application activity—kept separate from detections and issues.</p></div><div className="result-count"><strong>{summary.last_24h}</strong><span>observed in the last 24 hours</span><small>{summary.total} retained activity records</small></div></section>
+    <section className="page-intro"><div><span className="eyebrow">OBSERVED BEHAVIOR</span><h2>See how AI is actually used.</h2><p>Provider-neutral model, agent, tool, and AI application activity—kept separate from detections and issues.</p></div><div className="result-count"><strong>{assessed ? summary.last_24h : "N/A"}</strong><span>{assessed ? "observed in the last 24 hours" : "runtime activity coverage"}</span><small>{assessed ? `${summary.total} retained activity records` : "No non-fixture activity collection"}</small></div></section>
     <section className="runtime-metric-grid">
-      <RuntimeMetric icon={Activity} tone="total" label="Total activity" value={summary.total} detail="immutable observations" />
-      <RuntimeMetric icon={Clock3} tone="recent" label="Last 24 hours" value={summary.last_24h} detail="recent observations" />
-      <RuntimeMetric icon={Waypoints} tone="providers" label="Providers" value={summary.providers} detail="active telemetry sources" />
-      <RuntimeMetric icon={CircleAlert} tone="failures" label="Failed activity" value={summary.failures} detail="outcomes, not findings" />
+      <RuntimeMetric icon={Activity} tone="total" label="Total activity" value={metricValue(summary.total)} detail={assessed ? "immutable observations" : "not collected"} />
+      <RuntimeMetric icon={Clock3} tone="recent" label="Last 24 hours" value={metricValue(summary.last_24h)} detail={assessed ? "recent observations" : "not collected"} />
+      <RuntimeMetric icon={Waypoints} tone="providers" label="Providers" value={metricValue(summary.providers)} detail={assessed ? "active telemetry sources" : "not collected"} />
+      <RuntimeMetric icon={CircleAlert} tone="failures" label="Failed activity" value={metricValue(summary.failures)} detail={assessed ? "outcomes, not findings" : "not collected"} />
     </section>
     {summary.fixture_total > 0 && <section className="runtime-fixture-callout">
       <div><CircleHelp size={20} /><span><strong>{summary.fixture_total} transparent demo {summary.fixture_total === 1 ? "record" : "records"} {includeFixtures ? "included" : "excluded"}</strong><small>Fixture observations are clearly marked and never counted as live unless you choose to include them.</small></span></div>
@@ -2021,13 +2062,14 @@ function RuntimeDetectionsPage({
     [coverage, detections, evaluations],
   );
   const complete = applicableEvaluations.filter((item) => item.state === "complete").length;
+  const evaluated = applicableEvaluations.length > 0;
 
   return <div className="page-stack detections-page">
-    <section className="page-intro"><div><span className="eyebrow">EVALUATED BEHAVIOR</span><h2>Investigate behavior that crossed an explicit threshold.</h2><p>Evidence-led detections derived from immutable runtime observations. A detection is a reviewable conclusion, not a confirmed incident.</p></div><div className="result-count"><strong>{summary.by_state.open ?? 0}</strong><span>open runtime detections</span><small>{applicableEvaluations.length} applicable rules evaluated</small></div></section>
+    <section className="page-intro"><div><span className="eyebrow">EVALUATED BEHAVIOR</span><h2>Investigate behavior that crossed an explicit threshold.</h2><p>Evidence-led detections derived from immutable runtime observations. A detection is a reviewable conclusion, not a confirmed incident.</p></div><div className="result-count"><strong>{evaluated ? summary.by_state.open ?? 0 : "N/A"}</strong><span>{evaluated ? "open runtime detections" : "detection applicability"}</span><small>{applicableEvaluations.length} applicable rules evaluated</small></div></section>
     <section className="runtime-metric-grid">
-      <RuntimeMetric icon={Gauge} tone="total" label="Open detections" value={summary.by_state.open ?? 0} detail="evaluated conclusions" />
-      <RuntimeMetric icon={CircleAlert} tone="failures" label="High severity" value={summary.open_by_severity.high ?? 0} detail="open detections" />
-      <RuntimeMetric icon={Activity} tone="recent" label="Medium severity" value={summary.open_by_severity.medium ?? 0} detail="open detections" />
+      <RuntimeMetric icon={Gauge} tone="total" label="Open detections" value={evaluated ? summary.by_state.open ?? 0 : "N/A"} detail={evaluated ? "evaluated conclusions" : "no applicable evaluation"} />
+      <RuntimeMetric icon={CircleAlert} tone="failures" label="High severity" value={evaluated ? summary.open_by_severity.high ?? 0 : "N/A"} detail={evaluated ? "open detections" : "not evaluated"} />
+      <RuntimeMetric icon={Activity} tone="recent" label="Medium severity" value={evaluated ? summary.open_by_severity.medium ?? 0 : "N/A"} detail={evaluated ? "open detections" : "not evaluated"} />
       <RuntimeMetric icon={ShieldCheck} tone="providers" label="Applicable rule coverage" value={applicableEvaluations.length === 0 ? "N/A" : complete} detail={applicableEvaluations.length === 0 ? "No rules apply to collected sources" : `of ${applicableEvaluations.length} rule evaluations complete`} />
     </section>
     <section className="detection-coverage-grid" aria-label="Detection rule coverage">
@@ -2436,9 +2478,9 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectGcpDeployments(connection.id);
-      setActionNotice(accepted.status === "already_running" ? "Google Cloud deployment collection is already running." : "Google Cloud deployment collection accepted. It continues safely in the background.");
+      setActionNotice(accepted.status === "already_running" ? "Google Cloud evidence collection is already running." : "Google Cloud evidence collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "deployment");
-      setActionNotice("Google Cloud deployment collection completed.");
+      setActionNotice("Google Cloud evidence collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect GCP deployments");
     } finally {
@@ -2452,9 +2494,9 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectAzureDeployments(connection.id);
-      setActionNotice(accepted.status === "already_running" ? "Azure deployment collection is already running." : "Azure deployment collection accepted. It continues safely in the background.");
+      setActionNotice(accepted.status === "already_running" ? "Azure evidence collection is already running." : "Azure evidence collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "deployment");
-      setActionNotice("Azure deployment collection completed.");
+      setActionNotice("Azure evidence collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect Azure deployments");
     } finally {
@@ -2468,9 +2510,9 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectAwsDeployments(connection.id);
-      setActionNotice(accepted.status === "already_running" ? "AWS deployment collection is already running." : "AWS deployment collection accepted. It continues safely in the background.");
+      setActionNotice(accepted.status === "already_running" ? "AWS evidence collection is already running." : "AWS evidence collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "deployment");
-      setActionNotice("AWS deployment collection completed.");
+      setActionNotice("AWS evidence collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect AWS deployments");
     } finally {
@@ -2587,16 +2629,35 @@ function ConnectionsPage({
     <div className="connections-layout">
       <section className="panel connection-list-panel">
         <PanelHeader eyebrow="SOURCES" title={`${connections.length} connection${connections.length === 1 ? "" : "s"}`} />
-        <div className="connection-list">{connections.map((connection) => <button key={connection.id} className={selected?.id === connection.id ? "active" : ""} onClick={() => onSelect(connection.id)}><span className="connection-provider-icon"><CloudCog /></span><span><strong>{connection.display_name}</strong><small>{connection.provider === "aws" ? `${connection.configuration.account_id} · ${(connection.configuration.coverage_mode ?? "automatic") === "automatic" ? "all enabled regions" : (connection.configuration.regions ?? []).join(", ")}` : connection.provider === "azure" ? `${connection.configuration.tenant_id} · ${connection.configuration.subscriptions?.length ?? 0} selected subscriptions` : connection.provider === "entra" ? `${connection.configuration.tenant_id} · tenant-wide Graph read` : connection.provider === "gcp" ? `${connection.configuration.projects?.length ?? 0} selected projects` : `${connection.configuration.account_login ?? "not installed"} · ${connection.configuration.repositories?.length ?? 0} exact repositories`}</small></span><ConnectionHealth state={connection.health_state} /></button>)}{connections.length === 0 && <div className="empty-state"><CloudCog /><strong>No connections configured</strong><span>Create an AWS, Azure, Entra, Google Cloud, or GitHub onboarding plan to begin.</span></div>}</div>
+        <div className="connection-list">{connections.map((connection) => <button key={connection.id} className={selected?.id === connection.id ? "active" : ""} onClick={() => onSelect(connection.id)}><span className="connection-provider-icon"><CloudCog /></span><span><strong>{connection.display_name}</strong><small>{connection.provider === "aws" ? `${connection.configuration.account_id} · ${(connection.configuration.coverage_mode ?? "automatic") === "automatic" ? "all enabled regions" : (connection.configuration.regions ?? []).join(", ")}` : connection.provider === "azure" ? `${connection.configuration.tenant_id} · ${connection.configuration.subscriptions?.length ?? 0} selected subscriptions` : connection.provider === "entra" ? `${connection.configuration.tenant_id} · tenant-wide Graph read` : connection.provider === "gcp" ? `${connection.configuration.projects?.length ?? 0} selected projects` : `${connection.configuration.account_login ?? "not installed"} · ${connection.configuration.repositories?.length ?? 0} exact repositories`}</small></span><ConnectionHealth connection={connection} /></button>)}{connections.length === 0 && <div className="empty-state"><CloudCog /><strong>No connections configured</strong><span>Create an AWS, Azure, Entra, Google Cloud, or GitHub onboarding plan to begin.</span></div>}</div>
       </section>
       {selected && <div className={canWrite ? "" : "read-only-detail"}><ConnectionDetail connection={selected} busy={busy} navigation={navigation} azureLaunch={azureLaunches[selected.id]} azureCompletionCode={azureCompletionCode[selected.id] ?? ""} onAzureCompletionCode={(value) => setAzureCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareAzure={() => void prepareAzureSetup(selected)} onCompleteAzure={() => void completeAzureSetup(selected)} onCollectAzure={() => void collectAzureDeployments(selected)} onPrepareEntra={() => void prepareEntraSetup(selected)} onCollectEntra={() => void collectEntraEvidence(selected)} gcpLaunch={gcpLaunches[selected.id]} gcpCompletionCode={gcpCompletionCode[selected.id] ?? ""} onGcpCompletionCode={(value) => setGcpCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareGcp={() => void prepareGcpSetup(selected)} onCompleteGcp={() => void completeGcpSetup(selected)} onCollectGcp={() => void collectGcpDeployments(selected)} onCollectAws={() => void collectAwsDeployments(selected)} onPrepareGitHub={() => void prepareGitHubSetup(selected)} onCollectGitHub={() => void collectGitHubSource(selected)} onLaunch={() => void launchConnection(selected)} onDownload={() => void downloadCloudFormation(selected)} onValidate={() => void validateConnection(selected)} onDisable={() => void disableConnection(selected)} onDelete={() => void deleteConnection(selected)} /></div>}
     </div>
   </div>;
 }
 
-function ConnectionHealth({ state }: { state: Connection["health_state"] }) {
-  const Icon = state === "healthy" ? CircleCheck : state === "partial" || state === "unknown" ? CircleHelp : CircleAlert;
-  return <span className={`connection-health ${state}`}><Icon />{titleCase(state)}</span>;
+function ConnectionHealth({ connection, state }: { connection?: Connection; state?: Connection["health_state"] }) {
+  if (!connection) {
+    const rawState = state ?? "unknown";
+    const Icon = rawState === "healthy" ? CircleCheck : rawState === "partial" || rawState === "unknown" ? CircleHelp : CircleAlert;
+    return <span className={`connection-health ${rawState}`}><Icon />{titleCase(rawState)}</span>;
+  }
+  if (connection.lifecycle_state === "disabled") return <span className="connection-health disabled"><CircleHelp />Disabled</span>;
+  if (connection.validation_state === "running") return <span className="connection-health unknown"><RefreshCw className="spin" />Validating</span>;
+  if (connection.health_state !== "healthy") {
+    const Icon = connection.health_state === "partial" || connection.health_state === "unknown" ? CircleHelp : CircleAlert;
+    return <span className={`connection-health ${connection.health_state}`}><Icon />{titleCase(connection.health_state)}</span>;
+  }
+  const collectionState = connection.provider === "github" ? connection.source_collection_state
+    : connection.provider === "entra" ? connection.evidence_collection_state
+      : connection.deployment_collection_state;
+  const collection = connection.provider === "github" ? connection.last_source_collection
+    : connection.provider === "entra" ? connection.last_evidence_collection
+      : connection.last_deployment_collection;
+  if (collectionState === "running") return <span className="connection-health unknown"><RefreshCw className="spin" />Collecting</span>;
+  if (!collection) return <span className="connection-health unknown"><CircleHelp />Collection needed</span>;
+  if (collection.state !== "complete") return <span className="connection-health partial"><CircleAlert />Needs attention</span>;
+  return <span className="connection-health healthy"><CircleCheck />Ready</span>;
 }
 
 function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareEntra, onCollectEntra, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
@@ -2611,7 +2672,7 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
   const validatedRole = validation?.credential_state === "passed";
   const collecting = connection.deployment_collection_state === "running" || busy === `collect-aws:${connection.id}`;
   const collection = connection.last_deployment_collection && "region_count" in connection.last_deployment_collection ? connection.last_deployment_collection : null;
-  const collectionScopeSelected = connection.declared_scopes.includes("aws.code_to_cloud");
+  const collectionScopeSelected = connection.declared_scopes.some((scope) => ["aws.bedrock_agents", "aws.agentcore", "aws.bedrock_activity", "aws.bedrock_logging", "aws.code_to_cloud"].includes(scope));
   const permissions = [...new Set(["ec2:DescribeRegions", ...connection.coverage_plan.flatMap((item) => item.permissions)])].sort();
   const regionDiscovery = validation?.results.find((result) => result.plane === "aws_region_discovery");
   const planeResults = validation?.results.filter((result) => result.plane !== "aws_region_discovery") ?? [];
@@ -2632,7 +2693,7 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>Account, scopes, role ARN, and {coverageMode === "automatic" ? "automatic enabled-region coverage" : "the selected-region boundary"} are recorded.</small></div></div>
       <div className={validatedRole ? "complete" : "current"}><span>{validatedRole ? <Check /> : "2"}</span><div><strong>2. Deploy the CloudFormation stack</strong><small>The stack is managed in {connection.configuration.deployment_region ?? "us-east-1"}; its account-wide IAM role does not restrict inventory to that Region. AWS lets you inspect the exact template and permissions before creating it.</small><div className="connection-launch-actions"><button className="primary-action" disabled={launching || !connection.setup_capabilities.cloudformation_quick_create} onClick={onLaunch}><ExternalLink />{launching ? "Waiting for AWS deployment…" : "Launch in AWS"}</button><button className="secondary-action" disabled={busy === `download:${connection.id}`} onClick={onDownload}><Download />{busy === `download:${connection.id}` ? "Downloading…" : "Download template"}</button></div>{!connection.setup_capabilities.cloudformation_quick_create && <small className="launch-unavailable">One-click launch requires the Denali onboarding bucket and runtime principal configuration. Manual template download remains available.</small>}{connection.configuration.onboarding?.template_sha256 && connection.configuration.onboarding.published_at && <small className="launch-record">Last launch prepared {formatTime(connection.configuration.onboarding.published_at)} · template {connection.configuration.onboarding.template_sha256.slice(0, 12)}</small>}</div></div>
       <div className={validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Discover Regions and validate every plane</strong><small>Role assumption and account binding run first. Enabled Regions are observed next; each applicable regional plane then succeeds or fails independently.</small>{connection.lifecycle_state === "active" && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating across AWS…" : validation ? "Validate again" : "Validate connection"}</button>}{validating && <small className="validation-progress-note">This continues in the background. Large accounts can take a few minutes.</small>}</div></div>
-      <div className={collection ? (collection.failed_count === 0 && collection.partial_count === 0 ? "complete" : "attention") : "pending"}><span>{collection?.failed_count === 0 && collection?.partial_count === 0 ? <Check /> : "4"}</span><div><strong>4. Collect AWS deployments for correlation</strong><small>Denali inventories Lambda, ECS task families, EKS clusters, and SageMaker endpoints across the declared Region boundary. It retains exact deployment identifiers and runtime roles without reading code, prompts, responses, or environment values.</small>{connection.lifecycle_state === "active" && collectionScopeSelected && <button className="primary-action" disabled={collecting || validating || !validatedRole} onClick={onCollectAws}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting AWS deployments…" : collection ? "Collect deployments again" : "Collect AWS deployments"}</button>}{!collectionScopeSelected && <small className="launch-unavailable">This connection predates the AWS code-to-cloud scope. Create a new plan to grant and validate the four deployment planes.</small>}{collection && <small className="validation-progress-note">{collection.region_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
+      <div className={collection ? (collection.failed_count === 0 && collection.partial_count === 0 ? "complete" : "attention") : "pending"}><span>{collection?.failed_count === 0 && collection?.partial_count === 0 ? <Check /> : "4"}</span><div><strong>4. Collect declared AWS evidence</strong><small>Denali collects the selected Bedrock, AgentCore, activity, logging-configuration, and deployment planes across the declared Region boundary without reading code, prompts, responses, or environment values.</small>{connection.lifecycle_state === "active" && collectionScopeSelected && <button className="primary-action" disabled={collecting || validating || !validatedRole} onClick={onCollectAws}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting AWS evidence…" : collection ? "Collect evidence again" : "Collect AWS evidence"}</button>}{!collectionScopeSelected && <small className="launch-unavailable">This connection has no supported AWS evidence scope. Create a new plan and select at least one collection plane.</small>}{collection && <small className="validation-progress-note">{collection.region_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
     </div>
     <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed account {validation.account_id_observed ?? "not established"}</small></div>{regionDiscovery && <div className={`region-discovery ${regionDiscovery.state}`}><span>{regionDiscovery.state === "passed" ? <CircleCheck /> : regionDiscovery.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{coverageMode === "automatic" ? "Automatic enabled-region coverage" : "Selected-region coverage"}</strong><p>{regionDiscovery.detail}</p>{regionDiscovery.discovered_regions && regionDiscovery.discovered_regions.length > 0 && <small>{regionDiscovery.discovered_regions.join(", ")}</small>}{regionDiscovery.excluded_enabled_regions && regionDiscovery.excluded_enabled_regions.length > 0 && <small className="excluded-regions">Outside declared scope: {regionDiscovery.excluded_enabled_regions.join(", ")}</small>}</div></div>}<div className="validation-plane-rollup">{planeSummaries.map((summary) => <div className={summary.failed || summary.unknown ? "attention" : "complete"} key={summary.label}><span>{summary.failed || summary.unknown ? <CircleAlert /> : <CircleCheck />}</span><div><strong>{summary.label}</strong><small>{summary.total} Region checks</small></div><div className="rollup-counts"><b className="passed">{summary.passed} passed</b>{summary.notApplicable > 0 && <b>{summary.notApplicable} not applicable</b>}{summary.failed > 0 && <b className="failed">{summary.failed} failed</b>}{summary.unknown > 0 && <b className="failed">{summary.unknown} unknown</b>}</div></div>)}</div><details className="plane-validation-results"><summary>View all {planeResults.length} raw plane/Region results</summary><div className="validation-grid">{planeResults.map((result) => <div key={`${result.scope}:${result.plane}:${result.region}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.region} · {result.state === "not_applicable" ? "Not applicable" : titleCase(result.plane)}</small><p>{result.detail}</p></div></div>)}</div></details></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>No coverage conclusion is available until the stack is deployed and validation runs.</small></span></div>}</div>
     <details className="connection-permissions"><summary>Review {permissions.length} declared permissions</summary><div>{permissions.map((permission) => <code key={permission}>{permission}</code>)}</div><p>The downloaded role also includes bounded read-only permissions for future explicit stack scopes. Those custom stack planes are not configured or claimed here.</p></details>
@@ -2672,7 +2733,6 @@ function AzureConnectionDetail({ connection, busy, launch, completionCode, onCom
   const validating = connection.validation_state === "running" || busy === `validate:${connection.id}` || completing;
   const collecting = connection.deployment_collection_state === "running" || busy === `collect-azure:${connection.id}`;
   const collection = connection.last_deployment_collection && "subscription_count" in connection.last_deployment_collection ? connection.last_deployment_collection : null;
-  const collectionScopeSelected = connection.declared_scopes.includes("azure.code_to_cloud");
   const credential = connection.credential_reference.type === "azure_multitenant_app" ? connection.credential_reference : null;
   const permissions = [...new Set(connection.coverage_plan.flatMap((item) => item.permissions))].sort();
   return <section className="panel connection-detail">
@@ -2682,7 +2742,7 @@ function AzureConnectionDetail({ connection, busy, launch, completionCode, onCom
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>Tenant, application ID, scopes, and subscription-selection boundary are recorded. Entra directory access is not included.</small></div></div>
       <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Create Denali’s tenant identity and select subscriptions</strong><small>The reviewable Cloud Shell script creates—or confirms—Denali’s tenant-local enterprise application, then enumerates enabled subscriptions and assigns Reader only to those you select. It requests no Microsoft Graph permissions and stores no Azure user token.</small>{!launch && <button className="primary-action" disabled={preparing || !connection.setup_capabilities.azure_cloud_shell} onClick={onPrepare}><ExternalLink />{preparing ? "Preparing Azure setup…" : setupComplete ? "Prepare Azure setup again" : "Prepare Azure setup"}</button>}{launch && <div className="azure-setup-actions"><div className="connection-launch-actions"><a className="primary-action" href={launch.cloud_shell_url} target="_blank" rel="noreferrer"><ExternalLink />1. Open Cloud Shell</a><a className="secondary-action" href={launch.script_url} download><Download />Download script</a></div><small className="azure-consent-guidance">Run the command as a tenant administrator who can create enterprise applications and assign Reader on the selected subscriptions. The script is idempotent if Denali already exists in the tenant.</small><label className="azure-command"><span>2. Run in Cloud Shell</span><textarea readOnly value={launch.setup_command} /><button type="button" onClick={() => void navigator.clipboard.writeText(launch.setup_command)}>Copy command</button><small>The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small></label><label className="azure-completion"><span>3. Paste the completion code printed by the script</span><textarea value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_SETUP_COMPLETE=…" /><button className="primary-action" type="button" disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing ? "Verifying the tenant identity and Azure access…" : "Complete setup and validate"}</button><small>Denali verifies its tenant-local identity before accepting the selected subscriptions. New Reader assignments can take several minutes to propagate.</small></label></div>}{!connection.setup_capabilities.azure_cloud_shell && <small className="launch-unavailable">Cloud Shell setup requires Denali’s multi-tenant Azure application and private onboarding-script publisher.</small>}{setupComplete && <div className="azure-subscriptions"><strong>{subscriptions.length} selected subscription{subscriptions.length === 1 ? "" : "s"}</strong>{subscriptions.map((subscription) => <code key={subscription.id}>{subscription.name} · {subscription.id}</code>)}</div>}</div></div>
       <div className={validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Validate every selected subscription</strong><small>Denali binds the customer tenant and each exact subscription first, then validates every declared subscription-wide plane independently.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating Azure…" : validation ? "Validate again" : "Validate connection"}</button>}</div></div>
-      <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect deployment identities</strong><small>Read Container Apps and Function Apps through Azure Resource Graph, retaining exact subscription, resource group, location, revision, image, and managed-identity evidence without storing app-setting values.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={!collectionScopeSelected || collecting || validating} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting deployments…" : collection ? "Collect deployments again" : "Collect deployments"}</button>}{!collectionScopeSelected && <small className="launch-unavailable">This connection predates the Azure code-to-cloud scope. Create a new Azure connection plan to adopt and validate it explicitly.</small>}{collection && <small className="validation-progress-note">{collection.subscription_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
+      <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect declared Azure evidence</strong><small>Read selected AI services, AI platform, management activity, and deployment planes through Azure control-plane APIs without storing app-setting values or caller identities.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={collecting || validating} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting Azure evidence…" : collection ? "Collect evidence again" : "Collect Azure evidence"}</button>}{collection && <small className="validation-progress-note">{collection.subscription_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
     </div>
     <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed subscriptions {validation.account_id_observed ?? "not established"}</small></div><div className="validation-grid">{validation.results.map((result) => <div key={`${result.subscription_id}:${result.plane}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.subscription_name ?? result.subscription_id} · all resource locations</small><p>{result.detail}</p></div></div>)}</div></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>Run the Cloud Shell setup, select subscriptions, and paste its completion code first.</small></span></div>}</div>
     <details className="connection-permissions"><summary>Review {permissions.length || 2} declared Azure permissions</summary><div>{(permissions.length ? permissions : ["Microsoft.Resources/subscriptions/read", "Microsoft.Authorization/roleAssignments/read"]).map((permission) => <code key={permission}>{permission}</code>)}</div><p>The customer grants Azure Reader only at selected subscription scopes. This does not grant Microsoft Graph/Entra directory reads, data-plane access, secret access, prompt access, response access, or remediation.</p></details>
@@ -2707,7 +2767,7 @@ function GcpConnectionDetail({ connection, busy, launch, completionCode, onCompl
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>A unique keyless Denali service account, declared scopes, and customer-controlled project-selection boundary are recorded. No customer key or user token is requested.</small></div></div>
       <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Select projects and grant bounded read access</strong><small>Google Cloud Shell enumerates active projects visible to your signed-in identity. Cloud Asset Viewer and Logs Viewer are granted only to projects you select; every resource location inside them remains in scope.</small>{!launch && <button className="primary-action" disabled={preparing || !connection.setup_capabilities.gcp_cloud_shell} onClick={onPrepare}><ExternalLink />{preparing ? "Preparing Google Cloud setup…" : setupComplete ? "Prepare Google Cloud setup again" : "Prepare Google Cloud setup"}</button>}{launch && <div className="azure-setup-actions"><div className="connection-launch-actions"><a className="primary-action" href={launch.cloud_shell_url} target="_blank" rel="noreferrer"><ExternalLink />1. Open Cloud Shell</a><a className="secondary-action" href={launch.script_url} download><Download />Download script</a></div><small className="azure-consent-guidance">Cloud Shell uses your existing Google session only to enumerate projects and update IAM policies. Denali never receives that session or a customer service-account key.</small><label className="azure-command"><span>2. Run in Cloud Shell</span><textarea readOnly value={launch.setup_command} /><button type="button" onClick={() => void navigator.clipboard.writeText(launch.setup_command)}>Copy command</button><small>The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small></label><label className="azure-completion"><span>3. Paste the completion code printed by the script</span><textarea value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_GCP_SETUP_COMPLETE=…" /><button className="primary-action" type="button" disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing ? "Waiting for Google Cloud IAM propagation…" : "Complete setup and validate"}</button><small>New Google Cloud IAM bindings can take several minutes to propagate. Denali retries the declared checks before recording a partial result.</small></label></div>}{!connection.setup_capabilities.gcp_cloud_shell && <small className="launch-unavailable">Cloud Shell setup requires Denali’s Google Cloud service account and private onboarding-script publisher.</small>}{setupComplete && <div className="azure-subscriptions"><strong>{projects.length} selected project{projects.length === 1 ? "" : "s"}</strong>{projects.map((project) => <code key={project.id}>{project.name} · {project.id} · {project.number}</code>)}</div>}</div></div>
       <div className={validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Validate every selected project</strong><small>Denali binds each exact project ID and immutable project number first, then validates every declared project-wide plane independently.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating Google Cloud…" : validation ? "Validate again" : "Validate connection"}</button>}</div></div>
-      <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect deployment identities</strong><small>Read Cloud Run and Cloud Run functions through Cloud Asset Inventory, retain exact project/location/resource and revision evidence, and classify AI workloads without storing environment values.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={collecting || validating} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting deployments…" : collection ? "Collect deployments again" : "Collect deployments"}</button>}{collection && <small className="validation-progress-note">{collection.project_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
+      <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect declared Google Cloud evidence</strong><small>Read selected Vertex AI, Agent Builder, Dialogflow, audit activity, and deployment planes through bounded Google Cloud APIs without storing environment values, prompts, or responses.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={collecting || validating} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting Google Cloud evidence…" : collection ? "Collect evidence again" : "Collect Google Cloud evidence"}</button>}{collection && <small className="validation-progress-note">{collection.project_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
     </div>
     <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed projects {validation.account_id_observed ?? "not established"}</small></div><div className="validation-grid">{validation.results.map((result) => <div key={`${result.project_id}:${result.plane}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.project_name ?? result.project_id} · all resource locations</small><p>{result.detail}</p></div></div>)}</div></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>Select projects in Cloud Shell and paste its completion code first.</small></span></div>}</div>
     <details className="connection-permissions"><summary>Review {permissions.length || 2} declared Google Cloud permissions</summary><div>{(permissions.length ? permissions : ["cloudasset.assets.searchAllResources", "logging.logEntries.list"]).map((permission) => <code key={permission}>{permission}</code>)}</div><p>The customer grants Cloud Asset Viewer and Logs Viewer only on selected projects. This does not grant writes, service-account key access, prompt or response contents, or remediation.</p></details>

@@ -3,10 +3,49 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from denali.connections.aws import AWS_COVERAGE_AUTOMATIC, AWS_SCOPE_CODE_TO_CLOUD
+from denali.connections.aws import (
+    AWS_COVERAGE_AUTOMATIC,
+    AWS_SCOPE_AGENTCORE,
+    AWS_SCOPE_BEDROCK_ACTIVITY,
+    AWS_SCOPE_BEDROCK_AGENTS,
+    AWS_SCOPE_BEDROCK_LOGGING,
+    AWS_SCOPE_CODE_TO_CLOUD,
+)
+from denali.connectors.aws_agentcore import (
+    ENDPOINT_INVENTORY_PLANE as AGENTCORE_ENDPOINT_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    GATEWAY_INVENTORY_PLANE as AGENTCORE_GATEWAY_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    GATEWAY_RELATIONSHIP_PLANE as AGENTCORE_GATEWAY_RELATIONSHIP_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    IDENTITY_INVENTORY_PLANE as AGENTCORE_IDENTITY_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    MEMORY_INVENTORY_PLANE as AGENTCORE_MEMORY_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    MEMORY_RELATIONSHIP_PLANE as AGENTCORE_MEMORY_RELATIONSHIP_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    RUNTIME_INVENTORY_PLANE as AGENTCORE_RUNTIME_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    RUNTIME_RELATIONSHIP_PLANE as AGENTCORE_RUNTIME_RELATIONSHIP_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    TARGET_INVENTORY_PLANE as AGENTCORE_TARGET_PLANE,
+)
+from denali.connectors.aws_agentcore import (
+    AwsAgentCoreRegionConnector,
+)
+from denali.connectors.aws_bedrock import AwsBedrockRegionConnector
+from denali.connectors.aws_bedrock_activity import AwsBedrockActivityConnector
 from denali.domain import (
     AssertionType,
     AssetAssertion,
@@ -42,6 +81,8 @@ _SERVICES = {
 class InventorySink(Protocol):
     def ingest(self, tenant_id: str, batch: InventoryBatch) -> dict[str, int]: ...
 
+    def ingest_activity(self, tenant_id: str, batch: Any) -> dict[str, int]: ...
+
 
 class AwsDeploymentDiscoveryError(RuntimeError):
     """A stable control-plane failure without credential or response material."""
@@ -64,8 +105,16 @@ class AwsConnectionDeploymentCollector:
             raise ValueError("connection is not an AWS connection")
         if connection.get("lifecycle_state") != "active":
             raise ValueError("disabled AWS connections cannot collect")
-        if AWS_SCOPE_CODE_TO_CLOUD not in connection.get("declared_scopes", []):
-            raise ValueError("AWS code-to-cloud scope is not declared")
+        scopes = set(connection.get("declared_scopes", []))
+        supported_scopes = {
+            AWS_SCOPE_CODE_TO_CLOUD,
+            AWS_SCOPE_BEDROCK_AGENTS,
+            AWS_SCOPE_BEDROCK_ACTIVITY,
+            AWS_SCOPE_AGENTCORE,
+            AWS_SCOPE_BEDROCK_LOGGING,
+        }
+        if not scopes & supported_scopes:
+            raise ValueError("AWS connection has no supported collection scope")
         configuration = connection.get("configuration", {})
         account_id = configuration.get("account_id")
         credential = connection.get("credential_reference", {})
@@ -93,14 +142,67 @@ class AwsConnectionDeploymentCollector:
         results: list[dict[str, Any]] = []
         failed = partial = 0
         for region in regions:
-            batch = AwsDeploymentConnector(
-                account_id=account_id,
-                region=region,
-                partition=str(configuration.get("partition", "aws")),
-                session=session,
-            ).collect(connection_id=str(connection["id"]))
-            repository.ingest(tenant_id, batch)
-            states = {item.state for item in batch.coverage}
+            inventory_batches: list[InventoryBatch] = []
+            if AWS_SCOPE_CODE_TO_CLOUD in scopes:
+                inventory_batches.append(
+                    AwsDeploymentConnector(
+                        account_id=account_id,
+                        region=region,
+                        partition=str(configuration.get("partition", "aws")),
+                        session=session,
+                    ).collect(connection_id=str(connection["id"]))
+                )
+            if AWS_SCOPE_BEDROCK_AGENTS in scopes:
+                inventory_batches.append(
+                    AwsBedrockRegionConnector(
+                        account_id=account_id,
+                        region=region,
+                        partition=str(configuration.get("partition", "aws")),
+                        agent_client=session.client("bedrock-agent", region_name=region),
+                        bedrock_client=session.client("bedrock", region_name=region),
+                    ).collect(connection_id=str(connection["id"]))
+                )
+            if AWS_SCOPE_AGENTCORE in scopes:
+                inventory_batches.append(
+                    _agentcore_batch(
+                        session=session,
+                        account_id=account_id,
+                        region=region,
+                        partition=str(configuration.get("partition", "aws")),
+                        connection_id=str(connection["id"]),
+                    )
+                )
+            if AWS_SCOPE_BEDROCK_LOGGING in scopes:
+                inventory_batches.append(
+                    _bedrock_logging_batch(
+                        account_id=account_id,
+                        region=region,
+                        connection_id=str(connection["id"]),
+                        client=session.client("bedrock", region_name=region),
+                    )
+                )
+            for batch in inventory_batches:
+                repository.ingest(tenant_id, batch)
+            activity_count = 0
+            activity_coverage: tuple[Coverage, ...] = ()
+            if AWS_SCOPE_BEDROCK_ACTIVITY in scopes:
+                end_time = datetime.now(UTC)
+                activity_batch = AwsBedrockActivityConnector(
+                    account_id=account_id,
+                    region=region,
+                    cloudtrail_client=session.client("cloudtrail", region_name=region),
+                ).collect(
+                    start_time=end_time - timedelta(hours=24),
+                    end_time=end_time,
+                    connection_id=str(connection["id"]),
+                )
+                repository.ingest_activity(tenant_id, activity_batch)
+                activity_count = len(activity_batch.activities)
+                activity_coverage = activity_batch.coverage
+            all_coverage = [item for batch in inventory_batches for item in batch.coverage] + list(
+                activity_coverage
+            )
+            states = {item.state for item in all_coverage}
             if CoverageState.FAILED in states:
                 state = "failed"
                 failed += 1
@@ -113,10 +215,13 @@ class AwsConnectionDeploymentCollector:
                 {
                     "region": region,
                     "state": state,
-                    "assets": len(batch.assets),
+                    "assets": sum(len(batch.assets) for batch in inventory_batches),
                     "ai_workloads": sum(
-                        assertion.asset.kind is AssetKind.AI_WORKLOAD for assertion in batch.assets
+                        assertion.asset.kind is AssetKind.AI_WORKLOAD
+                        for batch in inventory_batches
+                        for assertion in batch.assets
                     ),
+                    "activity_events": activity_count,
                 }
             )
         completed_at = datetime.now(UTC).isoformat()
@@ -249,6 +354,7 @@ class AwsDeploymentConnector:
                 continue
             environment = config.get("Environment", {}).get("Variables", {})
             model_keys = _model_keys(environment)
+            logical_id = _tag_value(tags, "aws:cloudformation:logical-id")
             output.append(
                 self._parsed(
                     service="lambda",
@@ -263,6 +369,9 @@ class AwsDeploymentConnector:
                         f"function:{name}",
                     ),
                     identifier=("function_name", name),
+                    correlation_identifiers={
+                        "cloudformation_logical_id": [logical_id] if logical_id else [],
+                    },
                     ai_classification=_tagged(tags) or bool(model_keys),
                     model_keys=model_keys,
                     role_arns=[_text(config.get("Role"))],
@@ -317,15 +426,13 @@ class AwsDeploymentConnector:
                     )
                 )
             tags = response.get("tags", [])
-            arn = (
-                _text(task.get("taskDefinitionArn"))
-                or _arn(
-                    self.partition,
-                    "ecs",
-                    self.region,
-                    self.account_id,
-                    f"task-definition/{family}",
-                )
+            logical_id = _tag_value(tags, "aws:cloudformation:logical-id")
+            arn = _text(task.get("taskDefinitionArn")) or _arn(
+                self.partition,
+                "ecs",
+                self.region,
+                self.account_id,
+                f"task-definition/{family}",
             )
             output.append(
                 self._parsed(
@@ -334,6 +441,10 @@ class AwsDeploymentConnector:
                     name=family,
                     arn=arn,
                     identifier=("task_family", family),
+                    correlation_identifiers={
+                        "cloudformation_logical_id": [logical_id] if logical_id else [],
+                        "container_name": sorted(set(containers)),
+                    },
                     ai_classification=_tagged(tags) or bool(model_keys),
                     model_keys=sorted(model_keys),
                     role_arns=[_text(task.get("taskRoleArn"))],
@@ -495,6 +606,11 @@ def _assertions(
                 "account_id": [parsed["account_id"]],
                 "region": [parsed["region"]],
                 identifier_name: [identifier_value],
+                **{
+                    name: values
+                    for name, values in parsed.get("correlation_identifiers", {}).items()
+                    if values
+                },
             },
             "source_revision_status": "unattested",
         },
@@ -591,6 +707,81 @@ def _connection_regions(session: Any, configuration: dict[str, Any]) -> list[str
     return regions
 
 
+_AGENTCORE_PLANES = (
+    AGENTCORE_RUNTIME_PLANE,
+    AGENTCORE_ENDPOINT_PLANE,
+    AGENTCORE_RUNTIME_RELATIONSHIP_PLANE,
+    AGENTCORE_GATEWAY_PLANE,
+    AGENTCORE_TARGET_PLANE,
+    AGENTCORE_GATEWAY_RELATIONSHIP_PLANE,
+    AGENTCORE_IDENTITY_PLANE,
+    AGENTCORE_MEMORY_PLANE,
+    AGENTCORE_MEMORY_RELATIONSHIP_PLANE,
+)
+
+
+def _agentcore_batch(
+    *, session: Any, account_id: str, region: str, partition: str, connection_id: str
+) -> InventoryBatch:
+    available_regions = session.get_available_regions(
+        "bedrock-agentcore-control", partition_name=partition
+    )
+    if available_regions and region not in available_regions:
+        observed_at = datetime.now(UTC)
+        scope = f"account={account_id},region={region}"
+        return InventoryBatch(
+            connector_id="denali.aws_agentcore",
+            connection_id=connection_id,
+            run_id=f"aws-agentcore-{region}-{observed_at.isoformat()}",
+            scope_key=scope,
+            collected_at=observed_at,
+            coverage=tuple(
+                Coverage(
+                    plane,
+                    CoverageState.NOT_SUPPORTED,
+                    scope,
+                    "The AWS SDK does not expose AgentCore in this enabled Region.",
+                )
+                for plane in _AGENTCORE_PLANES
+            ),
+        )
+    return AwsAgentCoreRegionConnector(
+        account_id=account_id,
+        region=region,
+        partition=partition,
+        client=session.client("bedrock-agentcore-control", region_name=region),
+    ).collect(connection_id=connection_id)
+
+
+def _bedrock_logging_batch(
+    *, account_id: str, region: str, connection_id: str, client: Any
+) -> InventoryBatch:
+    observed_at = datetime.now(UTC)
+    scope = f"aws:{account_id}:{region}:bedrock:invocation-logging"
+    try:
+        response = client.get_model_invocation_logging_configuration()
+        if not isinstance(response, dict):
+            raise ValueError("invalid response shape")
+        configured = isinstance(response.get("loggingConfig"), dict)
+        state = CoverageState.COMPLETE
+        detail = (
+            "Bedrock model invocation logging configuration is present."
+            if configured
+            else "Bedrock model invocation logging configuration is absent."
+        )
+    except Exception as error:
+        state = CoverageState.FAILED
+        detail = _failure("bedrock:GetModelInvocationLoggingConfiguration", error)
+    return InventoryBatch(
+        connector_id="denali.aws_bedrock_logging",
+        connection_id=connection_id,
+        run_id=f"aws-bedrock-logging-{region}-{observed_at.isoformat()}",
+        scope_key=scope,
+        collected_at=observed_at,
+        coverage=(Coverage("aws_bedrock_invocation_logging", state, scope, detail),),
+    )
+
+
 def _model_keys(values: Any) -> list[str]:
     if not isinstance(values, dict):
         return []
@@ -614,6 +805,20 @@ def _tagged(tags: Any) -> bool:
         str(key).lower() == "denali_ai_workload" and str(value).lower() == "true"
         for key, value in pairs
     )
+
+
+def _tag_value(tags: Any, name: str) -> str | None:
+    if isinstance(tags, dict):
+        value = tags.get(name)
+        return _text(value)
+    if isinstance(tags, list):
+        for item in tags:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key") or item.get("Key")
+            if key == name:
+                return _text(item.get("value") or item.get("Value"))
+    return None
 
 
 def _text(value: Any) -> str | None:

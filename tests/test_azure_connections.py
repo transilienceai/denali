@@ -336,11 +336,10 @@ def test_azure_setup_enumerates_then_binds_only_selected_subscriptions() -> None
         repository.targets[connection_id]["declared_scopes"] = [
             scope for scope in AZURE_SCOPES if scope != AZURE_SCOPE_CODE_TO_CLOUD
         ]
-        missing_scope = client.post(
+        ai_scope_collection = client.post(
             f"/v1/connections/{connection_id}/azure/collect-deployments"
         )
-        assert missing_scope.status_code == 409
-        assert missing_scope.json()["detail"] == "Azure code-to-cloud scope is not declared"
+        assert ai_scope_collection.status_code == 202
 
 
 def test_azure_completion_requires_verified_tenant_identity() -> None:
