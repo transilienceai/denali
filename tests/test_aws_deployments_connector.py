@@ -158,10 +158,10 @@ def test_collects_four_explicit_aws_deployment_contracts_without_secret_values()
     assert len(ordinary) == 1
 
 
-def test_agentcore_marks_sdk_unsupported_regions_without_false_failures() -> None:
+def test_agentcore_marks_undocumented_regions_without_false_failures() -> None:
     class UnsupportedSession:
-        def get_available_regions(self, *_args: Any, **_kwargs: Any) -> list[str]:
-            return ["us-east-1"]
+        def client(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("unsupported AgentCore Regions must not create a client")
 
     batch = _agentcore_batch(
         session=UnsupportedSession(),

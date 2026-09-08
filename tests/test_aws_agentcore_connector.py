@@ -287,6 +287,20 @@ def test_discovers_agentcore_assets_relationships_and_minimizes_sensitive_data()
         assert forbidden not in serialized
 
 
+def test_skips_memory_planes_when_feature_is_not_available() -> None:
+    client = complete_client()
+
+    batch = connector(client).collect(include_memories=False)
+
+    states = coverage_by_plane(batch)
+    assert states[MEMORY_INVENTORY_PLANE] is CoverageState.NOT_SUPPORTED
+    assert states[MEMORY_RELATIONSHIP_PLANE] is CoverageState.NOT_SUPPORTED
+    assert not any(
+        operation in {"list_memories", "get_memory"}
+        for operation, _parameters in client.calls
+    )
+
+
 def test_endpoint_and_target_failures_are_isolated_from_parent_inventory() -> None:
     client = complete_client()
     client.operations["list_agent_runtime_endpoints"] = deque(

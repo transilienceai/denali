@@ -74,7 +74,12 @@ class AwsAgentCoreRegionConnector:
         self.partition = partition
         self.client = client
 
-    def collect(self, *, connection_id: str | None = None) -> InventoryBatch:
+    def collect(
+        self,
+        *,
+        connection_id: str | None = None,
+        include_memories: bool = True,
+    ) -> InventoryBatch:
         observed_at = datetime.now(UTC)
         connection = connection_id or f"aws:{self.account_id}"
         scope = f"account={self.account_id},region={self.region}"
@@ -102,14 +107,25 @@ class AwsAgentCoreRegionConnector:
         )
         self._collect_runtimes(observed_at, assets, relationships, warnings, succeeded)
         self._collect_gateways(observed_at, assets, relationships, warnings, succeeded)
-        self._collect_memories(observed_at, assets, relationships, warnings, succeeded)
+        if include_memories:
+            self._collect_memories(observed_at, assets, relationships, warnings, succeeded)
 
         coverage = tuple(
             Coverage(
                 plane=plane,
-                state=_coverage_state(succeeded[plane], warnings[plane]),
+                state=(
+                    CoverageState.NOT_SUPPORTED
+                    if not include_memories
+                    and plane in {MEMORY_INVENTORY_PLANE, MEMORY_RELATIONSHIP_PLANE}
+                    else _coverage_state(succeeded[plane], warnings[plane])
+                ),
                 scope=scope,
-                detail=_coverage_detail(warnings[plane]),
+                detail=(
+                    "AWS does not document AgentCore Memory as available in this Region."
+                    if not include_memories
+                    and plane in {MEMORY_INVENTORY_PLANE, MEMORY_RELATIONSHIP_PLANE}
+                    else _coverage_detail(warnings[plane])
+                ),
             )
             for plane in warnings
         )
