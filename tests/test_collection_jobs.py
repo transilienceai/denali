@@ -125,7 +125,10 @@ def test_collection_job_retries_transient_timeout_and_worker_failure(failure: Ex
 
     assert collector.calls == 2
     assert repository.job["state"] == "succeeded"
-    assert repository.failures == ["Collection worker could not complete the declared read planes."]
+    assert repository.failures == [
+        "Collection worker could not complete the declared read planes "
+        f"({type(failure).__name__})."
+    ]
 
 
 def test_collection_job_stops_after_bounded_failures_without_leaking_error() -> None:
@@ -148,6 +151,9 @@ def test_collection_job_stops_after_bounded_failures_without_leaking_error() -> 
     assert collector.calls == 3
     assert repository.job["state"] == "failed"
     assert all("secret-provider" not in summary for summary in repository.failures)
+    assert repository.failures == [
+        "Collection worker could not complete the declared read planes (RuntimeError)."
+    ] * 3
 
 
 def test_successful_collection_runs_post_processing_before_completion() -> None:
