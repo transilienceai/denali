@@ -139,6 +139,14 @@ Do not add a tenant's access keys, service-account JSON, OAuth access token, or 
 token. Each organization grants access through the provider-specific assume-role, consent,
 principal, or App-installation flow; tenant identifiers and selected scopes are stored in Neon.
 
+Hosted Syft and Grype imports use `DENALI_EVIDENCE_BUCKET` when configured and otherwise use the
+existing `DENALI_AWS_ONBOARDING_BUCKET`. The bucket is operator-owned and private; grant the Modal
+OIDC role only `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` on the
+`denali/evidence-imports/*` prefix. Require encryption and configure a short lifecycle expiry for
+defense in depth. Raw reports are transient objects and are deleted after the durable import
+reaches a terminal state; only normalized bounded evidence remains in PostgreSQL. See
+[ADR 0031](../architecture/0031-hosted-vulnerability-evidence-import.md).
+
 ## 4. Configure Vercel and the domain
 
 Create a Vercel project with `web` as its Root Directory. Set:

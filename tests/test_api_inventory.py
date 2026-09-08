@@ -361,6 +361,130 @@ def test_vulnerability_surface_and_filters() -> None:
         assert test_client.get("/v1/vulnerabilities?severity=catastrophic").status_code == 422
 
 
+class VulnerabilityImportRepositoryStub(RepositoryStub):
+    def __init__(self):
+        super().__init__()
+        self.job: dict[str, Any] | None = None
+
+    def get_asset(self, tenant_id: str, asset_id: str) -> dict[str, Any] | None:
+        if asset_id != ASSET_ID:
+            return None
+        return {
+            "id": ASSET_ID,
+            "kind": "ai_workload",
+            "natural_key": "arn:aws:lambda:us-east-1:123:function:demo",
+            "display_name": "Demo workload",
+            "lifecycle_state": "active",
+        }
+
+    def create_vulnerability_import_job(self, tenant_id: str, **values: Any) -> dict[str, Any]:
+        self.job = {"id": values["job_id"], "state": "queued", **values}
+        return self.job
+
+    def set_vulnerability_import_call_id(self, job_id: str, call_id: str) -> None:
+        assert self.job is not None
+        self.job["modal_call_id"] = call_id
+
+    def fail_vulnerability_import_job(self, job_id: str, summary: str) -> None:
+        assert self.job is not None
+        self.job.update(state="failed", error_summary=summary)
+
+    def vulnerability_import_status(
+        self, tenant_id: str, job_id: str
+    ) -> dict[str, Any] | None:
+        if self.job is None or self.job["id"] != job_id:
+            return None
+        return {
+            "id": job_id,
+            "target_asset_id": self.job["target_asset_id"],
+            "state": self.job["state"],
+            "attempt_count": 0,
+            "result": None,
+            "error_summary": None,
+        }
+
+
+class EvidenceStoreStub:
+    def __init__(self):
+        self.documents: dict[str, bytes] = {}
+        self.deleted: list[tuple[str, ...]] = []
+
+    def put_documents(
+        self, *, tenant_id: str, job_id: str, documents: dict[str, bytes]
+    ) -> dict[str, str]:
+        self.documents = dict(documents)
+        return {"syft": "private/syft.json", "grype": "private/grype.json"}
+
+    def get_document(self, object_key: str) -> Any:
+        raise AssertionError("API containers must not process staged reports")
+
+    def delete_documents(self, object_keys: tuple[str, ...]) -> None:
+        self.deleted.append(object_keys)
+
+
+def test_vulnerability_import_is_staged_and_durably_dispatched() -> None:
+    repository = VulnerabilityImportRepositoryStub()
+    store = EvidenceStoreStub()
+    dispatched: list[str] = []
+    app = create_app(
+        repository=repository,
+        evidence_report_store=store,
+        vulnerability_import_dispatcher=lambda job_id: dispatched.append(job_id) or "call-1",
+        migrate_on_start=False,
+    )
+    payload = {
+        "target_asset_id": ASSET_ID,
+        "syft_report": {
+            "artifacts": [],
+            "descriptor": {"name": "syft"},
+            "source": {"type": "image", "name": "registry.example/demo:sha"},
+        },
+        "grype_report": {
+            "matches": [],
+            "ignoredMatches": [],
+            "descriptor": {"name": "grype"},
+            "source": {"type": "image", "target": "registry.example/demo:sha"},
+        },
+        "authoritative": True,
+    }
+
+    with TestClient(app) as test_client:
+        response = test_client.post("/v1/vulnerabilities/imports", json=payload)
+        assert response.status_code == 202
+        job_id = response.json()["id"]
+        assert dispatched == [job_id]
+        assert repository.job is not None
+        assert repository.job["target_asset_id"] == ASSET_ID
+        assert repository.job["modal_call_id"] == "call-1"
+        assert set(store.documents) == {"syft", "grype"}
+        status = test_client.get(f"/v1/vulnerabilities/imports/{job_id}")
+        assert status.status_code == 200
+        assert status.json()["state"] == "queued"
+
+
+def test_vulnerability_import_rejects_non_workload_target_before_staging() -> None:
+    repository = VulnerabilityImportRepositoryStub()
+    store = EvidenceStoreStub()
+    app = create_app(
+        repository=repository,
+        evidence_report_store=store,
+        vulnerability_import_dispatcher=lambda job_id: job_id,
+        migrate_on_start=False,
+    )
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/vulnerabilities/imports",
+            json={
+                "target_asset_id": "99999999-9999-4999-8999-999999999999",
+                "syft_report": {},
+                "grype_report": {},
+            },
+        )
+    assert response.status_code == 404
+    assert store.documents == {}
+
+
 def test_governance_update_is_validated_and_persisted() -> None:
     with client() as test_client:
         response = test_client.patch(

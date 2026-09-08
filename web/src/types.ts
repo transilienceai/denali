@@ -826,6 +826,25 @@ export type VulnerabilitySummary = {
   open_by_exploit_state: Record<string, number>;
 };
 
+export type VulnerabilityImportJob = {
+  id: string;
+  target_asset_id: string;
+  state: "queued" | "running" | "succeeded" | "failed";
+  attempt_count: number;
+  result: {
+    state: "complete";
+    component_count: number;
+    vulnerability_observations: number;
+    vulnerability_count: number;
+    syft_coverage: string;
+    grype_coverage: string;
+  } | null;
+  error_summary: string | null;
+  created_at?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
 export type ActivityCategory =
   | "model_invocation"
   | "agent_invocation"
