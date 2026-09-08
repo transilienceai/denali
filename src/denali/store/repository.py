@@ -2158,7 +2158,14 @@ class PostgresInventoryRepository:
             )
 
     def connection_validation_job_state(self, tenant_id: str, connection_id: str) -> str:
-        with psycopg.connect(self._dsn) as connection:
+        return str(self.connection_validation_status(tenant_id, connection_id)["state"])
+
+    def connection_validation_status(
+        self, tenant_id: str, connection_id: str
+    ) -> dict[str, Any]:
+        """Return active and latest terminal validation-job state without validation data."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             connection.execute(
                 """
                 UPDATE connection_validation_job
@@ -2175,16 +2182,34 @@ class PostgresInventoryRepository:
                 """,
                 (tenant_id, connection_id),
             )
-            row = connection.execute(
+            active = connection.execute(
                 """
-                SELECT state FROM connection_validation_job
+                SELECT 1 FROM connection_validation_job
                 WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
                   AND state IN ('queued', 'running')
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (tenant_id, connection_id),
             ).fetchone()
-        return "running" if row is not None else "idle"
+            latest = connection.execute(
+                """
+                SELECT state, completed_at
+                FROM connection_validation_job
+                WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                  AND state IN ('succeeded', 'failed')
+                ORDER BY completed_at DESC, created_at DESC LIMIT 1
+                """,
+                (tenant_id, connection_id),
+            ).fetchone()
+        last_result: dict[str, str] | None = None
+        if latest is not None:
+            last_result = {"state": str(latest["state"])}
+            if latest["completed_at"]:
+                last_result["completed_at"] = latest["completed_at"].isoformat()
+        return {
+            "state": "running" if active is not None else "idle",
+            "last_result": last_result,
+        }
 
     def create_connection_collection_job(
         self,
@@ -2465,6 +2490,34 @@ class PostgresInventoryRepository:
         if len(rows) > limit:
             raise RuntimeError("connection dependency boundary exceeds the configured limit")
         return [str(row[0]) for row in rows]
+
+    def list_active_connection_refs(self, *, limit: int = 100) -> list[dict[str, str]]:
+        """Return a bounded, identifier-only set for operator maintenance functions."""
+
+        if not 1 <= limit <= 500:
+            raise ValueError("connection maintenance limit must be between 1 and 500")
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """
+                SELECT tenant_id, id AS connection_id, provider, health_state
+                FROM provider_connection
+                WHERE lifecycle_state = 'active'
+                ORDER BY tenant_id, id
+                LIMIT %s
+                """,
+                (limit + 1,),
+            ).fetchall()
+        if len(rows) > limit:
+            raise RuntimeError("active connection set exceeds the maintenance limit")
+        return [
+            {
+                "tenant_id": str(row["tenant_id"]),
+                "connection_id": str(row["connection_id"]),
+                "provider": str(row["provider"]),
+                "health_state": str(row["health_state"]),
+            }
+            for row in rows
+        ]
 
     def get_connection(self, tenant_id: str, connection_id: str) -> dict[str, Any] | None:
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:

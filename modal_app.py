@@ -235,6 +235,73 @@ def api():
 @app.function(
     image=image,
     secrets=runtime_secrets,
+    timeout=300,
+    **_region_options(),
+)
+def refresh_active_connections(limit: int = 100) -> None:
+    """Durably refresh every bounded active connection after an operator-approved release."""
+
+    from denali.api.maintenance import dispatch_active_connection_refresh
+    from denali.store.repository import PostgresInventoryRepository
+
+    if not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    repository = PostgresInventoryRepository(os.environ["DENALI_DSN"])
+    summary = dispatch_active_connection_refresh(
+        repository,
+        lambda job_id: validation_worker.spawn(job_id).object_id,
+        limit=limit,
+    )
+    print(" ".join(f"{key}={value}" for key, value in summary.items()))
+    if summary["failed"]:
+        raise RuntimeError("one or more validation workers could not be dispatched")
+
+
+@app.function(
+    image=image,
+    secrets=runtime_secrets,
+    timeout=120,
+    **_region_options(),
+)
+def active_connection_status(limit: int = 100) -> None:
+    """Print identifier-only validation and collection state for release acceptance."""
+
+    from denali.store.repository import PostgresInventoryRepository
+
+    if not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    repository = PostgresInventoryRepository(os.environ["DENALI_DSN"])
+    rows = repository.list_active_connection_refs(limit=limit)
+    for row in rows:
+        tenant_id = str(row["tenant_id"])
+        connection_id = str(row["connection_id"])
+        provider = str(row["provider"])
+        validation = repository.connection_validation_status(tenant_id, connection_id)
+        collection_kind = _PRIMARY_COLLECTION_KINDS[provider]
+        collection = repository.connection_collection_status(
+            tenant_id, connection_id, collection_kind=collection_kind
+        )
+        last_result = collection["last_result"] or {}
+        print(
+            " ".join(
+                (
+                    f"tenant_id={tenant_id}",
+                    f"connection_id={connection_id}",
+                    f"provider={provider}",
+                    f"health={row['health_state']}",
+                    f"validation={validation['state']}",
+                    "last_validation="
+                    f"{(validation['last_result'] or {}).get('state', 'none')}",
+                    f"collection={collection['state']}",
+                    f"last_collection={last_result.get('state', 'none')}",
+                )
+            )
+        )
+
+
+@app.function(
+    image=image,
+    secrets=runtime_secrets,
     timeout=600,
     **_region_options(),
 )
