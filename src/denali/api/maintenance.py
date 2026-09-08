@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
+import json
+import subprocess
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -56,3 +59,71 @@ def dispatch_active_connection_refresh(
             )
             summary["failed"] += 1
     return summary
+
+
+def invoke_deployed_maintenance(
+    action: str,
+    *,
+    limit: int,
+    function_loader: Callable[..., Any] | None = None,
+) -> Any:
+    """Call the deployed production graph instead of creating an ephemeral Modal app."""
+
+    if action not in {"refresh", "status"}:
+        raise ValueError("maintenance action must be refresh or status")
+    if not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    if function_loader is None:
+        import modal
+
+        function_loader = modal.Function.from_name
+    function_name = (
+        "refresh_active_connections" if action == "refresh" else "active_connection_status"
+    )
+    function = function_loader(
+        "denali-production",
+        function_name,
+        environment_name="denali-prod",
+    )
+    return function.remote(limit)
+
+
+def _git_output(*args: str) -> str:
+    return subprocess.run(
+        ("git", *args),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _require_clean_current_main() -> None:
+    if _git_output("status", "--porcelain"):
+        raise RuntimeError("production maintenance requires a clean worktree")
+    _git_output("fetch", "--quiet", "origin", "main")
+    head = _git_output("rev-parse", "HEAD")
+    remote_main = _git_output("rev-parse", "origin/main")
+    if head != remote_main:
+        raise RuntimeError("production maintenance requires the current origin/main revision")
+
+
+def operator_main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Invoke the deployed Denali production connection maintenance functions"
+    )
+    parser.add_argument("action", choices=("refresh", "status"))
+    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--confirm-production", action="store_true")
+    args = parser.parse_args()
+    if not args.confirm_production:
+        raise SystemExit("refusing production maintenance without --confirm-production")
+    try:
+        _require_clean_current_main()
+        result = invoke_deployed_maintenance(args.action, limit=args.limit)
+    except (RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+        raise SystemExit(str(error)) from error
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    operator_main()

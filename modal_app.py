@@ -238,7 +238,7 @@ def api():
     timeout=300,
     **_region_options(),
 )
-def refresh_active_connections(limit: int = 100) -> None:
+def refresh_active_connections(limit: int = 100) -> dict[str, int]:
     """Durably refresh every bounded active connection after an operator-approved release."""
 
     from denali.api.maintenance import dispatch_active_connection_refresh
@@ -255,6 +255,7 @@ def refresh_active_connections(limit: int = 100) -> None:
     print(" ".join(f"{key}={value}" for key, value in summary.items()))
     if summary["failed"]:
         raise RuntimeError("one or more validation workers could not be dispatched")
+    return summary
 
 
 @app.function(
@@ -263,7 +264,7 @@ def refresh_active_connections(limit: int = 100) -> None:
     timeout=120,
     **_region_options(),
 )
-def active_connection_status(limit: int = 100) -> None:
+def active_connection_status(limit: int = 100) -> list[dict[str, str]]:
     """Print identifier-only validation and collection state for release acceptance."""
 
     from denali.store.repository import PostgresInventoryRepository
@@ -272,6 +273,7 @@ def active_connection_status(limit: int = 100) -> None:
         raise ValueError("limit must be between 1 and 500")
     repository = PostgresInventoryRepository(os.environ["DENALI_DSN"])
     rows = repository.list_active_connection_refs(limit=limit)
+    statuses: list[dict[str, str]] = []
     for row in rows:
         tenant_id = str(row["tenant_id"])
         connection_id = str(row["connection_id"])
@@ -282,21 +284,25 @@ def active_connection_status(limit: int = 100) -> None:
             tenant_id, connection_id, collection_kind=collection_kind
         )
         last_result = collection["last_result"] or {}
+        status = {
+            "tenant_id": tenant_id,
+            "connection_id": connection_id,
+            "provider": provider,
+            "health": str(row["health_state"]),
+            "validation": str(validation["state"]),
+            "last_validation": str(
+                (validation["last_result"] or {}).get("state", "none")
+            ),
+            "collection": str(collection["state"]),
+            "last_collection": str(last_result.get("state", "none")),
+        }
+        statuses.append(status)
         print(
             " ".join(
-                (
-                    f"tenant_id={tenant_id}",
-                    f"connection_id={connection_id}",
-                    f"provider={provider}",
-                    f"health={row['health_state']}",
-                    f"validation={validation['state']}",
-                    "last_validation="
-                    f"{(validation['last_result'] or {}).get('state', 'none')}",
-                    f"collection={collection['state']}",
-                    f"last_collection={last_result.get('state', 'none')}",
-                )
+                f"{key}={value}" for key, value in status.items()
             )
         )
+    return statuses
 
 
 @app.function(
