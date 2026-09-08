@@ -2412,6 +2412,159 @@ class PostgresInventoryRepository:
                 last_result.setdefault("completed_at", latest["completed_at"].isoformat())
         return {"state": "running" if active is not None else "idle", "last_result": last_result}
 
+    def create_vulnerability_import_job(
+        self,
+        tenant_id: str,
+        *,
+        job_id: str,
+        target_asset_id: str,
+        syft_object_key: str,
+        grype_object_key: str,
+        authoritative: bool,
+    ) -> dict[str, Any]:
+        """Queue one active scanner import for an existing tenant workload."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    """
+                    UPDATE vulnerability_import_job
+                    SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                        error_summary = CASE
+                          WHEN state = 'queued' THEN 'Import dispatch timed out.'
+                          ELSE 'Import worker lease expired.'
+                        END
+                    WHERE tenant_id = %s::uuid AND target_asset_id = %s::uuid
+                      AND (
+                        (state = 'running' AND lease_expires_at < now())
+                        OR (state = 'queued' AND created_at < now() - interval '30 minutes')
+                      )
+                    """,
+                    (tenant_id, target_asset_id),
+                )
+                row = connection.execute(
+                    """
+                    INSERT INTO vulnerability_import_job
+                      (id, tenant_id, target_asset_id, authoritative,
+                       syft_object_key, grype_object_key)
+                    SELECT %s::uuid, %s::uuid, asset.id, %s, %s, %s
+                    FROM asset
+                    WHERE asset.tenant_id = %s::uuid AND asset.id = %s::uuid
+                      AND asset.kind = 'ai_workload' AND asset.lifecycle_state = 'active'
+                    ON CONFLICT (tenant_id, target_asset_id)
+                      WHERE state IN ('queued', 'running')
+                    DO NOTHING
+                    RETURNING id, state, created_at
+                    """,
+                    (
+                        job_id,
+                        tenant_id,
+                        authoritative,
+                        syft_object_key,
+                        grype_object_key,
+                        tenant_id,
+                        target_asset_id,
+                    ),
+                ).fetchone()
+        if row is None:
+            raise ValueError("target workload is unavailable or already has an active import")
+        return dict(row)
+
+    def claim_vulnerability_import_job(
+        self, job_id: str, *, lease_seconds: int
+    ) -> dict[str, Any] | None:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                UPDATE vulnerability_import_job
+                SET state = 'running', started_at = COALESCE(started_at, now()),
+                    attempt_count = attempt_count + 1,
+                    lease_expires_at = now() + make_interval(secs => %s)
+                WHERE id = %s::uuid
+                  AND (
+                    state = 'queued'
+                    OR (state = 'running' AND lease_expires_at < now())
+                  )
+                RETURNING *
+                """,
+                (lease_seconds, job_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def set_vulnerability_import_call_id(self, job_id: str, call_id: str) -> None:
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE vulnerability_import_job SET modal_call_id = %s
+                WHERE id = %s::uuid AND state IN ('queued', 'running')
+                """,
+                (call_id, job_id),
+            )
+
+    def fail_vulnerability_import_job(self, job_id: str, summary: str) -> None:
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE vulnerability_import_job
+                SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                    error_summary = %s
+                WHERE id = %s::uuid AND state IN ('queued', 'running')
+                """,
+                (summary[:500], job_id),
+            )
+
+    def complete_vulnerability_import_job(
+        self, job_id: str, result: dict[str, Any]
+    ) -> None:
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE vulnerability_import_job
+                SET state = 'succeeded', result = %s::jsonb, completed_at = now(),
+                    lease_expires_at = NULL, error_summary = NULL,
+                    syft_object_key = '', grype_object_key = ''
+                WHERE id = %s::uuid AND state = 'running'
+                """,
+                (json.dumps(result), job_id),
+            )
+
+    def record_vulnerability_import_failure(
+        self, job_id: str, summary: str, *, max_attempts: int
+    ) -> bool:
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE vulnerability_import_job
+                SET state = CASE WHEN attempt_count < %s THEN 'queued' ELSE 'failed' END,
+                    completed_at = CASE WHEN attempt_count < %s THEN NULL ELSE now() END,
+                    lease_expires_at = NULL,
+                    error_summary = %s,
+                    syft_object_key = CASE WHEN attempt_count < %s THEN syft_object_key ELSE '' END,
+                    grype_object_key = CASE
+                      WHEN attempt_count < %s THEN grype_object_key ELSE ''
+                    END
+                WHERE id = %s::uuid AND state = 'running'
+                RETURNING state
+                """,
+                (max_attempts, max_attempts, summary[:500], max_attempts, max_attempts, job_id),
+            ).fetchone()
+        return row is not None and row[0] == "queued"
+
+    def vulnerability_import_status(self, tenant_id: str, job_id: str) -> dict[str, Any] | None:
+        """Return a tenant-scoped job status without exposing object-storage identifiers."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                SELECT id, target_asset_id, state, attempt_count, result,
+                       error_summary, created_at, started_at, completed_at
+                FROM vulnerability_import_job
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                """,
+                (tenant_id, job_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def create_connection(
         self,
         tenant_id: str,

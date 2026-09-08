@@ -39,6 +39,12 @@ from denali.api.clerk_admin import (
     ClerkOrganizationAdmin,
 )
 from denali.api.collection import run_durable_collection_job
+from denali.api.evidence_import import (
+    EvidenceReportStore,
+    S3EvidenceReportStore,
+    encode_report,
+    validate_report_pair,
+)
 from denali.api.validation import run_durable_validation_job
 from denali.connections import (
     AWS_COVERAGE_AUTOMATIC,
@@ -298,6 +304,25 @@ class InventoryReader(Protocol):
 
     def vulnerability_summary(self, tenant_id: str) -> dict[str, Any]: ...
 
+    def create_vulnerability_import_job(
+        self,
+        tenant_id: str,
+        *,
+        job_id: str,
+        target_asset_id: str,
+        syft_object_key: str,
+        grype_object_key: str,
+        authoritative: bool,
+    ) -> dict[str, Any]: ...
+
+    def set_vulnerability_import_call_id(self, job_id: str, call_id: str) -> None: ...
+
+    def fail_vulnerability_import_job(self, job_id: str, summary: str) -> None: ...
+
+    def vulnerability_import_status(
+        self, tenant_id: str, job_id: str
+    ) -> dict[str, Any] | None: ...
+
     def list_issues(
         self,
         tenant_id: str,
@@ -375,6 +400,15 @@ class GovernanceUpdate(BaseModel):
     status: str = Field(pattern="^(approved|unreviewed|unwanted)$")
     owner: str | None = Field(default=None, max_length=256)
     notes: str | None = Field(default=None, max_length=4000)
+
+
+class VulnerabilityImportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_asset_id: UUID
+    syft_report: dict[str, Any]
+    grype_report: dict[str, Any]
+    authoritative: bool = True
 
 
 class AwsConnectionCreate(BaseModel):
@@ -512,6 +546,8 @@ def create_app(
     clerk_organization_admin: ClerkOrganizationAdmin | None = None,
     validation_dispatcher: Callable[[str], str | None] | None = None,
     collection_dispatcher: Callable[[str], str | None] | None = None,
+    vulnerability_import_dispatcher: Callable[[str], str | None] | None = None,
+    evidence_report_store: EvidenceReportStore | None = None,
     migrate_on_start: bool = True,
 ) -> FastAPI:
     configured_dsn = os.environ.get("DENALI_DSN")
@@ -537,6 +573,7 @@ def create_app(
     )
     configured_gcp_launcher = gcp_setup_launcher or _gcp_setup_launcher_from_environment()
     configured_github_app = github_app_client or _github_app_from_environment()
+    configured_evidence_store = evidence_report_store or _evidence_store_from_environment()
     onboarding_validation_timeout = (
         onboarding_validation_timeout_seconds
         if onboarding_validation_timeout_seconds is not None
@@ -571,6 +608,8 @@ def create_app(
         app.state.clerk_organization_admin = configured_clerk_organization_admin
         app.state.validation_dispatcher = validation_dispatcher
         app.state.collection_dispatcher = collection_dispatcher
+        app.state.vulnerability_import_dispatcher = vulnerability_import_dispatcher
+        app.state.evidence_report_store = configured_evidence_store
         app.state.connection_validator = connection_validator or AwsConnectionValidator()
         app.state.azure_connection_validator = (
             azure_connection_validator or AzureConnectionValidator()
@@ -2426,6 +2465,89 @@ def create_app(
         repo, current_tenant = _context(request)
         return repo.vulnerability_summary(current_tenant)
 
+    @app.post("/v1/vulnerabilities/imports", status_code=202)
+    def create_vulnerability_import(
+        request: Request, imported: VulnerabilityImportCreate
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        report_store = request.app.state.evidence_report_store
+        dispatcher = request.app.state.vulnerability_import_dispatcher
+        if report_store is None or dispatcher is None:
+            raise HTTPException(
+                status_code=503,
+                detail="hosted vulnerability evidence import is not configured",
+            )
+        target_asset_id = str(imported.target_asset_id)
+        asset = repo.get_asset(current_tenant, target_asset_id)
+        if (
+            asset is None
+            or asset.get("kind") != "ai_workload"
+            or asset.get("lifecycle_state") != "active"
+        ):
+            raise HTTPException(status_code=404, detail="active AI workload not found")
+        try:
+            validate_report_pair(imported.syft_report, imported.grype_report)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        try:
+            documents = {
+                "syft": encode_report(imported.syft_report),
+                "grype": encode_report(imported.grype_report),
+            }
+        except ValueError as error:
+            raise HTTPException(status_code=413, detail=str(error)) from error
+        job_id = str(uuid4())
+        try:
+            object_keys = report_store.put_documents(
+                tenant_id=current_tenant,
+                job_id=job_id,
+                documents=documents,
+            )
+        except Exception as error:
+            logger.warning(
+                "vulnerability evidence staging failed",
+                extra={
+                    "tenant_id": current_tenant,
+                    "job_id": job_id,
+                    "target_asset_id": target_asset_id,
+                    "error_type": type(error).__name__,
+                },
+            )
+            raise HTTPException(
+                status_code=502, detail="evidence reports could not be staged"
+            ) from error
+        try:
+            job = repo.create_vulnerability_import_job(
+                current_tenant,
+                job_id=job_id,
+                target_asset_id=target_asset_id,
+                syft_object_key=object_keys["syft"],
+                grype_object_key=object_keys["grype"],
+                authoritative=imported.authoritative,
+            )
+        except ValueError as error:
+            report_store.delete_documents(tuple(object_keys.values()))
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        try:
+            call_id = dispatcher(job_id)
+            if call_id:
+                repo.set_vulnerability_import_call_id(job_id, call_id)
+        except Exception as error:
+            repo.fail_vulnerability_import_job(job_id, "Unable to dispatch evidence import worker.")
+            report_store.delete_documents(tuple(object_keys.values()))
+            raise HTTPException(
+                status_code=503, detail="evidence import worker unavailable"
+            ) from error
+        return {"id": str(job["id"]), "state": str(job["state"])}
+
+    @app.get("/v1/vulnerabilities/imports/{job_id}")
+    def vulnerability_import_status(request: Request, job_id: UUID) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        job = repo.vulnerability_import_status(current_tenant, str(job_id))
+        if job is None:
+            raise HTTPException(status_code=404, detail="vulnerability import not found")
+        return job
+
     @app.get("/v1/vulnerabilities")
     def list_vulnerabilities(
         request: Request,
@@ -2819,6 +2941,15 @@ def _cloudformation_launcher_from_environment() -> AwsCloudFormationLauncher | N
         principal_arn=principal_arn,
         expires_in_seconds=expires_in_seconds,
     )
+
+
+def _evidence_store_from_environment() -> EvidenceReportStore | None:
+    bucket_name = os.environ.get("DENALI_EVIDENCE_BUCKET") or os.environ.get(
+        "DENALI_AWS_ONBOARDING_BUCKET"
+    )
+    if not bucket_name:
+        return None
+    return S3EvidenceReportStore(bucket_name)
 
 
 def _azure_setup_launcher_from_environment() -> AzureSetupScriptLauncher | None:

@@ -213,6 +213,36 @@ def _dispatch_collection(job_id: str) -> str:
 @app.function(
     image=image,
     secrets=runtime_secrets,
+    timeout=1200,
+    retries=0,
+    **_region_options(),
+)
+def vulnerability_import_worker(job_id: str) -> None:
+    from denali.api.evidence_import import (
+        S3EvidenceReportStore,
+        run_durable_vulnerability_import_job,
+    )
+    from denali.store.repository import PostgresInventoryRepository
+
+    _configure_aws_oidc()
+    run_durable_vulnerability_import_job(
+        PostgresInventoryRepository(os.environ["DENALI_DSN"]),
+        S3EvidenceReportStore(
+            os.environ.get("DENALI_EVIDENCE_BUCKET")
+            or os.environ["DENALI_AWS_ONBOARDING_BUCKET"]
+        ),
+        job_id,
+    )
+
+
+def _dispatch_vulnerability_import(job_id: str) -> str:
+    call = vulnerability_import_worker.spawn(job_id)
+    return call.object_id
+
+
+@app.function(
+    image=image,
+    secrets=runtime_secrets,
     min_containers=1,
     scaledown_window=600,
     timeout=300,
@@ -228,6 +258,7 @@ def api():
         auth_mode="clerk",
         validation_dispatcher=_dispatch_validation,
         collection_dispatcher=_dispatch_collection,
+        vulnerability_import_dispatcher=_dispatch_vulnerability_import,
         migrate_on_start=False,
     )
 
@@ -363,6 +394,7 @@ def configuration_status() -> None:
             "DENALI_AWS_ONBOARDING_BUCKET",
             "DENALI_AWS_PRINCIPAL_ARN",
         ),
+        "evidence": ("DENALI_AWS_ONBOARDING_BUCKET",),
         "azure": (
             "DENALI_AZURE_ONBOARDING_BUCKET",
             "DENALI_AZURE_CLIENT_ID",
