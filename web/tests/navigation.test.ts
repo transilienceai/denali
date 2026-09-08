@@ -91,7 +91,7 @@ test("provider callbacks always return to the selected connection", () => {
     "connections",
   );
   assert.equal(
-    navigationFromUrl("https://denali.test/?admin_consent=true&state=abc").page,
+    navigationFromUrl("https://denali.test/?azure_setup=succeeded&connection_id=ghi").page,
     "connections",
   );
 });

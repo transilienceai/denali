@@ -150,6 +150,11 @@ export const api = {
       `/v1/connections/${id}/azure/setup/launch`,
       { method: "POST" },
     ),
+  resumeAzureSetup: (id: string) =>
+    request<AzureSetupLaunch>(
+      `/v1/connections/${id}/azure/setup/script`,
+      { method: "POST" },
+    ),
   completeAzureSetup: (id: string, completionCode: string) =>
     request<{ status: "started" | "already_running"; connection_id: string }>(
       `/v1/connections/${id}/azure/setup/complete`,

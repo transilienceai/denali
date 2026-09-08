@@ -388,7 +388,7 @@ def test_entra_customer_lifecycle_create_consent_validate_collect_disable_delete
 
         callback = client.get(
             "/v1/connections/entra/setup/callback",
-            params={"state": state, "tenant": ENTRA_TENANT_ID, "admin_consent": "true"},
+            params={"state": state},
             follow_redirects=False,
         )
         assert callback.status_code == 303
@@ -400,7 +400,7 @@ def test_entra_customer_lifecycle_create_consent_validate_collect_disable_delete
 
         replay = client.get(
             "/v1/connections/entra/setup/callback",
-            params={"state": state, "tenant": ENTRA_TENANT_ID, "admin_consent": "true"},
+            params={"state": state},
             follow_redirects=False,
         )
         assert replay.status_code == 409
@@ -459,6 +459,7 @@ def test_entra_callback_rejects_wrong_customer_tenant_and_consumes_state() -> No
 
     assert rejected.status_code == 303
     assert "entra_setup=failed" in rejected.headers["location"]
+    assert "reason=tenant_mismatch" in rejected.headers["location"]
     assert replay.status_code == 409
 
 
@@ -501,6 +502,49 @@ def test_expired_entra_state_is_rejected() -> None:
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Microsoft Entra consent launch has expired"
+
+
+def test_entra_callback_requires_an_application_token() -> None:
+    repository = EntraRepositoryStub()
+
+    def unavailable_graph(_tenant_id: str) -> FakeGraph:
+        raise RuntimeError("application token unavailable")
+
+    consent_client = EntraAdminConsentClient(
+        client_id=CLIENT_ID,
+        client_secret="fixture-secret-never-persisted",
+        callback_url="http://127.0.0.1:3080/api/v1/connections/entra/setup/callback",
+        web_url="http://127.0.0.1:3080",
+        token=lambda: "t" * 48,
+        graph_client_factory=unavailable_graph,
+    )
+    app = create_app(
+        repository=repository,
+        entra_consent_client=consent_client,
+        entra_connection_validator=PassingEntraValidator(),  # type: ignore[arg-type]
+        migrate_on_start=False,
+    )
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/connections",
+            json={
+                "provider": "entra",
+                "display_name": "Token unavailable",
+                "tenant_id": ENTRA_TENANT_ID,
+            },
+        ).json()
+        launch = client.post(
+            f"/v1/connections/{created['id']}/entra/setup/launch"
+        ).json()
+        state = parse_qs(urlparse(launch["consent_url"]).query)["state"][0]
+        callback = client.get(
+            "/v1/connections/entra/setup/callback",
+            params={"state": state, "tenant": ENTRA_TENANT_ID, "admin_consent": "True"},
+            follow_redirects=False,
+        )
+
+    assert callback.status_code == 303
+    assert "reason=application_token_unavailable" in callback.headers["location"]
 
 
 def test_entra_mutations_require_admin_and_callback_uses_state_tenant() -> None:

@@ -84,7 +84,7 @@ export function hasConnectionReturn(query: URLSearchParams): boolean {
   return (
     query.has("github_setup") ||
     query.has("entra_setup") ||
-    (query.has("state") && (query.has("admin_consent") || query.has("error")))
+    query.has("azure_setup")
   );
 }
 
