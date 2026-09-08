@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any, Protocol
@@ -14,7 +15,8 @@ from denali.domain import AssetKind, AssetRef
 
 logger = logging.getLogger(__name__)
 
-MAX_REPORT_BYTES = 8 * 1024 * 1024
+MAX_REPORT_BYTES = 16 * 1024 * 1024
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EvidenceReportStore(Protocol):
@@ -257,12 +259,31 @@ def _normalized_identifier(value: Any) -> str | None:
     return normalized or None
 
 
+def _identifier_tokens(value: Any) -> set[str]:
+    normalized = _normalized_identifier(value)
+    if normalized is None:
+        return set()
+    tokens = {normalized}
+    if "@" in normalized:
+        _name, digest = normalized.rsplit("@", 1)
+        if digest:
+            tokens.add(digest)
+    if _SHA256_HEX_RE.fullmatch(normalized):
+        tokens.add(f"sha256:{normalized}")
+    return tokens
+
+
 def _syft_subject_identifiers(source: Mapping[str, Any]) -> set[str]:
-    return {
-        identifier
-        for value in (source.get("id"), source.get("name"), source.get("version"))
-        if (identifier := _normalized_identifier(value)) is not None
-    }
+    identifiers = _identifier_tokens(source.get("id"))
+    version = _normalized_identifier(source.get("version"))
+    name = _normalized_identifier(source.get("name"))
+    if version is not None:
+        identifiers.update(_identifier_tokens(version))
+        if name is not None:
+            identifiers.update(_identifier_tokens(f"{name}@{version}"))
+    elif name is not None:
+        identifiers.update(_identifier_tokens(name))
+    return identifiers
 
 
 def _grype_subject_identifiers(source: Mapping[str, Any]) -> set[str]:
@@ -276,8 +297,7 @@ def _grype_subject_identifiers(source: Mapping[str, Any]) -> set[str]:
         )
     else:
         values = (target,)
-    return {
-        identifier
-        for value in values
-        if (identifier := _normalized_identifier(value)) is not None
-    }
+    identifiers: set[str] = set()
+    for value in values:
+        identifiers.update(_identifier_tokens(value))
+    return identifiers

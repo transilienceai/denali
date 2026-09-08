@@ -1349,8 +1349,8 @@ function VulnerabilityImportPanel({
       setName("");
       return;
     }
-    if (file.size > 8 * 1024 * 1024) {
-      setError(`${expectedTool === "syft" ? "Syft" : "Grype"} report exceeds 8 MB.`);
+    if (file.size > 16 * 1024 * 1024) {
+      setError(`${expectedTool === "syft" ? "Syft" : "Grype"} report exceeds 16 MB.`);
       setReport(null);
       setName("");
       return;
