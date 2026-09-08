@@ -45,7 +45,7 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { waitForAcceptedOperation } from "./connectionPolling";
 import {
@@ -176,27 +176,16 @@ type GitHubSetupReturn = {
 type EntraSetupReturn = {
   connectionId: string;
   state: "succeeded" | "failed";
+  detail?: string;
 };
 
 function readAzureConsentReturn(): AzureConsentReturn | null {
   const query = new URLSearchParams(window.location.search);
-  const connectionId = query.get("state") ?? "";
+  const connectionId = query.get("connection_id") ?? "";
+  const state = query.get("azure_setup");
+  if (state !== "succeeded" && state !== "failed") return null;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connectionId)) return null;
-  if (query.get("admin_consent")?.toLowerCase() === "true") {
-    return {
-      connectionId,
-      state: "succeeded",
-      tenantId: query.get("tenant") ?? undefined,
-    };
-  }
-  const error = query.get("error");
-  if (!error) return null;
-  const description = query.get("error_description")?.trim();
-  return {
-    connectionId,
-    state: "failed",
-    detail: `${error}${description ? `: ${description.slice(0, 500)}` : ""}`,
-  };
+  return { connectionId, state, detail: microsoftConsentFailureDetail("Azure", query.get("reason")) };
 }
 
 function readGitHubSetupReturn(): GitHubSetupReturn | null {
@@ -214,7 +203,17 @@ function readEntraSetupReturn(): EntraSetupReturn | null {
   const state = query.get("entra_setup");
   if (state !== "succeeded" && state !== "failed") return null;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connectionId)) return null;
-  return { connectionId, state };
+  return { connectionId, state, detail: microsoftConsentFailureDetail("Entra", query.get("reason")) };
+}
+
+function microsoftConsentFailureDetail(provider: "Azure" | "Entra", reason: string | null) {
+  if (!reason) return undefined;
+  if (reason === "access_denied") return "Microsoft reported that administrator consent was cancelled or denied.";
+  if (reason === "tenant_mismatch") return "Microsoft returned a different tenant from the one recorded in this connection plan.";
+  if (reason === "consent_not_granted") return "Microsoft returned without confirming administrator consent.";
+  if (reason === "tenant_identity_not_ready") return "Microsoft returned successfully, but Denali could not verify its enterprise application in this Azure tenant.";
+  if (reason === "application_token_unavailable") return "Microsoft returned successfully, but Denali could not mint an application token for this Entra tenant. Confirm the disclosed Graph application permissions were granted.";
+  return `Microsoft rejected the ${provider} consent request. Launch consent again and review Microsoft’s message.`;
 }
 
 function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boolean; accountControls?: ReactNode; profilePage?: ReactNode }) {
@@ -2210,6 +2209,7 @@ function ConnectionsPage({
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const azureConsentResumeAttempted = useRef<string | null>(null);
   const selected = connections.find((connection) => connection.id === selectedId) ?? connections[0];
 
   useEffect(() => {
@@ -2220,6 +2220,29 @@ function ConnectionsPage({
     if (selected && selected.id !== selectedId) onSelect(selected.id, "replace");
     if (!selected && selectedId) onSelect("", "replace");
   }, [onSelect, selected, selectedId]);
+
+  useEffect(() => {
+    if (
+      !canWrite
+      || azureConsentReturn?.state !== "succeeded"
+      || selected?.provider !== "azure"
+      || selected.id !== azureConsentReturn.connectionId
+      || azureLaunches[selected.id]
+      || azureConsentResumeAttempted.current === selected.id
+    ) return;
+    azureConsentResumeAttempted.current = selected.id;
+    setBusy(`launch:${selected.id}`);
+    setActionError(null);
+    void api.resumeAzureSetup(selected.id)
+      .then(async (launch) => {
+        setAzureLaunches((current) => ({ ...current, [selected.id]: launch }));
+        await onChanged();
+      })
+      .catch((cause: unknown) => {
+        setActionError(cause instanceof Error ? cause.message : "Unable to continue Azure setup");
+      })
+      .finally(() => setBusy(null));
+  }, [azureConsentReturn, azureLaunches, canWrite, onChanged, selected]);
 
   function selectProvider(next: "aws" | "azure" | "entra" | "gcp" | "github") {
     navigation.set("provider", next, "aws");
@@ -2361,7 +2384,9 @@ function ConnectionsPage({
     setBusy(`launch:${connection.id}`);
     setActionError(null);
     try {
-      const launch = await api.launchAzureSetup(connection.id);
+      const launch = connection.configuration.onboarding?.consent_status === "completed"
+        ? await api.resumeAzureSetup(connection.id)
+        : await api.launchAzureSetup(connection.id);
       setAzureLaunches((current) => ({ ...current, [connection.id]: launch }));
       await onChanged();
     } catch (cause) {
@@ -2574,11 +2599,11 @@ function ConnectionsPage({
     <section className="connection-boundary"><ShieldCheck /><div><strong>Connection health is not a risk verdict.</strong><span>A healthy connection means the configured role and declared validation calls worked. It does not mean collection is complete, findings are absent, or the connected environment is safe.</span></div></section>
     {azureConsentReturn && <div className={`connection-consent-return ${azureConsentReturn.state}`}>
       {azureConsentReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
-      <span><strong>{azureConsentReturn.state === "succeeded" ? "Denali’s tenant identity is ready" : "Microsoft Entra could not add Denali to the tenant"}</strong><small>{azureConsentReturn.state === "succeeded" ? `Entra confirmed Denali’s enterprise application${azureConsentReturn.tenantId ? ` in tenant ${azureConsentReturn.tenantId}` : ""}. This step grants no subscription or Microsoft Graph access; selected-subscription Reader access is granted separately in Cloud Shell and verified by Denali.` : azureConsentReturn.detail}</small></span>
+      <span><strong>{azureConsentReturn.state === "succeeded" ? "Denali’s Azure tenant identity is verified" : "Microsoft Entra could not add Denali to the Azure tenant"}</strong><small>{azureConsentReturn.state === "succeeded" ? "Denali verified the expiring one-time callback and successfully minted an Azure application token for the exact tenant. Continue with the highlighted Cloud Shell step." : azureConsentReturn.detail}</small></span>
     </div>}
     {entraSetupReturn && <div className={`connection-consent-return ${entraSetupReturn.state}`}>
       {entraSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
-      <span><strong>{entraSetupReturn.state === "succeeded" ? "Microsoft Entra admin consent recorded" : "Microsoft Entra admin consent was not completed"}</strong><small>{entraSetupReturn.state === "succeeded" ? "Denali verified the one-time callback, bound the exact customer tenant, discarded the setup state, and started read-only Microsoft Graph validation." : "Return to this connection and launch consent again. No tenant access was recorded."}</small></span>
+      <span><strong>{entraSetupReturn.state === "succeeded" ? "Microsoft Entra admin consent recorded" : "Microsoft Entra admin consent was not completed"}</strong><small>{entraSetupReturn.state === "succeeded" ? "Denali verified the one-time callback, bound the exact customer tenant, discarded the setup state, and started read-only Microsoft Graph validation." : entraSetupReturn.detail ?? "Return to this connection and launch consent again. No tenant access was recorded."}</small></span>
     </div>}
     {githubSetupReturn && <div className={`connection-consent-return ${githubSetupReturn.state}`}>
       {githubSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
@@ -2699,13 +2724,14 @@ function AzureConnectionDetail({ connection, busy, launch, completionCode, onCom
   const collection = connection.last_deployment_collection && "subscription_count" in connection.last_deployment_collection ? connection.last_deployment_collection : null;
   const collectionScopeSelected = connection.declared_scopes.includes("azure.code_to_cloud");
   const credential = connection.credential_reference.type === "azure_multitenant_app" ? connection.credential_reference : null;
+  const consentVerified = launch?.consent_verified === true || connection.configuration.onboarding?.consent_status === "completed";
   const permissions = [...new Set(connection.coverage_plan.flatMap((item) => item.permissions))].sort();
   return <section className="panel connection-detail">
     <div className="connection-detail-head"><div><span>MICROSOFT AZURE</span><h3>{connection.display_name}</h3><code>Tenant {connection.configuration.tenant_id}</code></div><ConnectionHealth state={connection.health_state} /></div>
     <div className="microsoft-account-guidance"><CircleHelp /><span><strong>Tenant membership and an enabled subscription are required</strong><small>Use a native or invited guest administrator in tenant {connection.configuration.tenant_id}. Personal accounts outside this directory cannot add Denali, and Azure setup cannot continue unless that tenant has at least one enabled subscription visible to the account.</small></span></div>
     <div className="setup-progress">
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>Tenant, application ID, scopes, and subscription-selection boundary are recorded. Entra directory access is not included.</small></div></div>
-      <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Add Denali to the tenant and select subscriptions</strong><small>Microsoft Entra first creates a tenant-local enterprise application—the identity Azure can assign a role to. This grants no subscription or Microsoft Graph access. Cloud Shell then enumerates enabled subscriptions and assigns Reader only to those you select; every resource location inside them remains in scope.</small>{!launch && <button className="primary-action" disabled={preparing || !connection.setup_capabilities.azure_cloud_shell} onClick={onPrepare}><ExternalLink />{preparing ? "Preparing Azure setup…" : setupComplete ? "Prepare Azure setup again" : "Prepare Azure setup"}</button>}{launch && <div className="azure-setup-actions"><div className="connection-launch-actions"><a className="primary-action" href={launch.consent_url} target="_blank" rel="noreferrer"><ExternalLink />1. Add Denali to tenant</a><a className="secondary-action" href={launch.cloud_shell_url} target="_blank" rel="noreferrer"><ExternalLink />2. Open Cloud Shell</a><a className="secondary-action" href={launch.script_url} download><Download />Download script</a></div><small className="azure-consent-guidance">Required only once per Entra tenant. This Microsoft-hosted step opens in a new tab and creates—or confirms an existing—Denali enterprise application. It requests no Graph permissions and grants no subscription access; Cloud Shell grants Reader separately.</small><label className="azure-command"><span>3. Run in Cloud Shell</span><textarea readOnly value={launch.setup_command} /><button type="button" onClick={() => void navigator.clipboard.writeText(launch.setup_command)}>Copy command</button><small>The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small></label><label className="azure-completion"><span>4. Paste the completion code printed by the script</span><textarea value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_SETUP_COMPLETE=…" /><button className="primary-action" type="button" disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing ? "Waiting for Azure access propagation…" : "Complete setup and validate"}</button><small>New Azure role assignments can take several minutes to propagate. Denali retries the declared checks before recording a partial result.</small></label></div>}{!connection.setup_capabilities.azure_cloud_shell && <small className="launch-unavailable">Cloud Shell setup requires Denali’s multi-tenant Azure application and private onboarding-script publisher.</small>}{setupComplete && <div className="azure-subscriptions"><strong>{subscriptions.length} selected subscription{subscriptions.length === 1 ? "" : "s"}</strong>{subscriptions.map((subscription) => <code key={subscription.id}>{subscription.name} · {subscription.id}</code>)}</div>}</div></div>
+      <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Add Denali to the tenant and select subscriptions</strong><small>Microsoft Entra first creates a tenant-local enterprise application—the identity Azure can assign a role to. This grants no subscription or Microsoft Graph access. Cloud Shell then enumerates enabled subscriptions and assigns Reader only to those you select; every resource location inside them remains in scope.</small>{!launch && <button className="primary-action" disabled={preparing || !connection.setup_capabilities.azure_cloud_shell} onClick={onPrepare}><ExternalLink />{preparing ? "Preparing Azure setup…" : consentVerified ? "Prepare Cloud Shell setup" : setupComplete ? "Prepare Azure setup again" : "Prepare Azure setup"}</button>}{launch && <div className="azure-setup-actions"><div className="connection-launch-actions">{launch.consent_url && <a className="primary-action" href={launch.consent_url} target="_blank" rel="noreferrer"><ExternalLink />1. Add Denali to tenant</a>}{launch.consent_verified && <a className="primary-action" href={launch.cloud_shell_url} target="_blank" rel="noreferrer"><ExternalLink />1. Open Cloud Shell</a>}{launch.consent_verified && <a className="secondary-action" href={launch.script_url} download><Download />Download script</a>}</div><small className="azure-consent-guidance">{launch.consent_verified ? "Denali verified its tenant-local enterprise application. Cloud Shell now grants Reader only to the subscriptions you select." : "Required only once per Entra tenant. Microsoft creates—or confirms—Denali’s enterprise application, then returns through a verified, expiring, one-time callback."}</small>{launch.consent_verified && <><label className="azure-command"><span>2. Run in Cloud Shell</span><textarea readOnly value={launch.setup_command} /><button type="button" onClick={() => void navigator.clipboard.writeText(launch.setup_command)}>Copy command</button><small>The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small></label><label className="azure-completion"><span>3. Paste the completion code printed by the script</span><textarea value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_SETUP_COMPLETE=…" /><button className="primary-action" type="button" disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing ? "Waiting for Azure access propagation…" : "Complete setup and validate"}</button><small>New Azure role assignments can take several minutes to propagate. Denali retries the declared checks before recording a partial result.</small></label></>}</div>}{!connection.setup_capabilities.azure_cloud_shell && <small className="launch-unavailable">Cloud Shell setup requires Denali’s multi-tenant Azure application and private onboarding-script publisher.</small>}{setupComplete && <div className="azure-subscriptions"><strong>{subscriptions.length} selected subscription{subscriptions.length === 1 ? "" : "s"}</strong>{subscriptions.map((subscription) => <code key={subscription.id}>{subscription.name} · {subscription.id}</code>)}</div>}</div></div>
       <div className={validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Validate every selected subscription</strong><small>Denali binds the customer tenant and each exact subscription first, then validates every declared subscription-wide plane independently.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating Azure…" : validation ? "Validate again" : "Validate connection"}</button>}</div></div>
       <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect deployment identities</strong><small>Read Container Apps and Function Apps through Azure Resource Graph, retaining exact subscription, resource group, location, revision, image, and managed-identity evidence without storing app-setting values.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={!collectionScopeSelected || collecting || validating} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting deployments…" : collection ? "Collect deployments again" : "Collect deployments"}</button>}{!collectionScopeSelected && <small className="launch-unavailable">This connection predates the Azure code-to-cloud scope. Create a new Azure connection plan to adopt and validate it explicitly.</small>}{collection && <small className="validation-progress-note">{collection.subscription_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
     </div>

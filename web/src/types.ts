@@ -231,6 +231,9 @@ export type Connection = {
       oauth_expires_at?: string;
       completed_at?: string;
       consent_expires_at?: string;
+      consent_completed_at?: string;
+      consent_failed_at?: string;
+      consent_status?: "launched" | "completed" | "failed";
       status?: "completed" | "failed";
       failed_at?: string;
     };
@@ -342,7 +345,8 @@ export type AzureConnectionCreate = {
 };
 
 export type AzureSetupLaunch = {
-  consent_url: string;
+  consent_url: string | null;
+  consent_verified: boolean;
   cloud_shell_url: string;
   script_url: string;
   setup_command: string;

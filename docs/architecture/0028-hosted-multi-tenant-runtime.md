@@ -71,10 +71,10 @@ Every tenant-owned repository method accepts the server-resolved Denali tenant U
 from request bodies, query parameters, routes, arbitrary headers, or the browser's selected state
 are untrusted and cannot select a tenant.
 
-`/healthz`, API documentation, and the GitHub provider callbacks are public at the HTTP middleware
-layer. Callback authorization instead uses verified, expiring, one-time setup state. The stored
-state resolves both tenant and connection, so changing the browser's active Organization cannot
-redirect a callback into another tenant.
+`/healthz`, API documentation, and the Azure, Entra, and GitHub provider callbacks are public at
+the HTTP middleware layer. Callback authorization instead uses verified, expiring, one-time setup
+state. The stored state resolves both tenant and connection, so changing the browser's active
+Organization cannot redirect a callback into another tenant.
 
 ## Durable work
 
