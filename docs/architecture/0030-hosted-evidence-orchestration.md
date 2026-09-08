@@ -40,6 +40,11 @@ successful evidence run, and an absent scan or activity plane must not be render
    display `Collection needed`; complete collection displays `Ready`; partial or failed collection
    remains visible. Vulnerability and runtime pages display `N/A` when no non-fixture coverage plane
    exists. They display zero only after the relevant collector or scanner has established coverage.
+7. Inventory, finding, vulnerability, activity, detection, and issue mutations take the same
+   tenant-keyed PostgreSQL transaction advisory lock before touching evidence tables. Concurrent
+   provider workers for one tenant therefore serialize their database mutations, while collectors
+   for different tenants remain independent. The lock is transaction-scoped so it remains safe with
+   pooled connections and releases automatically on commit, rollback, or worker failure.
 
 Vulnerability collection is not inferred from a cloud connection. It still requires a bounded SBOM
 and scanner report for an exact artifact or target. Missing vulnerability coverage is therefore
@@ -56,3 +61,5 @@ and scanner report for an exact artifact or target. Missing vulnerability covera
   independent facts into one green badge.
 - Existing connections need one validation or manual collection after rollout to enter the new
   orchestration path. Production repair is a post-merge, exact-main operation.
+- A simultaneous all-provider refresh may perform provider reads concurrently, but tenant evidence
+  writes and derived evaluation no longer deadlock each other.
