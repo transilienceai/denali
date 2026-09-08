@@ -32,39 +32,41 @@ _NOT_APPLICABLE_CODES = {
 # a failed call outside the published set is bounded as not applicable rather than a
 # permission or network conclusion.
 # https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html
-_AGENTCORE_REGIONS = {
-    "ap-northeast-1",
-    "ap-northeast-2",
-    "ap-south-1",
-    "ap-southeast-1",
-    "ap-southeast-2",
-    "ap-southeast-5",
-    "ap-southeast-7",
-    "ca-central-1",
-    "eu-central-1",
-    "eu-north-1",
-    "eu-south-1",
-    "eu-south-2",
-    "eu-west-1",
-    "eu-west-2",
-    "eu-west-3",
-    "sa-east-1",
-    "us-east-1",
-    "us-east-2",
-    "us-gov-west-1",
-    "us-west-2",
-}
-_AGENTCORE_MEMORY_REGIONS = _AGENTCORE_REGIONS - {
+AGENTCORE_REGIONS = frozenset(
+    {
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-south-1",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-southeast-5",
+        "ap-southeast-7",
+        "ca-central-1",
+        "eu-central-1",
+        "eu-north-1",
+        "eu-south-1",
+        "eu-south-2",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "sa-east-1",
+        "us-east-1",
+        "us-east-2",
+        "us-gov-west-1",
+        "us-west-2",
+    }
+)
+AGENTCORE_MEMORY_REGIONS = AGENTCORE_REGIONS - {
     "ap-southeast-5",
     "ap-southeast-7",
     "eu-south-1",
     "eu-south-2",
 }
 _AGENTCORE_PLANE_REGIONS = {
-    "agentcore_runtimes": _AGENTCORE_REGIONS,
-    "agentcore_gateways": _AGENTCORE_REGIONS,
-    "agentcore_workload_identities": _AGENTCORE_REGIONS,
-    "agentcore_memories": _AGENTCORE_MEMORY_REGIONS,
+    "agentcore_runtimes": AGENTCORE_REGIONS,
+    "agentcore_gateways": AGENTCORE_REGIONS,
+    "agentcore_workload_identities": AGENTCORE_REGIONS,
+    "agentcore_memories": AGENTCORE_MEMORY_REGIONS,
 }
 AWS_SCOPES = (
     AWS_SCOPE_BEDROCK_AGENTS,

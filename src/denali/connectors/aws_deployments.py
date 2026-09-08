@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from denali.connections.aws import (
+    AGENTCORE_MEMORY_REGIONS,
+    AGENTCORE_REGIONS,
     AWS_COVERAGE_AUTOMATIC,
     AWS_SCOPE_AGENTCORE,
     AWS_SCOPE_BEDROCK_ACTIVITY,
@@ -723,10 +725,7 @@ _AGENTCORE_PLANES = (
 def _agentcore_batch(
     *, session: Any, account_id: str, region: str, partition: str, connection_id: str
 ) -> InventoryBatch:
-    available_regions = session.get_available_regions(
-        "bedrock-agentcore-control", partition_name=partition
-    )
-    if available_regions and region not in available_regions:
+    if region not in AGENTCORE_REGIONS:
         observed_at = datetime.now(UTC)
         scope = f"account={account_id},region={region}"
         return InventoryBatch(
@@ -740,7 +739,7 @@ def _agentcore_batch(
                     plane,
                     CoverageState.NOT_SUPPORTED,
                     scope,
-                    "The AWS SDK does not expose AgentCore in this enabled Region.",
+                    "AWS does not document AgentCore as available in this enabled Region.",
                 )
                 for plane in _AGENTCORE_PLANES
             ),
@@ -750,7 +749,10 @@ def _agentcore_batch(
         region=region,
         partition=partition,
         client=session.client("bedrock-agentcore-control", region_name=region),
-    ).collect(connection_id=connection_id)
+    ).collect(
+        connection_id=connection_id,
+        include_memories=region in AGENTCORE_MEMORY_REGIONS,
+    )
 
 
 def _bedrock_logging_batch(
