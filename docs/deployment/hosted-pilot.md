@@ -73,6 +73,10 @@ the core Secret needs:
 Provider credentials remain in one separate, environment-local Modal Secret. Set
 `DENALI_MODAL_PROVIDER_SECRET_NAME` in the deploy shell to mount it alongside the core Secret.
 The provider Secret is applied after the core Secret, so it must not duplicate core keys.
+Google Workspace collection additionally requires the non-secret operator identifiers
+`DENALI_GOOGLE_WORKSPACE_SERVICE_ACCOUNT` and `DENALI_GOOGLE_WORKSPACE_CLIENT_ID` in that provider
+Secret. The Modal runtime service account needs `roles/iam.serviceAccountTokenCreator` on the
+Workspace collector service account. Never add a Google service-account JSON key.
 Production uses:
 
 ```bash

@@ -100,6 +100,7 @@ export type ConnectionValidationResult = {
   repository_id?: number;
   repository_full_name?: string;
   tenant_id?: string;
+  domain?: string;
 };
 
 export type ConnectionValidation = {
@@ -124,6 +125,9 @@ export type ConnectionCoveragePlan = {
   repository_node_id?: string;
   repository_full_name?: string;
   tenant_id?: string;
+  domain?: string;
+  admin_email?: string;
+  application_name?: string;
 };
 
 export type EntraEvidenceCollection = {
@@ -152,7 +156,7 @@ export type GitHubRepositoryBoundary = {
 
 export type Connection = {
   id: string;
-  provider: "aws" | "azure" | "entra" | "gcp" | "github";
+  provider: "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace";
   display_name: string;
   lifecycle_state: "active" | "disabled";
   health_state: "unknown" | "healthy" | "partial" | "unhealthy" | "disabled";
@@ -169,6 +173,7 @@ export type Connection = {
     gcp_cloud_shell: boolean;
     github_app: boolean;
     entra_admin_consent: boolean;
+    google_workspace_admin_authorization: boolean;
   };
   credential_reference:
     | {
@@ -194,6 +199,11 @@ export type Connection = {
         app_id: number;
         app_slug: string;
         installation_id?: number;
+      }
+    | {
+        type: "google_workspace_domain_wide_delegation";
+        service_account: string;
+        oauth_client_id: string;
       };
   declared_scopes: string[];
   coverage_plan: ConnectionCoveragePlan[];
@@ -201,11 +211,13 @@ export type Connection = {
     account_id?: string;
     partition?: "aws" | "aws-us-gov" | "aws-cn";
     deployment_region?: string;
-    coverage_mode?: "automatic" | "selected" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "tenant-wide-admin-consent";
+    coverage_mode?: "automatic" | "selected" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "tenant-wide-admin-consent" | "domain-wide-delegation";
     regions?: string[];
     role_name?: string;
     stack_scopes?: string[];
     tenant_id?: string;
+    admin_email?: string;
+    domain?: string;
     cloud?: "AzureCloud";
     subscriptions?: Array<{ id: string; name: string }>;
     projects?: Array<{ id: string; name: string; number: string }>;
@@ -215,7 +227,7 @@ export type Connection = {
     repositories?: GitHubRepositoryBoundary[];
     installer?: { id: number; login: string };
     onboarding?: {
-      method: "cloudformation_quick_create" | "azure_cloud_shell" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation";
+      method: "cloudformation_quick_create" | "azure_cloud_shell" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation" | "google_workspace_domain_wide_delegation";
       template_version?: string;
       template_sha256?: string;
       principal_arn?: string;
@@ -358,6 +370,13 @@ export type EntraConnectionCreate = {
   provider: "entra";
   display_name: string;
   tenant_id: string;
+  declared_scopes: string[];
+};
+
+export type GoogleWorkspaceConnectionCreate = {
+  provider: "google_workspace";
+  display_name: string;
+  admin_email: string;
   declared_scopes: string[];
 };
 

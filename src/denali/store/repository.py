@@ -93,6 +93,9 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
         credential_reference["app_slug"] = internal_reference["app_slug"]
         if internal_reference.get("installation_id"):
             credential_reference["installation_id"] = internal_reference["installation_id"]
+    elif credential_type == "google_workspace_domain_wide_delegation":
+        credential_reference["service_account"] = internal_reference["service_account"]
+        credential_reference["oauth_client_id"] = internal_reference["oauth_client_id"]
     result["credential_reference"] = credential_reference
     return result
 
@@ -3284,6 +3287,44 @@ class PostgresInventoryRepository:
                     connection_id,
                     entra_tenant_id,
                     expected_state_sha256,
+                ),
+            ).fetchone()
+        return None if row is None else self.get_connection(tenant_id, connection_id)
+
+    def complete_google_workspace_connection_setup(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        coverage_plan: list[dict[str, Any]],
+        completed_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Record admin authorization intent; validation proves delegation independently."""
+
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE provider_connection
+                SET configuration = jsonb_set(
+                        jsonb_set(
+                            configuration,
+                            '{onboarding,status}', '"completed"'::jsonb, true
+                        ),
+                        '{onboarding,completed_at}', to_jsonb(%s::text), true
+                    ),
+                    coverage_plan = %s::jsonb,
+                    health_state = 'unknown',
+                    updated_at = %s
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                  AND provider = 'google_workspace' AND lifecycle_state = 'active'
+                RETURNING id
+                """,
+                (
+                    completed_at.isoformat(),
+                    json.dumps(coverage_plan),
+                    completed_at,
+                    tenant_id,
+                    connection_id,
                 ),
             ).fetchone()
         return None if row is None else self.get_connection(tenant_id, connection_id)

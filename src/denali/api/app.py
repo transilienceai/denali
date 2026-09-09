@@ -62,6 +62,7 @@ from denali.connections import (
     ENTRA_SCOPES,
     GCP_SCOPES,
     GITHUB_SCOPES,
+    GOOGLE_WORKSPACE_SCOPES,
     AwsCloudFormationLauncher,
     AwsConnectionValidator,
     AzureConnectionValidator,
@@ -73,11 +74,14 @@ from denali.connections import (
     GcpSetupScriptLauncher,
     GitHubAppClient,
     GitHubConnectionValidator,
+    GoogleWorkspaceConnectionValidator,
+    GoogleWorkspaceOperator,
     aws_connection_coverage_plan,
     azure_coverage_plan,
     entra_coverage_plan,
     gcp_coverage_plan,
     github_coverage_plan,
+    google_workspace_coverage_plan,
 )
 from denali.connections.aws import render_cloudformation
 from denali.connections.gcp import valid_gcp_project_id
@@ -87,6 +91,7 @@ from denali.connectors.container_images import normalize_image_digest
 from denali.connectors.entra_connection import EntraConnectionCollector
 from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
 from denali.connectors.github_repository import GitHubRepositoryCollector
+from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
 from denali.domain import ActivityBatch, FindingBatch, InventoryBatch
 from denali.store.db import migrate
 from denali.store.repository import PostgresInventoryRepository
@@ -232,6 +237,15 @@ class InventoryReader(Protocol):
         *,
         expected_state_sha256: str,
         entra_tenant_id: str,
+        coverage_plan: list[dict[str, Any]],
+        completed_at: datetime,
+    ) -> dict[str, Any] | None: ...
+
+    def complete_google_workspace_connection_setup(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
         coverage_plan: list[dict[str, Any]],
         completed_at: datetime,
     ) -> dict[str, Any] | None: ...
@@ -531,6 +545,19 @@ class GitHubConnectionCreate(BaseModel):
     )
 
 
+class GoogleWorkspaceConnectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["google_workspace"] = "google_workspace"
+    display_name: str = Field(min_length=1, max_length=120)
+    admin_email: str = Field(min_length=3, max_length=320)
+    declared_scopes: list[str] = Field(
+        default_factory=lambda: list(GOOGLE_WORKSPACE_SCOPES),
+        min_length=1,
+        max_length=len(GOOGLE_WORKSPACE_SCOPES),
+    )
+
+
 OrganizationRole = Literal["org:member", "org:admin"]
 
 
@@ -556,7 +583,8 @@ ConnectionCreate = Annotated[
     | AzureConnectionCreate
     | EntraConnectionCreate
     | GcpConnectionCreate
-    | GitHubConnectionCreate,
+    | GitHubConnectionCreate
+    | GoogleWorkspaceConnectionCreate,
     Field(discriminator="provider"),
 ]
 
@@ -568,9 +596,11 @@ def create_app(
     azure_connection_validator: AzureConnectionValidator | None = None,
     entra_connection_validator: EntraConnectionValidator | None = None,
     gcp_connection_validator: GcpConnectionValidator | None = None,
+    google_workspace_connection_validator: GoogleWorkspaceConnectionValidator | None = None,
     cloudformation_launcher: AwsCloudFormationLauncher | None = None,
     azure_setup_launcher: AzureSetupScriptLauncher | None = None,
     entra_consent_client: EntraAdminConsentClient | None = None,
+    google_workspace_operator: GoogleWorkspaceOperator | None = None,
     gcp_principal_provisioner: GcpConnectionPrincipalProvisioner | None = None,
     gcp_setup_launcher: GcpSetupScriptLauncher | None = None,
     azure_deployment_collector: AzureConnectionDeploymentCollector | None = None,
@@ -580,6 +610,7 @@ def create_app(
     github_connection_validator: GitHubConnectionValidator | None = None,
     github_repository_collector: GitHubRepositoryCollector | None = None,
     entra_connection_collector: EntraConnectionCollector | None = None,
+    google_workspace_connection_collector: GoogleWorkspaceConnectionCollector | None = None,
     onboarding_validation_timeout_seconds: int | None = None,
     onboarding_validation_retry_seconds: int | None = None,
     tenant_id: str | None = None,
@@ -611,6 +642,9 @@ def create_app(
     configured_launcher = cloudformation_launcher or _cloudformation_launcher_from_environment()
     configured_azure_launcher = azure_setup_launcher or _azure_setup_launcher_from_environment()
     configured_entra_client = entra_consent_client or _entra_consent_client_from_environment()
+    configured_workspace_operator = (
+        google_workspace_operator or _google_workspace_operator_from_environment()
+    )
     configured_gcp_provisioner = (
         gcp_principal_provisioner or _gcp_principal_provisioner_from_environment()
     )
@@ -670,10 +704,16 @@ def create_app(
             if configured_entra_client is not None
             else None
         )
+        app.state.google_workspace_connection_validator = google_workspace_connection_validator or (
+            GoogleWorkspaceConnectionValidator(configured_workspace_operator)
+            if configured_workspace_operator is not None
+            else None
+        )
         app.state.gcp_connection_validator = gcp_connection_validator or GcpConnectionValidator()
         app.state.cloudformation_launcher = configured_launcher
         app.state.azure_setup_launcher = configured_azure_launcher
         app.state.entra_consent_client = configured_entra_client
+        app.state.google_workspace_operator = configured_workspace_operator
         app.state.gcp_principal_provisioner = configured_gcp_provisioner
         app.state.gcp_setup_launcher = configured_gcp_launcher
         app.state.azure_deployment_collector = (
@@ -699,6 +739,11 @@ def create_app(
         app.state.entra_connection_collector = entra_connection_collector or (
             EntraConnectionCollector(configured_entra_client)
             if configured_entra_client is not None
+            else None
+        )
+        app.state.google_workspace_connection_collector = google_workspace_connection_collector or (
+            GoogleWorkspaceConnectionCollector(configured_workspace_operator)
+            if configured_workspace_operator is not None
             else None
         )
         app.state.onboarding_validation_timeout = onboarding_validation_timeout
@@ -799,6 +844,7 @@ def create_app(
             "entra": request.app.state.entra_connection_validator,
             "gcp": request.app.state.gcp_connection_validator,
             "github": request.app.state.github_connection_validator,
+            "google_workspace": request.app.state.google_workspace_connection_validator,
         }
         validator = validators[target["provider"]]
         if validator is None:
@@ -940,6 +986,28 @@ def create_app(
             collector=request.app.state.entra_connection_collector,
             unavailable_detail="Microsoft Entra collection is not configured",
             dispatch_failure_detail="Unable to dispatch Microsoft Entra collection",
+        )
+        if result is None:
+            raise HTTPException(status_code=503, detail="durable collection storage is unavailable")
+        return result
+
+    def queue_google_workspace_collection(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        repo: InventoryReader,
+        current_tenant: str,
+        target: dict[str, Any],
+    ) -> dict[str, str]:
+        result = queue_durable_collection(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            target,
+            collection_kind="google_workspace_ai",
+            collector=request.app.state.google_workspace_connection_collector,
+            unavailable_detail="Google Workspace collection is not configured",
+            dispatch_failure_detail="Unable to dispatch Google Workspace collection",
         )
         if result is None:
             raise HTTPException(status_code=503, detail="durable collection storage is unavailable")
@@ -1350,6 +1418,63 @@ def create_app(
                     configuration={
                         "tenant_id": str(connection.tenant_id),
                         "coverage_mode": "tenant-wide-admin-consent",
+                    },
+                )
+                return _with_validation_state(request, current_tenant, created)
+            except ValueError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+
+        if isinstance(connection, GoogleWorkspaceConnectionCreate):
+            operator = request.app.state.google_workspace_operator
+            if operator is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Google Workspace onboarding is not configured; set the Workspace "
+                        "service account and OAuth client ID"
+                    ),
+                )
+            admin_email = _normalized_emails([connection.admin_email])[0]
+            domain = admin_email.rsplit("@", 1)[1]
+            scopes = list(dict.fromkeys(connection.declared_scopes))
+            unsupported_scopes = [scope for scope in scopes if scope not in GOOGLE_WORKSPACE_SCOPES]
+            if unsupported_scopes:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"unsupported Google Workspace scope: {', '.join(unsupported_scopes)}",
+                )
+            if set(scopes) != set(GOOGLE_WORKSPACE_SCOPES):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Google Workspace onboarding currently requires the complete disclosed "
+                        "read-only audit bundle"
+                    ),
+                )
+            connection_id = str(uuid4())
+            try:
+                created = repo.create_connection(
+                    current_tenant,
+                    connection_id=connection_id,
+                    provider="google_workspace",
+                    display_name=display_name,
+                    credential_type="google_workspace_domain_wide_delegation",
+                    credential_reference={
+                        "service_account": operator.service_account,
+                        "oauth_client_id": operator.oauth_client_id,
+                    },
+                    declared_scopes=scopes,
+                    coverage_plan=google_workspace_coverage_plan(
+                        scopes, domain=domain, admin_email=admin_email
+                    ),
+                    configuration={
+                        "admin_email": admin_email,
+                        "domain": domain,
+                        "coverage_mode": "domain-wide-delegation",
+                        "onboarding": {
+                            "method": "google_workspace_domain_wide_delegation",
+                            "status": "pending",
+                        },
                     },
                 )
                 return _with_validation_state(request, current_tenant, created)
@@ -2153,6 +2278,52 @@ def create_app(
             status_code=303,
         )
 
+    @app.post(
+        "/v1/connections/{connection_id}/google-workspace/setup/complete",
+        status_code=202,
+    )
+    def complete_google_workspace_setup(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        connection_id: UUID,
+    ) -> dict[str, str]:
+        repo, current_tenant = _context(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None or target["provider"] != "google_workspace":
+            raise HTTPException(status_code=404, detail="Google Workspace connection not found")
+        if target["lifecycle_state"] != "active":
+            raise HTTPException(status_code=409, detail="disabled connections cannot be set up")
+        if request.app.state.google_workspace_operator is None:
+            raise HTTPException(
+                status_code=503, detail="Google Workspace onboarding is not configured"
+            )
+        completed_at = datetime.now(UTC)
+        updated = repo.complete_google_workspace_connection_setup(
+            current_tenant,
+            str(connection_id),
+            coverage_plan=google_workspace_coverage_plan(
+                target["declared_scopes"],
+                domain=str(target["configuration"]["domain"]),
+                admin_email=str(target["configuration"]["admin_email"]),
+            ),
+            completed_at=completed_at,
+        )
+        if updated is None:
+            raise HTTPException(status_code=409, detail="connection changed during setup")
+        validation_target = repo.get_connection_validation_target(
+            current_tenant, str(connection_id)
+        )
+        if validation_target is None:
+            raise HTTPException(status_code=409, detail="connection changed during setup")
+        return queue_validation(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            validation_target,
+            wait_for_credentials=False,
+        )
+
     @app.post("/v1/connections/{connection_id}/validate", status_code=202)
     def validate_connection(
         request: Request,
@@ -2166,7 +2337,14 @@ def create_app(
             raise HTTPException(status_code=404, detail="connection not found")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be validated")
-        if target["provider"] not in {"aws", "azure", "entra", "gcp", "github"}:
+        if target["provider"] not in {
+            "aws",
+            "azure",
+            "entra",
+            "gcp",
+            "github",
+            "google_workspace",
+        }:
             raise HTTPException(status_code=422, detail="connection provider is not supported")
         if target["provider"] == "azure" and not target["configuration"].get("subscriptions"):
             raise HTTPException(
@@ -2189,6 +2367,13 @@ def create_app(
             raise HTTPException(
                 status_code=409,
                 detail="complete Microsoft Entra admin consent before validation",
+            )
+        if target["provider"] == "google_workspace" and not target["configuration"].get(
+            "onboarding", {}
+        ).get("completed_at"):
+            raise HTTPException(
+                status_code=409,
+                detail="complete Google Workspace domain-wide authorization before validation",
             )
         return queue_validation(
             request,
@@ -2217,6 +2402,27 @@ def create_app(
                 detail="complete Microsoft Entra admin consent before collection",
             )
         return queue_entra_collection(request, background_tasks, repo, current_tenant, target)
+
+    @app.post("/v1/connections/{connection_id}/google-workspace/collect", status_code=202)
+    def collect_google_workspace_evidence(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        connection_id: UUID,
+    ) -> dict[str, str]:
+        repo, current_tenant = _context(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None or target["provider"] != "google_workspace":
+            raise HTTPException(status_code=404, detail="Google Workspace connection not found")
+        if target["lifecycle_state"] != "active":
+            raise HTTPException(status_code=409, detail="disabled connections cannot collect")
+        if not target["configuration"].get("onboarding", {}).get("completed_at"):
+            raise HTTPException(
+                status_code=409,
+                detail="complete Google Workspace domain-wide authorization before collection",
+            )
+        return queue_google_workspace_collection(
+            request, background_tasks, repo, current_tenant, target
+        )
 
     @app.post("/v1/connections/{connection_id}/github/collect", status_code=202)
     def collect_github_repository_source(
@@ -2322,6 +2528,7 @@ def create_app(
             "entra": ("entra_ai", "evidence"),
             "gcp": ("gcp_deployments", "GCP deployment"),
             "github": ("github_source", "source"),
+            "google_workspace": ("google_workspace_ai", "evidence"),
         }
         collection_status = getattr(repo, "connection_collection_status", None)
         durable_collection = collection_kind_by_provider.get(str(target["provider"]))
@@ -3075,6 +3282,7 @@ def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]
         "entra": ("entra_ai", "evidence"),
         "gcp": ("gcp_deployments", "deployment"),
         "github": ("github_source", "source"),
+        "google_workspace": ("google_workspace_ai", "evidence"),
     }
     collection_status = getattr(request.app.state.repository, "connection_collection_status", None)
     durable_collection = collection_kind_by_provider.get(str(result["provider"]))
@@ -3142,6 +3350,10 @@ def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> 
         ),
         "entra_admin_consent": (
             result["provider"] == "entra" and request.app.state.entra_consent_client is not None
+        ),
+        "google_workspace_admin_authorization": (
+            result["provider"] == "google_workspace"
+            and request.app.state.google_workspace_operator is not None
         ),
     }
 
@@ -3308,6 +3520,19 @@ def _entra_consent_client_from_environment() -> EntraAdminConsentClient | None:
         setup_seconds=_bounded_environment_integer(
             "DENALI_ENTRA_ONBOARDING_SECONDS", default=1800, minimum=300, maximum=3600
         ),
+    )
+
+
+def _google_workspace_operator_from_environment() -> GoogleWorkspaceOperator | None:
+    service_account = os.environ.get("DENALI_GOOGLE_WORKSPACE_SERVICE_ACCOUNT", "").strip()
+    oauth_client_id = os.environ.get("DENALI_GOOGLE_WORKSPACE_CLIENT_ID", "").strip()
+    if not service_account and not oauth_client_id:
+        return None
+    if not service_account or not oauth_client_id:
+        raise ValueError("Google Workspace operator configuration is incomplete")
+    return GoogleWorkspaceOperator(
+        service_account=service_account,
+        oauth_client_id=oauth_client_id,
     )
 
 

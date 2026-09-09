@@ -73,6 +73,7 @@ import type {
   GcpConnectionCreate,
   GcpSetupLaunch,
   GitHubConnectionCreate,
+  GoogleWorkspaceConnectionCreate,
   CodeToCloudDeployment,
   CodeToCloudObservation,
   Connection,
@@ -1917,6 +1918,11 @@ const ENTRA_PLANES = {
   audits: "entra_ai_directory_audits",
 } as const;
 
+const GOOGLE_WORKSPACE_PLANES = {
+  gemini: "google_workspace_gemini_activity",
+  oauth: "google_workspace_oauth_activity",
+} as const;
+
 function ShadowAiPage({
   assets,
   activities,
@@ -1940,32 +1946,34 @@ function ShadowAiPage({
     () => assets.filter((asset) => asset.kind === "ai_application"),
     [assets],
   );
-  const allEntraActivity = useMemo(
+  const allDirectoryActivity = useMemo(
     () => activities.filter(
-      (item) => item.provider === "Microsoft Entra" &&
-        (item.category === "ai_app_sign_in" || item.category === "admin_change"),
+      (item) => item.provider === "Microsoft Entra" || item.provider === "Google Workspace",
     ),
     [activities],
   );
   const applicationCoverage = useMemo(
     () => coverage
-      .filter((item) => item.connector_id === "denali.entra_ai" && item.plane === ENTRA_PLANES.applications)
+      .filter((item) =>
+        (item.connector_id === "denali.entra_ai" && item.plane === ENTRA_PLANES.applications) ||
+        (item.connector_id === "denali.google_workspace" && item.plane === GOOGLE_WORKSPACE_PLANES.oauth),
+      )
       .sort((left, right) => right.collected_at.localeCompare(left.collected_at)),
     [coverage],
   );
   const connections = useMemo(
     () => [...new Set([
       ...allApplications.map((asset) => asset.connection_id),
-      ...allEntraActivity.map((item) => item.connection_id),
+      ...allDirectoryActivity.map((item) => item.connection_id),
     ].filter((value): value is string => value !== null))].sort(),
-    [allApplications, allEntraActivity],
+    [allApplications, allDirectoryActivity],
   );
   const latestActiveConnection = useMemo(
-    () => [...allEntraActivity]
+    () => [...allDirectoryActivity]
       .sort((left, right) => right.occurred_at.localeCompare(left.occurred_at))[0]?.connection_id ??
       applicationCoverage[0]?.connection_id ??
       connections[0],
-    [allEntraActivity, applicationCoverage, connections],
+    [allDirectoryActivity, applicationCoverage, connections],
   );
   const selectedConnection = connection === "all"
     ? undefined
@@ -1987,17 +1995,19 @@ function ShadowAiPage({
       (category === "all" || attributes.catalog_category === category) &&
       (governance === "all" || asset.governance_status === governance);
   }), [applications, category, governance, search]);
-  const entraActivity = useMemo(
-    () => allEntraActivity.filter((item) => !selectedConnection || item.connection_id === selectedConnection),
-    [allEntraActivity, selectedConnection],
+  const directoryActivity = useMemo(
+    () => allDirectoryActivity.filter((item) => !selectedConnection || item.connection_id === selectedConnection),
+    [allDirectoryActivity, selectedConnection],
   );
-  const signIns = entraActivity.filter((item) => item.category === "ai_app_sign_in");
-  const adminChanges = entraActivity.filter((item) => item.category === "admin_change");
+  const signIns = directoryActivity.filter((item) => item.category === "ai_app_sign_in");
+  const adminChanges = directoryActivity.filter((item) => item.category === "admin_change");
+  const workspaceOAuth = directoryActivity.filter((item) => item.activity_name.startsWith("google.workspace.oauth."));
+  const workspaceGemini = directoryActivity.filter((item) => item.activity_name.startsWith("google.workspace.gemini."));
   const delegatedGrants = applications.reduce((total, asset) => total + attributeNumber(asset, "delegated_grant_count"), 0);
   const appPermissions = applications.reduce((total, asset) => total + attributeNumber(asset, "application_permission_count"), 0);
   const latestCoverage = useMemo(() => {
     const result = new Map<string, Coverage>();
-    coverage.filter((item) => item.connector_id === "denali.entra_ai" && (!selectedConnection || item.connection_id === selectedConnection)).forEach((item) => {
+    coverage.filter((item) => ["denali.entra_ai", "denali.google_workspace"].includes(item.connector_id) && (!selectedConnection || item.connection_id === selectedConnection)).forEach((item) => {
       const existing = result.get(item.plane);
       if (!existing || item.collected_at > existing.collected_at) result.set(item.plane, item);
     });
@@ -2006,28 +2016,31 @@ function ShadowAiPage({
   const hasEntraBoundary = coverage.some(
     (item) => item.connector_id === "denali.entra_ai",
   );
+  const hasWorkspaceBoundary = coverage.some(
+    (item) => item.connector_id === "denali.google_workspace",
+  );
 
-  if (!hasEntraBoundary) {
+  if (!hasEntraBoundary && !hasWorkspaceBoundary) {
     return <div className="page-stack shadow-ai-page">
-      <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>AI application discovery is not configured for this workspace.</h2><p>No Microsoft Entra evidence boundary has been declared, so Denali does not present missing collection as zero discovered applications.</p></div><div className="result-count"><strong>N/A</strong><span>Entra application coverage</span></div></section>
-      <section className="panel applicability-boundary"><CircleHelp /><div><span className="eyebrow">NOT ASSESSED</span><h3>No Microsoft Entra tenant is connected</h3><p>Denali will not turn missing Entra collection into reassuring zeroes. Connect an Entra tenant when workforce AI application discovery is in scope; until then, this page remains explicitly not assessed.</p></div></section>
+      <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>AI application discovery is not configured for this workspace.</h2><p>No Microsoft Entra or Google Workspace evidence boundary has been declared, so Denali does not present missing collection as zero discovered applications.</p></div><div className="result-count"><strong>N/A</strong><span>directory application coverage</span></div></section>
+      <section className="panel applicability-boundary"><CircleHelp /><div><span className="eyebrow">NOT ASSESSED</span><h3>No workforce directory is connected</h3><p>Connect Microsoft Entra or Google Workspace when workforce AI application discovery is in scope. Missing collection remains explicitly not assessed.</p></div></section>
       <section className="shadow-principle"><ShieldCheck /><div><strong>Other connected evidence remains available.</strong><span>Source, deployment, identity, model, component, posture, and runtime evidence remain independently reviewable.</span></div></section>
     </div>;
   }
 
   return <div className="page-stack shadow-ai-page">
-    <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>See the AI your workforce has connected.</h2><p>Microsoft Entra applications, consent, permissions, and observed use—catalog matches for review, never risk verdicts by themselves.</p></div><div className="result-count"><strong>{applications.length}</strong><span>catalog-matched AI applications</span><small>{categories.length} application categories</small></div></section>
+    <section className="page-intro"><div><span className="eyebrow">ENTERPRISE AI APPLICATIONS</span><h2>See the AI your workforce has connected.</h2><p>Directory applications, consent, permissions, and observed use from Microsoft Entra and Google Workspace—catalog matches for review, never risk verdicts by themselves.</p></div><div className="result-count"><strong>{applications.length}</strong><span>catalog-matched AI applications</span><small>{categories.length} application categories</small></div></section>
     <section className="shadow-signal-grid">
       <ShadowSignal icon={AppWindow} label="AI applications" value={applications.length} detail="exact catalog matches" coverage={latestCoverage.get(ENTRA_PLANES.applications)} />
-      <ShadowSignal icon={Link2} label="Delegated grants" value={delegatedGrants} detail="user-context permissions" coverage={latestCoverage.get(ENTRA_PLANES.delegated)} />
-      <ShadowSignal icon={Fingerprint} label="Application permissions" value={appPermissions} detail="non-human access" coverage={latestCoverage.get(ENTRA_PLANES.applicationPermissions)} />
-      <ShadowSignal icon={Activity} label="Observed sign-ins" value={signIns.length} detail={`${adminChanges.length} directory changes`} coverage={latestCoverage.get(ENTRA_PLANES.signIns)} />
+      <ShadowSignal icon={Link2} label={hasWorkspaceBoundary ? "OAuth observations" : "Delegated grants"} value={delegatedGrants + workspaceOAuth.length} detail={hasWorkspaceBoundary ? "catalog-matched authorization activity" : "user-context permissions"} coverage={latestCoverage.get(GOOGLE_WORKSPACE_PLANES.oauth) ?? latestCoverage.get(ENTRA_PLANES.delegated)} />
+      <ShadowSignal icon={Fingerprint} label={hasEntraBoundary ? "Application permissions" : "Gemini actions"} value={hasEntraBoundary ? appPermissions : workspaceGemini.length} detail={hasEntraBoundary ? "non-human access" : "bounded feature-use events"} coverage={latestCoverage.get(ENTRA_PLANES.applicationPermissions) ?? latestCoverage.get(GOOGLE_WORKSPACE_PLANES.gemini)} />
+      <ShadowSignal icon={Activity} label="Observed activity" value={directoryActivity.length} detail={`${signIns.length} sign-ins · ${adminChanges.length} changes`} coverage={latestCoverage.get(ENTRA_PLANES.signIns) ?? latestCoverage.get(GOOGLE_WORKSPACE_PLANES.gemini)} />
     </section>
     <section className="shadow-principle"><CircleHelp /><div><strong>A catalog match means “review this application.”</strong><span>Denali does not claim an application is unsanctioned, unsafe, or training on company data without separate evidence and policy.</span></div></section>
     <section className="panel shadow-app-panel">
       <div className="filterbar">
         <label className="search-field"><Search size={18} /><input value={search} onChange={(event) => navigation.set("q", event.target.value, "", "replace")} placeholder="Search application or publisher…" /></label>
-        <label className="select-field"><Waypoints size={16} /><select value={connection} onChange={(event) => navigation.set("connection", event.target.value, "latest")}><option value="latest">Most recently active tenant</option><option value="all">All connected tenants</option>{connections.map((item) => <option value={item} key={item}>{entraConnectionLabel(item)}</option>)}</select></label>
+        <label className="select-field"><Waypoints size={16} /><select value={connection} onChange={(event) => navigation.set("connection", event.target.value, "latest")}><option value="latest">Most recently active directory</option><option value="all">All connected directories</option>{connections.map((item) => <option value={item} key={item}>{directoryConnectionLabel(item)}</option>)}</select></label>
         <label className="select-field"><AppWindow size={16} /><select value={category} onChange={(event) => navigation.set("category", event.target.value, "all")}><option value="all">All categories</option>{categories.map((item) => <option value={item} key={item}>{titleCase(item)}</option>)}</select></label>
         <label className="select-field"><ShieldCheck size={16} /><select value={governance} onChange={(event) => navigation.set("governance", event.target.value, "all")}><option value="all">All governance</option><option value="approved">Approved</option><option value="unreviewed">Unreviewed</option><option value="unwanted">Unwanted</option></select></label>
         {(search || connection !== "latest" || category !== "all" || governance !== "all") && <button className="clear-button" onClick={() => navigation.clear(["q", "connection", "category", "governance"])}>Reset</button>}
@@ -2035,15 +2048,15 @@ function ShadowAiPage({
       <div className="shadow-app-table" role="table" aria-label="Enterprise AI applications">
         <div className="shadow-app-head" role="row"><span>Application</span><span>Category</span><span>Permissions</span><span>Publisher</span><span>Governance</span><span>Last seen</span><span /></div>
         {filtered.map((asset) => <ShadowApplicationRow key={asset.id} asset={asset} onClick={() => onOpenAsset(asset.id)} />)}
-        {filtered.length === 0 && <div className="empty-state"><AppWindow /><strong>{applications.length === 0 ? "No AI applications have been collected" : "No applications match these filters"}</strong><span>{applications.length === 0 ? "Run the Microsoft Entra connector and inspect its coverage state." : "Reset the filters to see the full application inventory."}</span></div>}
+        {filtered.length === 0 && <div className="empty-state"><AppWindow /><strong>{applications.length === 0 ? "No AI applications have been collected" : "No applications match these filters"}</strong><span>{applications.length === 0 ? "Run a directory connector and inspect its coverage state." : "Reset the filters to see the full application inventory."}</span></div>}
       </div>
     </section>
     <section className="panel shadow-activity-panel">
-      <PanelHeader eyebrow="OBSERVED USE" title="Recent Entra activity" />
-      <div className="runtime-table" role="table" aria-label="Recent Entra AI activity">
+      <PanelHeader eyebrow="OBSERVED USE" title="Recent directory AI activity" />
+      <div className="runtime-table" role="table" aria-label="Recent directory AI activity">
         <div className="runtime-table-head" role="row"><span>Activity</span><span>Type</span><span>Outcome</span><span>Actor</span><span>Provider</span><span>Occurred</span><span /></div>
-        {entraActivity.slice(0, 8).map((item) => <RuntimeActivityRow key={item.id} item={item} onClick={() => onOpenActivity(item.id)} />)}
-        {entraActivity.length === 0 && <div className="empty-state"><Activity /><strong>No Entra AI activity is currently visible</strong><span>Check sign-in and directory-audit coverage before treating this as no use.</span></div>}
+        {directoryActivity.slice(0, 8).map((item) => <RuntimeActivityRow key={item.id} item={item} onClick={() => onOpenActivity(item.id)} />)}
+        {directoryActivity.length === 0 && <div className="empty-state"><Activity /><strong>No directory AI activity is currently visible</strong><span>Check each connected report plane before treating this as no use.</span></div>}
       </div>
     </section>
     <p className="fixture-note"><ShieldCheck size={15} /> Application discovery and runtime activity remain facts. Governance decisions and security findings are evaluated separately.</p>
@@ -2075,9 +2088,9 @@ function attributeNumber(asset: Asset, key: string): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function entraConnectionLabel(connectionId: string): string {
+function directoryConnectionLabel(connectionId: string): string {
   const tenantId = connectionId.startsWith("entra:") ? connectionId.slice("entra:".length) : connectionId;
-  return `Tenant ${tenantId}`;
+  return `Evidence source ${tenantId}`;
 }
 
 function RuntimeActivityPage({
@@ -2351,12 +2364,18 @@ const GITHUB_CONNECTION_SCOPES = [
   { id: "github.actions_workflows", label: "GitHub Actions workflows", detail: "Workflow inventory only; no workflow runs, secrets, or writes" },
 ];
 
-function connectionScopes(provider: "aws" | "azure" | "entra" | "gcp" | "github") {
+const GOOGLE_WORKSPACE_CONNECTION_SCOPES = [
+  { id: "google_workspace.gemini_activity", label: "Gemini in Workspace activity", detail: "Bounded Gemini feature-use metadata; no prompts, responses, or IP addresses" },
+  { id: "google_workspace.oauth_activity", label: "AI OAuth application activity", detail: "Catalog-matched OAuth authorization and use events from the bounded audit window" },
+];
+
+function connectionScopes(provider: "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace") {
   return provider === "aws" ? AWS_CONNECTION_SCOPES
     : provider === "azure" ? AZURE_CONNECTION_SCOPES
       : provider === "entra" ? ENTRA_CONNECTION_SCOPES
       : provider === "gcp" ? GCP_CONNECTION_SCOPES
-        : GITHUB_CONNECTION_SCOPES;
+        : provider === "github" ? GITHUB_CONNECTION_SCOPES
+          : GOOGLE_WORKSPACE_CONNECTION_SCOPES;
 }
 
 function ConnectionsPage({
@@ -2382,8 +2401,8 @@ function ConnectionsPage({
   githubSetupReturn: GitHubSetupReturn | null;
   canWrite: boolean;
 }) {
-  const provider = (["aws", "azure", "entra", "gcp", "github"] as const).includes(navigation.values.provider as "aws" | "azure" | "entra" | "gcp" | "github")
-    ? navigation.values.provider as "aws" | "azure" | "entra" | "gcp" | "github"
+  const provider = (["aws", "azure", "entra", "gcp", "github", "google_workspace"] as const).includes(navigation.values.provider as "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace")
+    ? navigation.values.provider as "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace"
     : "aws";
   const [displayName, setDisplayName] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -2394,6 +2413,7 @@ function ConnectionsPage({
   const [scopes, setScopes] = useState(() => connectionScopes(provider).map((scope) => scope.id));
   const [azureTenantId, setAzureTenantId] = useState("");
   const [entraTenantId, setEntraTenantId] = useState("");
+  const [workspaceAdminEmail, setWorkspaceAdminEmail] = useState("");
   const [azureLaunches, setAzureLaunches] = useState<Record<string, AzureSetupLaunch>>({});
   const [azureCompletionCode, setAzureCompletionCode] = useState<Record<string, string>>({});
   const [gcpLaunches, setGcpLaunches] = useState<Record<string, GcpSetupLaunch>>({});
@@ -2412,7 +2432,7 @@ function ConnectionsPage({
     if (!selected && selectedId) onSelect("", "replace");
   }, [onSelect, selected, selectedId]);
 
-  function selectProvider(next: "aws" | "azure" | "entra" | "gcp" | "github") {
+  function selectProvider(next: "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace") {
     navigation.set("provider", next, "aws");
   }
 
@@ -2421,7 +2441,7 @@ function ConnectionsPage({
     setBusy("create");
     setActionError(null);
     try {
-      const payload: AwsConnectionCreate | AzureConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate = provider === "aws" ? {
+      const payload: AwsConnectionCreate | AzureConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate = provider === "aws" ? {
           provider: "aws",
           display_name: displayName,
           account_id: accountId,
@@ -2445,9 +2465,14 @@ function ConnectionsPage({
           provider: "gcp",
           display_name: displayName,
           declared_scopes: scopes,
-        } : {
+        } : provider === "github" ? {
           provider: "github",
           display_name: displayName,
+          declared_scopes: scopes,
+        } : {
+          provider: "google_workspace",
+          display_name: displayName,
+          admin_email: workspaceAdminEmail,
           declared_scopes: scopes,
         };
       const created = await api.createConnection(payload);
@@ -2457,6 +2482,7 @@ function ConnectionsPage({
       setAccountId("");
       setAzureTenantId("");
       setEntraTenantId("");
+      setWorkspaceAdminEmail("");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to create connection");
     } finally {
@@ -2604,6 +2630,35 @@ function ConnectionsPage({
       setActionNotice("Microsoft Entra evidence collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect Microsoft Entra evidence");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function completeGoogleWorkspaceSetup(connection: Connection) {
+    setBusy(`complete:${connection.id}`);
+    setActionError(null);
+    try {
+      await api.completeGoogleWorkspaceSetup(connection.id);
+      await waitForValidation(connection, 150);
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Unable to verify Google Workspace authorization");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function collectGoogleWorkspaceEvidence(connection: Connection) {
+    setBusy(`collect-workspace:${connection.id}`);
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      const accepted = await api.collectGoogleWorkspaceEvidence(connection.id);
+      setActionNotice(accepted.status === "already_running" ? "Google Workspace evidence collection is already running." : "Google Workspace evidence collection accepted. It continues safely in the background.");
+      await waitForCollection(connection, "evidence");
+      setActionNotice("Google Workspace evidence collection completed.");
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Unable to collect Google Workspace evidence");
     } finally {
       setBusy(null);
     }
@@ -2758,7 +2813,7 @@ function ConnectionsPage({
 
   return <div className="page-stack connections-page">
     <section className="page-intro connection-intro">
-      <div><span className="eyebrow">SELF-SERVICE ONBOARDING</span><h2>Connect evidence sources without handing Denali customer credentials.</h2><p>AWS uses assume-role; Azure and Google Cloud use provider-native, keyless identities; Entra uses a disclosed Graph read bundle with tenant-admin consent; GitHub uses short-lived App installation tokens. Every declared plane is validated separately.</p></div>
+      <div><span className="eyebrow">SELF-SERVICE ONBOARDING</span><h2>Connect evidence sources without handing Denali customer credentials.</h2><p>AWS uses assume-role; Azure and Google Cloud use provider-native, keyless identities; Entra and Google Workspace use disclosed directory read bundles; GitHub uses short-lived App installation tokens. Every declared plane is validated separately.</p></div>
       {canWrite && <button className="primary-action" onClick={() => onShowCreate(!showCreate)}><Plus /> Add connection</button>}
     </section>
     {!canWrite && <section className="read-only-banner"><ShieldCheck /><div><strong>Read-only organization role</strong><span>An organization admin must create, validate, disable, or delete connections.</span></div></section>}
@@ -2774,10 +2829,10 @@ function ConnectionsPage({
     {actionNotice && <div className="connection-notice"><CircleCheck /><span>{actionNotice}</span></div>}
     {actionError && <div className="connection-error"><CircleAlert /><span>{actionError}</span></div>}
     {canWrite && showCreate && <form className="panel connection-create" onSubmit={(event) => void createConnection(event)}>
-      <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
-      <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{provider === "aws" ? "Amazon Web Services" : provider === "azure" ? "Microsoft Azure" : provider === "entra" ? "Microsoft Entra" : provider === "gcp" ? "Google Cloud" : "GitHub"}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "entra" ? "A tenant administrator grants Denali application-only Microsoft Graph read permissions. Denali stores the tenant boundary, not access tokens or customer credentials." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "entra" ? "ENTRA" : provider === "gcp" ? "GCP" : "GITHUB"}</span></div>
+      <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "google_workspace" ? "active" : ""} onClick={() => selectProvider("google_workspace")}>Google Workspace</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
+      <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{provider === "aws" ? "Amazon Web Services" : provider === "azure" ? "Microsoft Azure" : provider === "entra" ? "Microsoft Entra" : provider === "gcp" ? "Google Cloud" : provider === "google_workspace" ? "Google Workspace" : "GitHub"}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "entra" ? "A tenant administrator grants Denali application-only Microsoft Graph read permissions. Denali stores the tenant boundary, not access tokens or customer credentials." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : provider === "google_workspace" ? "A Workspace super administrator authorizes Denali’s service account for one disclosed read-only audit scope. Denali stores the domain boundary and delegated admin identity, never a customer token or JSON key." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "entra" ? "ENTRA" : provider === "gcp" ? "GCP" : provider === "google_workspace" ? "WORKSPACE" : "GITHUB"}</span></div>
       <div className="connection-form-grid">
-        <label><span>Connection name</span><input required maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={provider === "aws" ? "Production AWS" : provider === "azure" ? "Production Azure" : provider === "entra" ? "Production Entra" : provider === "gcp" ? "Production Google Cloud" : "Production GitHub"} /></label>
+        <label><span>Connection name</span><input required maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={provider === "aws" ? "Production AWS" : provider === "azure" ? "Production Azure" : provider === "entra" ? "Production Entra" : provider === "gcp" ? "Production Google Cloud" : provider === "google_workspace" ? "Production Google Workspace" : "Production GitHub"} /></label>
         {provider === "aws" ? <>
         <label><span>AWS account ID</span><input required inputMode="numeric" pattern="[0-9]{12}" maxLength={12} value={accountId} onChange={(event) => setAccountId(event.target.value)} placeholder="123456789012" /></label>
         <label><span>Partition</span><select value={partition} onChange={(event) => setPartition(event.target.value as AwsConnectionCreate["partition"])}><option value="aws">Commercial AWS</option><option value="aws-us-gov">AWS GovCloud</option><option value="aws-cn">AWS China</option></select></label>
@@ -2789,19 +2844,21 @@ function ConnectionsPage({
         <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={entraTenantId} onChange={(event) => setEntraTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>Sign in with a Global Administrator who is a native or invited guest user in this exact directory. A personal account outside the tenant cannot grant consent.</small></label>
         <label><span>Directory boundary</span><input value="Exact tenant, all selected Graph planes" disabled /><small>Denali requests application-only read access. No delegated user session is retained.</small></label></> : provider === "gcp" ? <>
         <label><span>Project selection</span><input value="Choose in Google Cloud Shell" disabled /><small>Cloud Shell enumerates active projects visible to your signed-in Google identity and lets you choose.</small></label>
-        <label><span>Resource location coverage</span><input value="All locations in selected projects" disabled /><small>Cloud Asset Inventory queries are project-wide; no preferred region limits coverage.</small></label></> : <>
+        <label><span>Resource location coverage</span><input value="All locations in selected projects" disabled /><small>Cloud Asset Inventory queries are project-wide; no preferred region limits coverage.</small></label></> : provider === "google_workspace" ? <>
+        <label><span>Delegated Workspace administrator</span><input required type="email" maxLength={320} value={workspaceAdminEmail} onChange={(event) => setWorkspaceAdminEmail(event.target.value)} placeholder="admin@example.com" /><small>Use a super-admin account in the Workspace domain. Denali impersonates it only for the disclosed Admin Reports read scope.</small></label>
+        <label><span>Evidence boundary</span><input value="Gemini and OAuth audit events · maximum 180 days" disabled /><small>Successful empty reports are zero; missing permissions or unavailable reports remain unknown.</small></label></> : <>
         <label><span>Repository selection</span><input value="Choose in GitHub" disabled /><small>GitHub’s installation page lets you select repositories in one user or organization account.</small></label>
         <label><span>Token boundary</span><input value="One exact repository per short-lived token" disabled /><small>Denali records immutable repository IDs and does not silently include repositories added later.</small></label></>}
       </div>
-      <fieldset className="connection-scope-picker"><legend>{provider === "entra" ? "Required Entra evidence bundle" : "Declared collection planes"}</legend>{connectionScopes(provider).map((scope) => <label key={scope.id}><input type="checkbox" checked={scopes.includes(scope.id)} disabled={provider === "entra"} onChange={() => toggleScope(scope.id)} /><span><strong>{scope.label}</strong><small>{scope.detail}</small></span></label>)}</fieldset>
+      <fieldset className="connection-scope-picker"><legend>{provider === "entra" ? "Required Entra evidence bundle" : provider === "google_workspace" ? "Required Workspace evidence bundle" : "Declared collection planes"}</legend>{connectionScopes(provider).map((scope) => <label key={scope.id}><input type="checkbox" checked={scopes.includes(scope.id)} disabled={provider === "entra" || provider === "google_workspace"} onChange={() => toggleScope(scope.id)} /><span><strong>{scope.label}</strong><small>{scope.detail}</small></span></label>)}</fieldset>
       <div className="connection-form-actions"><button type="button" onClick={() => onShowCreate(false)}>Cancel</button><button className="primary-action" type="submit" disabled={busy === "create" || scopes.length === 0}>{busy === "create" ? "Creating…" : "Create onboarding plan"}</button></div>
     </form>}
     <div className="connections-layout">
       <section className="panel connection-list-panel">
         <PanelHeader eyebrow="SOURCES" title={`${connections.length} connection${connections.length === 1 ? "" : "s"}`} />
-        <div className="connection-list">{connections.map((connection) => <button key={connection.id} className={selected?.id === connection.id ? "active" : ""} onClick={() => onSelect(connection.id)}><span className="connection-provider-icon"><CloudCog /></span><span><strong>{connection.display_name}</strong><small>{connection.provider === "aws" ? `${connection.configuration.account_id} · ${(connection.configuration.coverage_mode ?? "automatic") === "automatic" ? "all enabled regions" : (connection.configuration.regions ?? []).join(", ")}` : connection.provider === "azure" ? `${connection.configuration.tenant_id} · ${connection.configuration.subscriptions?.length ?? 0} selected subscriptions` : connection.provider === "entra" ? `${connection.configuration.tenant_id} · tenant-wide Graph read` : connection.provider === "gcp" ? `${connection.configuration.projects?.length ?? 0} selected projects` : `${connection.configuration.account_login ?? "not installed"} · ${connection.configuration.repositories?.length ?? 0} exact repositories`}</small></span><ConnectionHealth connection={connection} /></button>)}{connections.length === 0 && <div className="empty-state"><CloudCog /><strong>No connections configured</strong><span>Create an AWS, Azure, Entra, Google Cloud, or GitHub onboarding plan to begin.</span></div>}</div>
+        <div className="connection-list">{connections.map((connection) => <button key={connection.id} className={selected?.id === connection.id ? "active" : ""} onClick={() => onSelect(connection.id)}><span className="connection-provider-icon"><CloudCog /></span><span><strong>{connection.display_name}</strong><small>{connection.provider === "aws" ? `${connection.configuration.account_id} · ${(connection.configuration.coverage_mode ?? "automatic") === "automatic" ? "all enabled regions" : (connection.configuration.regions ?? []).join(", ")}` : connection.provider === "azure" ? `${connection.configuration.tenant_id} · ${connection.configuration.subscriptions?.length ?? 0} selected subscriptions` : connection.provider === "entra" ? `${connection.configuration.tenant_id} · tenant-wide Graph read` : connection.provider === "gcp" ? `${connection.configuration.projects?.length ?? 0} selected projects` : connection.provider === "google_workspace" ? `${connection.configuration.domain} · domain-wide audit read` : `${connection.configuration.account_login ?? "not installed"} · ${connection.configuration.repositories?.length ?? 0} exact repositories`}</small></span><ConnectionHealth connection={connection} /></button>)}{connections.length === 0 && <div className="empty-state"><CloudCog /><strong>No connections configured</strong><span>Create an AWS, Azure, Entra, Google Cloud, Google Workspace, or GitHub onboarding plan to begin.</span></div>}</div>
       </section>
-      {selected && <div className={canWrite ? "" : "read-only-detail"}><ConnectionDetail connection={selected} busy={busy} navigation={navigation} azureLaunch={azureLaunches[selected.id]} azureCompletionCode={azureCompletionCode[selected.id] ?? ""} onAzureCompletionCode={(value) => setAzureCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareAzure={() => void prepareAzureSetup(selected)} onCompleteAzure={() => void completeAzureSetup(selected)} onCollectAzure={() => void collectAzureDeployments(selected)} onPrepareEntra={() => void prepareEntraSetup(selected)} onCollectEntra={() => void collectEntraEvidence(selected)} gcpLaunch={gcpLaunches[selected.id]} gcpCompletionCode={gcpCompletionCode[selected.id] ?? ""} onGcpCompletionCode={(value) => setGcpCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareGcp={() => void prepareGcpSetup(selected)} onCompleteGcp={() => void completeGcpSetup(selected)} onCollectGcp={() => void collectGcpDeployments(selected)} onCollectAws={() => void collectAwsDeployments(selected)} onPrepareGitHub={() => void prepareGitHubSetup(selected)} onCollectGitHub={() => void collectGitHubSource(selected)} onLaunch={() => void launchConnection(selected)} onDownload={() => void downloadCloudFormation(selected)} onValidate={() => void validateConnection(selected)} onDisable={() => void disableConnection(selected)} onDelete={() => void deleteConnection(selected)} /></div>}
+      {selected && <div className={canWrite ? "" : "read-only-detail"}><ConnectionDetail connection={selected} busy={busy} navigation={navigation} azureLaunch={azureLaunches[selected.id]} azureCompletionCode={azureCompletionCode[selected.id] ?? ""} onAzureCompletionCode={(value) => setAzureCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareAzure={() => void prepareAzureSetup(selected)} onCompleteAzure={() => void completeAzureSetup(selected)} onCollectAzure={() => void collectAzureDeployments(selected)} onPrepareEntra={() => void prepareEntraSetup(selected)} onCollectEntra={() => void collectEntraEvidence(selected)} onCompleteGoogleWorkspace={() => void completeGoogleWorkspaceSetup(selected)} onCollectGoogleWorkspace={() => void collectGoogleWorkspaceEvidence(selected)} gcpLaunch={gcpLaunches[selected.id]} gcpCompletionCode={gcpCompletionCode[selected.id] ?? ""} onGcpCompletionCode={(value) => setGcpCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareGcp={() => void prepareGcpSetup(selected)} onCompleteGcp={() => void completeGcpSetup(selected)} onCollectGcp={() => void collectGcpDeployments(selected)} onCollectAws={() => void collectAwsDeployments(selected)} onPrepareGitHub={() => void prepareGitHubSetup(selected)} onCollectGitHub={() => void collectGitHubSource(selected)} onLaunch={() => void launchConnection(selected)} onDownload={() => void downloadCloudFormation(selected)} onValidate={() => void validateConnection(selected)} onDisable={() => void disableConnection(selected)} onDelete={() => void deleteConnection(selected)} /></div>}
     </div>
   </div>;
 }
@@ -2819,10 +2876,10 @@ function ConnectionHealth({ connection, state }: { connection?: Connection; stat
     return <span className={`connection-health ${connection.health_state}`}><Icon />{titleCase(connection.health_state)}</span>;
   }
   const collectionState = connection.provider === "github" ? connection.source_collection_state
-    : connection.provider === "entra" ? connection.evidence_collection_state
+    : connection.provider === "entra" || connection.provider === "google_workspace" ? connection.evidence_collection_state
       : connection.deployment_collection_state;
   const collection = connection.provider === "github" ? connection.last_source_collection
-    : connection.provider === "entra" ? connection.last_evidence_collection
+    : connection.provider === "entra" || connection.provider === "google_workspace" ? connection.last_evidence_collection
       : connection.last_deployment_collection;
   if (collectionState === "running") return <span className="connection-health unknown"><RefreshCw className="spin" />Collecting</span>;
   if (!collection) return <span className="connection-health unknown"><CircleHelp />Collection needed</span>;
@@ -2830,9 +2887,10 @@ function ConnectionHealth({ connection, state }: { connection?: Connection; stat
   return <span className="connection-health healthy"><CircleCheck />Ready</span>;
 }
 
-function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareEntra, onCollectEntra, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareEntra, onCollectEntra, onCompleteGoogleWorkspace, onCollectGoogleWorkspace, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; onCompleteGoogleWorkspace: () => void; onCollectGoogleWorkspace: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
   if (connection.provider === "azure") return <AzureConnectionDetail connection={connection} busy={busy} launch={azureLaunch} completionCode={azureCompletionCode} onCompletionCode={onAzureCompletionCode} onPrepare={onPrepareAzure} onComplete={onCompleteAzure} onCollect={onCollectAzure} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "entra") return <EntraConnectionDetail connection={connection} busy={busy} onPrepare={onPrepareEntra} onCollect={onCollectEntra} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
+  if (connection.provider === "google_workspace") return <GoogleWorkspaceConnectionDetail connection={connection} busy={busy} onComplete={onCompleteGoogleWorkspace} onCollect={onCollectGoogleWorkspace} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "gcp") return <GcpConnectionDetail connection={connection} busy={busy} launch={gcpLaunch} completionCode={gcpCompletionCode} onCompletionCode={onGcpCompletionCode} onPrepare={onPrepareGcp} onComplete={onCompleteGcp} onCollect={onCollectGcp} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "github") return <GitHubConnectionDetail connection={connection} busy={busy} navigation={navigation} onPrepare={onPrepareGitHub} onCollect={onCollectGitHub} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   const validation = connection.last_validation;
@@ -2891,6 +2949,29 @@ function EntraConnectionDetail({ connection, busy, onPrepare, onCollect, onValid
     <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed tenant {validation.account_id_observed ?? "not established"}</small></div><div className="validation-grid">{validation.results.map((result) => <div key={`${result.tenant_id}:${result.plane}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{titleCase(result.plane)} · tenant-wide</small><p>{result.detail}</p></div></div>)}</div></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>Grant Microsoft Entra admin consent before validation.</small></span></div>}</div>
     <details className="connection-permissions"><summary>Review {permissions.length || 2} Microsoft Graph application permissions</summary><div>{(permissions.length ? permissions : ["Directory.Read.All", "AuditLog.Read.All"]).map((permission) => <code key={permission}>{permission}</code>)}</div><p>These are application-only read permissions. Denali cannot create users, change applications, grant consent, modify policies, read mail, or remediate the tenant.</p></details>
     <div className="connection-safeguards"><div><strong>Connection lifecycle</strong><span>Disabling prevents further validation and collection. Deleting removes Denali’s connection configuration and validation/job history; revoke the enterprise application consent separately in Microsoft Entra. Previously collected evidence remains.</span></div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disable</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete configuration</button>}</div>
+  </section>;
+}
+
+function GoogleWorkspaceConnectionDetail({ connection, busy, onComplete, onCollect, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; onComplete: () => void; onCollect: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+  const validation = connection.last_validation;
+  const setupComplete = connection.configuration.onboarding?.status === "completed";
+  const validating = connection.validation_state === "running" || busy === `validate:${connection.id}` || busy === `complete:${connection.id}`;
+  const collecting = connection.evidence_collection_state === "running" || busy === `collect-workspace:${connection.id}`;
+  const collection = connection.last_evidence_collection;
+  const credential = connection.credential_reference.type === "google_workspace_domain_wide_delegation" ? connection.credential_reference : null;
+  const auditScope = "https://www.googleapis.com/auth/admin.reports.audit.readonly";
+  return <section className="panel connection-detail">
+    <div className="connection-detail-head"><div><span>GOOGLE WORKSPACE</span><h3>{connection.display_name}</h3><code>{connection.configuration.domain} · delegated as {connection.configuration.admin_email}</code></div><ConnectionHealth state={connection.health_state} /></div>
+    <div className="microsoft-account-guidance"><CircleHelp /><span><strong>A Workspace super administrator must authorize this client once</strong><small>The authorization is domain-wide but limited to one read-only Admin Reports scope. Denali uses short-lived keyless credentials and does not store a Workspace user token or service-account key.</small></span></div>
+    <div className="setup-progress">
+      <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>The Workspace domain, delegated administrator, exact OAuth client ID, and fixed read-only evidence bundle are recorded.</small></div></div>
+      <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Authorize domain-wide delegation</strong><small>Open Google Admin Console → API controls → Domain-wide delegation. Add the client ID and OAuth scope shown below, then return here.</small><div className="azure-setup-actions"><div className="connection-launch-actions"><a className="primary-action" href="https://admin.google.com/ac/owl/domainwidedelegation" target="_blank" rel="noreferrer"><ExternalLink />Open Google Admin Console</a></div><label className="azure-command"><span>OAuth client ID</span><textarea readOnly value={credential?.oauth_client_id ?? "Operator client ID unavailable"} /><button type="button" onClick={() => void navigator.clipboard.writeText(credential?.oauth_client_id ?? "")}>Copy client ID</button></label><label className="azure-command"><span>OAuth scope</span><textarea readOnly value={auditScope} /><button type="button" onClick={() => void navigator.clipboard.writeText(auditScope)}>Copy scope</button></label><button className="primary-action" type="button" disabled={validating || !connection.setup_capabilities.google_workspace_admin_authorization} onClick={onComplete}>{validating ? "Verifying Workspace access…" : setupComplete ? "Verify authorization again" : "I authorized it — verify access"}</button><small>Authorization can take several minutes to propagate. Denali marks this connection healthy only after both report planes respond.</small></div></div></div>
+      <div className={validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Validate both audit planes</strong><small>Denali independently calls Gemini in Workspace activity and OAuth token activity. A failure stays visible and is never interpreted as zero.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating Workspace…" : validation ? "Validate again" : "Validate connection"}</button>}</div></div>
+      <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect Workspace evidence</strong><small>Denali imports bounded Gemini feature-use and catalog-matched OAuth application events, then refreshes AI application inventory and runtime activity.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={collecting || validating || connection.health_state !== "healthy"} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting Workspace evidence…" : collection ? "Collect evidence again" : "Collect Workspace evidence"}</button>}{collection && <small className="validation-progress-note">{collection.matched_ai_applications ?? 0} observed AI applications · {collection.activity_events ?? 0} activity events · {collection.coverage_complete ?? 0} complete planes · finished {formatTime(collection.completed_at)}</small>}</div></div>
+    </div>
+    <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed domain {validation.account_id_observed ?? "not established"}</small></div><div className="validation-grid">{validation.results.map((result) => <div key={`${result.domain}:${result.plane}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{titleCase(result.plane)} · domain-wide audit</small><p>{result.detail}</p></div></div>)}</div></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>Authorize the client in Google Admin Console, then verify access.</small></span></div>}</div>
+    <details className="connection-permissions"><summary>Review the Google Workspace permission</summary><div><code>{auditScope}</code></div><p>This grants read-only Admin Reports access. It cannot read Gmail or Drive content, manage users, revoke OAuth grants, change applications, alter policies, or remediate the domain.</p></details>
+    <div className="connection-safeguards"><div><strong>Connection lifecycle</strong><span>Disabling prevents further validation and collection. Deleting removes Denali’s connection configuration and job history; remove the client from Workspace domain-wide delegation separately. Previously collected evidence remains.</span></div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disable</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete configuration</button>}</div>
   </section>;
 }
 
