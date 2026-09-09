@@ -4,6 +4,8 @@ import type {
   AwsConnectionCreate,
   AwsCloudFormationLaunch,
   AzureConnectionCreate,
+  AzureReposConnectionCreate,
+  AzureReposSetupLaunch,
   AzureSetupLaunch,
   EntraConnectionCreate,
   EntraSetupLaunch,
@@ -123,7 +125,7 @@ export const api = {
     }),
   connections: () => request<{ items: Connection[] }>("/v1/connections"),
   connection: (id: string) => request<Connection>(`/v1/connections/${id}`),
-  createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate) =>
+  createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | AzureReposConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate) =>
     request<Connection>("/v1/connections", {
       method: "POST",
       body: JSON.stringify(connection),
@@ -205,6 +207,21 @@ export const api = {
   launchGitHubSetup: (id: string) =>
     request<GitHubSetupLaunch>(
       `/v1/connections/${id}/github/setup/launch`,
+      { method: "POST" },
+    ),
+  launchAzureReposSetup: (id: string) =>
+    request<AzureReposSetupLaunch>(
+      `/v1/connections/${id}/azure-repos/setup/launch`,
+      { method: "POST" },
+    ),
+  completeAzureReposSetup: (id: string, repositoryIds: string[]) =>
+    request<{ status: "started" | "already_running"; connection_id: string }>(
+      `/v1/connections/${id}/azure-repos/setup/complete`,
+      { method: "POST", body: JSON.stringify({ repository_ids: repositoryIds }) },
+    ),
+  collectAzureReposSource: (id: string) =>
+    request<{ status: "started" | "already_running"; connection_id: string }>(
+      `/v1/connections/${id}/azure-repos/collect`,
       { method: "POST" },
     ),
   collectGitHubSource: (id: string) =>

@@ -89,6 +89,7 @@ def test_collection_job_survives_api_replacement_and_duplicate_worker_delivery()
         "entra_ai",
         "gcp_deployments",
         "github_source",
+        "azure_repos_source",
     ],
 )
 def test_every_provider_collection_kind_uses_the_durable_worker(

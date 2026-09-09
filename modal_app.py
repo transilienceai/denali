@@ -56,6 +56,7 @@ def _configure_gcp_oidc() -> None:
 
 def _validators():
     from denali.api.app import (
+        _azure_repos_client_from_environment,
         _entra_consent_client_from_environment,
         _github_app_from_environment,
         _google_workspace_operator_from_environment,
@@ -63,6 +64,7 @@ def _validators():
     from denali.connections import (
         AwsConnectionValidator,
         AzureConnectionValidator,
+        AzureReposConnectionValidator,
         EntraConnectionValidator,
         GcpConnectionValidator,
         GitHubConnectionValidator,
@@ -70,6 +72,7 @@ def _validators():
     )
 
     github_app = _github_app_from_environment()
+    azure_repos_client = _azure_repos_client_from_environment()
     entra_client = _entra_consent_client_from_environment()
     workspace_operator = _google_workspace_operator_from_environment()
     return {
@@ -78,6 +81,9 @@ def _validators():
         "entra": EntraConnectionValidator(entra_client) if entra_client else None,
         "gcp": GcpConnectionValidator(),
         "github": GitHubConnectionValidator(github_app) if github_app else None,
+        "azure_repos": (
+            AzureReposConnectionValidator(azure_repos_client) if azure_repos_client else None
+        ),
         "google_workspace": (
             GoogleWorkspaceConnectionValidator(workspace_operator) if workspace_operator else None
         ),
@@ -119,6 +125,7 @@ _PRIMARY_COLLECTION_KINDS = {
     "entra": "entra_ai",
     "gcp": "gcp_deployments",
     "github": "github_source",
+    "azure_repos": "azure_repos_source",
     "google_workspace": "google_workspace_ai",
 }
 
@@ -163,6 +170,7 @@ def _queue_primary_collection(tenant_id: str, connection_id: str, provider: str)
 )
 def collection_worker(job_id: str) -> None:
     from denali.api.app import (
+        _azure_repos_client_from_environment,
         _entra_consent_client_from_environment,
         _github_app_from_environment,
         _google_workspace_operator_from_environment,
@@ -170,6 +178,7 @@ def collection_worker(job_id: str) -> None:
     from denali.api.collection import run_durable_collection_job
     from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
     from denali.connectors.azure_deployments import AzureConnectionDeploymentCollector
+    from denali.connectors.azure_repos_repository import AzureReposRepositoryCollector
     from denali.connectors.entra_connection import EntraConnectionCollector
     from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
     from denali.connectors.github_repository import GitHubRepositoryCollector
@@ -180,6 +189,7 @@ def collection_worker(job_id: str) -> None:
     _configure_gcp_oidc()
     entra_client = _entra_consent_client_from_environment()
     github_app = _github_app_from_environment()
+    azure_repos_client = _azure_repos_client_from_environment()
     workspace_operator = _google_workspace_operator_from_environment()
     run_durable_collection_job(
         PostgresInventoryRepository(os.environ["DENALI_DSN"]),
@@ -189,6 +199,9 @@ def collection_worker(job_id: str) -> None:
             "entra_ai": EntraConnectionCollector(entra_client) if entra_client else None,
             "gcp_deployments": GcpConnectionDeploymentCollector(),
             "github_source": GitHubRepositoryCollector(github_app) if github_app else None,
+            "azure_repos_source": (
+                AzureReposRepositoryCollector(azure_repos_client) if azure_repos_client else None
+            ),
             "google_workspace_ai": (
                 GoogleWorkspaceConnectionCollector(workspace_operator)
                 if workspace_operator
@@ -212,10 +225,14 @@ def _after_collection_succeeded(
 
     repository = PostgresInventoryRepository(os.environ["DENALI_DSN"])
     if collection_kind in {"aws_deployments", "azure_deployments", "gcp_deployments"}:
-        for github_connection_id in repository.list_healthy_connection_ids(
-            tenant_id, provider="github"
+        for provider, collection_kind in (
+            ("github", "github_source"),
+            ("azure_repos", "azure_repos_source"),
         ):
-            _queue_collection(repository, tenant_id, github_connection_id, "github_source")
+            for source_connection_id in repository.list_healthy_connection_ids(
+                tenant_id, provider=provider
+            ):
+                _queue_collection(repository, tenant_id, source_connection_id, collection_kind)
     repository.evaluate_runtime_detections(tenant_id)
     repository.evaluate_issues(tenant_id)
 

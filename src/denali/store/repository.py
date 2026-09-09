@@ -93,6 +93,8 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
         credential_reference["app_slug"] = internal_reference["app_slug"]
         if internal_reference.get("installation_id"):
             credential_reference["installation_id"] = internal_reference["installation_id"]
+    elif credential_type == "azure_repos_service_principal":
+        credential_reference["client_id"] = internal_reference["client_id"]
     elif credential_type == "google_workspace_domain_wide_delegation":
         credential_reference["service_account"] = internal_reference["service_account"]
         credential_reference["oauth_client_id"] = internal_reference["oauth_client_id"]
@@ -3550,6 +3552,146 @@ class PostgresInventoryRepository:
                     tenant_id,
                     connection_id,
                     expected_oauth_state_sha256,
+                ),
+            ).fetchone()
+        return None if row is None else self.get_connection(tenant_id, connection_id)
+
+    def record_azure_repos_oauth_launch(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        oauth: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Replace any stale Azure Repos setup state with one bounded OAuth launch."""
+
+        onboarding = {
+            "method": "azure_repos_entra_oauth",
+            "status": "authorizing",
+            "created_at": oauth["created_at"],
+            "oauth_expires_at": oauth["expires_at"],
+        }
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE provider_connection
+                SET credential_reference =
+                      jsonb_set(
+                        jsonb_set(
+                          credential_reference - 'oauth_state_sha256' - 'pkce_verifier',
+                          '{oauth_state_sha256}', to_jsonb(%s::text), true
+                        ),
+                        '{pkce_verifier}', to_jsonb(%s::text), true
+                      ),
+                    configuration =
+                      jsonb_set(
+                        configuration - 'repository_candidates' - 'selection_expires_at',
+                        '{onboarding}', %s::jsonb, true
+                      ),
+                    updated_at = now()
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                  AND provider = 'azure_repos' AND lifecycle_state = 'active'
+                RETURNING id
+                """,
+                (
+                    oauth["state_sha256"],
+                    oauth["pkce_verifier"],
+                    json.dumps(onboarding),
+                    tenant_id,
+                    connection_id,
+                ),
+            ).fetchone()
+        return None if row is None else self.get_connection(tenant_id, connection_id)
+
+    def stage_azure_repos_repository_selection(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        expected_state_sha256: str,
+        repositories: list[dict[str, Any]],
+        authorized_at: datetime,
+        expires_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Consume OAuth state, discard PKCE material, and stage bounded public metadata."""
+
+        onboarding = {
+            "method": "azure_repos_entra_oauth",
+            "status": "selection_pending",
+            "authorized_at": authorized_at.isoformat(),
+            "selection_expires_at": expires_at.isoformat(),
+        }
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE provider_connection
+                SET credential_reference =
+                      credential_reference - 'oauth_state_sha256' - 'pkce_verifier',
+                    configuration =
+                      jsonb_set(
+                        jsonb_set(configuration, '{repository_candidates}', %s::jsonb, true),
+                        '{onboarding}', %s::jsonb, true
+                      ),
+                    updated_at = %s
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                  AND provider = 'azure_repos' AND lifecycle_state = 'active'
+                  AND credential_reference->>'oauth_state_sha256' = %s
+                RETURNING id
+                """,
+                (
+                    json.dumps(repositories),
+                    json.dumps(onboarding),
+                    authorized_at,
+                    tenant_id,
+                    connection_id,
+                    expected_state_sha256,
+                ),
+            ).fetchone()
+        return None if row is None else self.get_connection(tenant_id, connection_id)
+
+    def complete_azure_repos_connection_setup(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        repositories: list[dict[str, Any]],
+        coverage_plan: list[dict[str, Any]],
+        completed_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Persist exact app-verified repository UUIDs and clear candidate metadata."""
+
+        onboarding = {
+            "method": "azure_repos_entra_oauth",
+            "status": "completed",
+            "completed_at": completed_at.isoformat(),
+        }
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                UPDATE provider_connection
+                SET configuration =
+                      jsonb_set(
+                        jsonb_set(
+                          configuration - 'repository_candidates',
+                          '{repositories}', %s::jsonb, true
+                        ),
+                        '{onboarding}', %s::jsonb, true
+                      ),
+                    coverage_plan = %s::jsonb,
+                    health_state = 'unknown',
+                    updated_at = %s
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                  AND provider = 'azure_repos' AND lifecycle_state = 'active'
+                  AND configuration->'onboarding'->>'status' = 'selection_pending'
+                RETURNING id
+                """,
+                (
+                    json.dumps(repositories),
+                    json.dumps(onboarding),
+                    json.dumps(coverage_plan),
+                    completed_at,
+                    tenant_id,
+                    connection_id,
                 ),
             ).fetchone()
         return None if row is None else self.get_connection(tenant_id, connection_id)

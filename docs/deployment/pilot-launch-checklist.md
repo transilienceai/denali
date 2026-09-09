@@ -248,12 +248,16 @@ DENALI_AWS_PRINCIPAL_ARN
 DENALI_AZURE_ONBOARDING_BUCKET
 DENALI_AZURE_CLIENT_ID
 DENALI_AZURE_CLIENT_SECRET
+DENALI_AZURE_REPOS_CALLBACK_URL=https://<production-domain>/api/v1/connections/azure-repos/oauth/callback
 ```
 
 - `DENALI_AZURE_CLIENT_SECRET` is the secret; the other entries are identifiers/configuration.
 - The Cloud Shell script creates or confirms the customer tenant's local service principal and
   grants Reader only on the subscriptions the customer selects. Azure onboarding has no browser
   consent callback because the operator application requests no API permissions.
+- When Azure Repos is enabled, register the callback above, add Azure DevOps delegated `vso.code`
+  to the operator application, and have an Azure DevOps administrator add its tenant-local service
+  principal as a Basic user with read access only to the selected projects or repositories.
 
 #### Google Cloud
 
