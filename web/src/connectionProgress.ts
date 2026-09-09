@@ -50,7 +50,7 @@ export function getConnectionProgress(connection: Connection, busy: string | nul
       phase: "validating",
       eyebrow: "VALIDATION IN PROGRESS",
       title: `${provider} access is being validated`,
-      detail: "Denali is checking the declared read-only access in the background. This page refreshes automatically, and it is safe to leave and return. Evidence collection remains the next explicit step after validation.",
+      detail: "Denali is checking the declared read-only access in the background. This page refreshes automatically, and it is safe to leave and return. Healthy validation automatically continues to first evidence collection.",
       steps: [
         { label: "Access setup", state: "complete" },
         { label: "Validate access", state: "current" },

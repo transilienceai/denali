@@ -228,6 +228,15 @@ Clerk users and Organizations are instance-specific. Create development-only tes
 and memberships; do not expect production identities or Organization IDs to exist in development.
 Keep all Production-scoped Vercel variables and the `denali-production` Modal Secret unchanged.
 
+Use one stable Vercel alias as the review entrypoint for authenticated previews. Point that alias
+at the PR deployment currently under review instead of adding every generated branch URL to Clerk
+or Modal. The current review alias is
+`https://denali-dev-preview-transilience-a55654db.vercel.app`. Configure that exact origin in the
+Clerk development instance and in `CLERK_AUTHORIZED_PARTIES`, `DENALI_WEB_URL`, and
+`DENALI_CORS_ORIGINS` in the `denali-dev` Modal Secret, then redeploy `denali-dev`. Do not use a
+wildcard authorized party or CORS origin. Moving the alias to a new PR deployment does not require
+changing those values.
+
 ## 5. Acceptance and operations
 
 For two separate Clerk organizations, verify:

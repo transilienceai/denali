@@ -41,6 +41,7 @@ test("shows validation immediately after setup completion is submitted", () => {
 
   assert.equal(progress?.phase, "validating");
   assert.equal(progress?.title, "Google Cloud access is being validated");
+  assert.match(progress?.detail ?? "", /automatically continues to first evidence collection/);
   assert.deepEqual(progress?.steps.map((step) => step.state), ["complete", "current", "pending"]);
 });
 

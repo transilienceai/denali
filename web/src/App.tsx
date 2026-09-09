@@ -2499,7 +2499,7 @@ function ConnectionsPage({
       const accepted = await api.validateConnection(connection.id);
       setActionNotice(accepted.status === "already_running" ? `${connection.display_name} validation is already running.` : `${connection.display_name} validation started in the background.`);
       await waitForValidation(connection, 150);
-      setActionNotice(`${connection.display_name} validation completed. Review the result, then collect evidence when ready.`);
+      setActionNotice(`${connection.display_name} validation completed. Healthy results continue to first evidence collection automatically.`);
     } catch (cause) {
       setActionNotice(null);
       setActionError(cause instanceof Error ? cause.message : "Unable to validate connection");
@@ -2607,7 +2607,7 @@ function ConnectionsPage({
       setActionNotice(accepted.status === "already_running" ? "Azure setup is recorded and validation is already running." : "Azure setup is recorded. Validation started in the background.");
       await waitForValidation(connection, 525);
       setAzureCompletionCode((current) => ({ ...current, [connection.id]: "" }));
-      setActionNotice("Azure validation completed. Review the result, then collect evidence when ready.");
+      setActionNotice("Azure validation completed. Healthy results continue to first evidence collection automatically.");
     } catch (cause) {
       setActionNotice(null);
       setActionError(cause instanceof Error ? cause.message : "Unable to complete Azure setup");
@@ -2652,7 +2652,7 @@ function ConnectionsPage({
       const accepted = await api.completeGoogleWorkspaceSetup(connection.id);
       setActionNotice(accepted.status === "already_running" ? "Google Workspace authorization is recorded and validation is already running." : "Google Workspace authorization is recorded. Validation started in the background.");
       await waitForValidation(connection, 150);
-      setActionNotice("Google Workspace validation completed. Review the result, then collect evidence when ready.");
+      setActionNotice("Google Workspace validation completed. Healthy results continue to first evidence collection automatically.");
     } catch (cause) {
       setActionNotice(null);
       setActionError(cause instanceof Error ? cause.message : "Unable to verify Google Workspace authorization");
@@ -2705,7 +2705,7 @@ function ConnectionsPage({
       setActionNotice(accepted.status === "already_running" ? "Google Cloud setup is recorded and validation is already running." : "Google Cloud setup is recorded. Validation started in the background.");
       await waitForValidation(connection, 525);
       setGcpCompletionCode((current) => ({ ...current, [connection.id]: "" }));
-      setActionNotice("Google Cloud validation completed. Review the result, then collect evidence when ready.");
+      setActionNotice("Google Cloud validation completed. Healthy results continue to first evidence collection automatically.");
     } catch (cause) {
       setActionNotice(null);
       setActionError(cause instanceof Error ? cause.message : "Unable to complete Google Cloud setup");
