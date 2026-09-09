@@ -18,6 +18,7 @@ from denali.connections.gcp import (
     authorized_gcp_request,
     valid_gcp_project_id,
 )
+from denali.connectors.container_images import image_digests
 from denali.connectors.gcp_vertex_activity import GcpVertexActivityConnector
 from denali.domain import (
     AssertionType,
@@ -800,6 +801,7 @@ def _asset_assertions(
         "model_configuration_keys": parsed["model_configuration_keys"],
         "model_configuration": parsed["model_configuration"],
         "ai_classification": parsed["classification"],
+        "image_digests": image_digests(parsed["images"]),
     }
     cloud_assertion = AssetAssertion(
         asset=cloud_ref,

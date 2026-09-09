@@ -12,7 +12,7 @@ import os
 import re
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from time import monotonic, sleep
@@ -40,10 +40,17 @@ from denali.api.clerk_admin import (
 )
 from denali.api.collection import run_durable_collection_job
 from denali.api.evidence_import import (
+    MAX_REPORT_BYTES,
     EvidenceReportStore,
     S3EvidenceReportStore,
     encode_report,
     validate_report_pair,
+)
+from denali.api.github_oidc import (
+    GitHubActionsIdentity,
+    GitHubActionsTokenVerifier,
+    GitHubOidcAuthenticationError,
+    GitHubOidcVerifier,
 )
 from denali.api.validation import run_durable_validation_job
 from denali.connections import (
@@ -76,6 +83,7 @@ from denali.connections.aws import render_cloudformation
 from denali.connections.gcp import valid_gcp_project_id
 from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
 from denali.connectors.azure_deployments import AzureConnectionDeploymentCollector
+from denali.connectors.container_images import normalize_image_digest
 from denali.connectors.entra_connection import EntraConnectionCollector
 from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
 from denali.connectors.github_repository import GitHubRepositoryCollector
@@ -112,6 +120,10 @@ class InventoryReader(Protocol):
     ) -> dict[str, Any]: ...
 
     def list_connections(self, tenant_id: str) -> list[dict[str, Any]]: ...
+
+    def list_healthy_connection_ids(
+        self, tenant_id: str, *, provider: str, limit: int = 50
+    ) -> list[str]: ...
 
     def get_connection(self, tenant_id: str, connection_id: str) -> dict[str, Any] | None: ...
 
@@ -319,9 +331,27 @@ class InventoryReader(Protocol):
 
     def fail_vulnerability_import_job(self, job_id: str, summary: str) -> None: ...
 
-    def vulnerability_import_status(
-        self, tenant_id: str, job_id: str
+    def vulnerability_import_status(self, tenant_id: str, job_id: str) -> dict[str, Any] | None: ...
+
+    def github_ci_repository_context(
+        self, connection_id: str, *, repository_id: int, repository_full_name: str
     ) -> dict[str, Any] | None: ...
+
+    def resolve_workload_by_image_digest(
+        self, tenant_id: str, image_digest: str
+    ) -> dict[str, Any]: ...
+
+    def create_github_vulnerability_import_upload(
+        self, tenant_id: str, **values: Any
+    ) -> tuple[dict[str, Any], bool]: ...
+
+    def github_vulnerability_import_upload(
+        self, tenant_id: str, **values: Any
+    ) -> dict[str, Any] | None: ...
+
+    def queue_github_vulnerability_import_job(
+        self, tenant_id: str, **values: Any
+    ) -> tuple[dict[str, Any], bool]: ...
 
     def list_issues(
         self,
@@ -373,15 +403,11 @@ class InventoryReader(Protocol):
         offset: int = 0,
     ) -> list[dict[str, Any]]: ...
 
-    def get_runtime_detection(
-        self, tenant_id: str, detection_id: str
-    ) -> dict[str, Any] | None: ...
+    def get_runtime_detection(self, tenant_id: str, detection_id: str) -> dict[str, Any] | None: ...
 
     def runtime_detection_summary(self, tenant_id: str) -> dict[str, Any]: ...
 
-    def latest_runtime_detection_evaluations(
-        self, tenant_id: str
-    ) -> list[dict[str, Any]]: ...
+    def latest_runtime_detection_evaluations(self, tenant_id: str) -> list[dict[str, Any]]: ...
 
     def set_governance(
         self,
@@ -408,6 +434,22 @@ class VulnerabilityImportCreate(BaseModel):
     target_asset_id: UUID
     syft_report: dict[str, Any]
     grype_report: dict[str, Any]
+    authoritative: bool = True
+
+
+class EvidenceReportDeclaration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    size_bytes: int = Field(ge=1, le=MAX_REPORT_BYTES)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class GitHubVulnerabilityImportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image_digest: str = Field(pattern=r"^sha256:[0-9a-fA-F]{64}$")
+    syft: EvidenceReportDeclaration
+    grype: EvidenceReportDeclaration
     authoritative: bool = True
 
 
@@ -548,6 +590,7 @@ def create_app(
     collection_dispatcher: Callable[[str], str | None] | None = None,
     vulnerability_import_dispatcher: Callable[[str], str | None] | None = None,
     evidence_report_store: EvidenceReportStore | None = None,
+    github_actions_token_verifier: GitHubActionsTokenVerifier | None = None,
     migrate_on_start: bool = True,
 ) -> FastAPI:
     configured_dsn = os.environ.get("DENALI_DSN")
@@ -574,6 +617,13 @@ def create_app(
     configured_gcp_launcher = gcp_setup_launcher or _gcp_setup_launcher_from_environment()
     configured_github_app = github_app_client or _github_app_from_environment()
     configured_evidence_store = evidence_report_store or _evidence_store_from_environment()
+    configured_github_actions_verifier = github_actions_token_verifier
+    if (
+        configured_github_actions_verifier is None
+        and configured_auth_mode == "clerk"
+        and configured_evidence_store is not None
+    ):
+        configured_github_actions_verifier = GitHubOidcVerifier()
     onboarding_validation_timeout = (
         onboarding_validation_timeout_seconds
         if onboarding_validation_timeout_seconds is not None
@@ -610,6 +660,7 @@ def create_app(
         app.state.collection_dispatcher = collection_dispatcher
         app.state.vulnerability_import_dispatcher = vulnerability_import_dispatcher
         app.state.evidence_report_store = configured_evidence_store
+        app.state.github_actions_token_verifier = configured_github_actions_verifier
         app.state.connection_validator = connection_validator or AwsConnectionValidator()
         app.state.azure_connection_validator = (
             azure_connection_validator or AzureConnectionValidator()
@@ -806,16 +857,11 @@ def create_app(
                 while True:
                     validation = validator.validate(target)
                     credentials_pending = (
-                        wait_for_credentials
-                        and validation["credential_state"] != "passed"
+                        wait_for_credentials and validation["credential_state"] != "passed"
                     )
-                    coverage_pending = (
-                        wait_for_healthy and validation["health_state"] != "healthy"
-                    )
+                    coverage_pending = wait_for_healthy and validation["health_state"] != "healthy"
                     if not (credentials_pending or coverage_pending) or monotonic() >= deadline:
-                        repo.record_connection_validation(
-                            current_tenant, connection_id, validation
-                        )
+                        repo.record_connection_validation(current_tenant, connection_id, validation)
                         return
                     sleep(min(retry_seconds, max(0, deadline - monotonic())))
             finally:
@@ -867,9 +913,7 @@ def create_app(
                         "Unable to dispatch collection worker.",
                         max_attempts=1,
                     )
-                raise HTTPException(
-                    status_code=503, detail=dispatch_failure_detail
-                ) from error
+                raise HTTPException(status_code=503, detail=dispatch_failure_detail) from error
         else:
             background_tasks.add_task(
                 run_durable_collection_job,
@@ -1007,9 +1051,7 @@ def create_app(
                 }
             finally:
                 with collection_lock:
-                    request.app.state.gcp_deployment_collection_results[
-                        connection_key
-                    ] = result
+                    request.app.state.gcp_deployment_collection_results[connection_key] = result
                     active_collections.discard(connection_key)
 
         background_tasks.add_task(run_collection)
@@ -1065,9 +1107,7 @@ def create_app(
                 }
             finally:
                 with collection_lock:
-                    request.app.state.aws_deployment_collection_results[
-                        connection_key
-                    ] = result
+                    request.app.state.aws_deployment_collection_results[connection_key] = result
                     active_collections.discard(connection_key)
 
         background_tasks.add_task(run_collection)
@@ -1123,9 +1163,7 @@ def create_app(
                 }
             finally:
                 with collection_lock:
-                    request.app.state.azure_deployment_collection_results[
-                        connection_key
-                    ] = result
+                    request.app.state.azure_deployment_collection_results[connection_key] = result
                     active_collections.discard(connection_key)
 
         background_tasks.add_task(run_collection)
@@ -1174,9 +1212,7 @@ def create_app(
                     email=email,
                     role=invitation.role,
                 )
-                results.append(
-                    {"email": email, "status": "sent", "invitation_id": invitation_id}
-                )
+                results.append({"email": email, "status": "sent", "invitation_id": invitation_id})
             except ClerkAdminError:
                 results.append(
                     {
@@ -1228,9 +1264,7 @@ def create_app(
     def list_connections(request: Request) -> dict[str, Any]:
         repo, current_tenant = _context(request)
         rows = repo.list_connections(current_tenant)
-        return {
-            "items": [_with_validation_state(request, current_tenant, row) for row in rows]
-        }
+        return {"items": [_with_validation_state(request, current_tenant, row) for row in rows]}
 
     @app.post("/v1/connections", status_code=201)
     def create_connection(request: Request, connection: ConnectionCreate) -> dict[str, Any]:
@@ -1489,9 +1523,7 @@ def create_app(
         return _with_validation_state(request, current_tenant, row)
 
     @app.get("/v1/connections/{connection_id}/aws/cloudformation.yaml")
-    def aws_connection_cloudformation(
-        request: Request, connection_id: UUID
-    ) -> PlainTextResponse:
+    def aws_connection_cloudformation(request: Request, connection_id: UUID) -> PlainTextResponse:
         repo, current_tenant = _context(request)
         target = repo.get_connection_validation_target(current_tenant, str(connection_id))
         if target is None or target["provider"] != "aws":
@@ -1660,9 +1692,10 @@ def create_app(
             ) from error
         if datetime.now(UTC) > expires_at:
             raise HTTPException(status_code=409, detail="Azure setup completion code has expired")
-        if str(payload.get("tenant_id", "")).lower() != target["configuration"][
-            "tenant_id"
-        ].lower():
+        if (
+            str(payload.get("tenant_id", "")).lower()
+            != target["configuration"]["tenant_id"].lower()
+        ):
             raise HTTPException(status_code=409, detail="Azure tenant does not match the plan")
         service_principal_id = str(payload.get("service_principal_id", ""))
         if not _valid_uuid_text(service_principal_id):
@@ -1778,9 +1811,7 @@ def create_app(
         reason = None
         if error:
             reason = (
-                "access_denied"
-                if error.casefold() == "access_denied"
-                else "microsoft_rejected"
+                "access_denied" if error.casefold() == "access_denied" else "microsoft_rejected"
             )
         elif returned_tenant and returned_tenant != expected_entra_tenant:
             reason = "tenant_mismatch"
@@ -1818,9 +1849,7 @@ def create_app(
             connection_id,
             expected_state_sha256=expected_hash,
             entra_tenant_id=expected_entra_tenant,
-            coverage_plan=entra_coverage_plan(
-                target["declared_scopes"], expected_entra_tenant
-            ),
+            coverage_plan=entra_coverage_plan(target["declared_scopes"], expected_entra_tenant),
             completed_at=completed_at,
         )
         if updated is None:
@@ -2154,9 +2183,9 @@ def create_app(
                 status_code=409,
                 detail="complete GitHub App installation before validation",
             )
-        if target["provider"] == "entra" and not target["configuration"].get(
-            "onboarding", {}
-        ).get("completed_at"):
+        if target["provider"] == "entra" and not target["configuration"].get("onboarding", {}).get(
+            "completed_at"
+        ):
             raise HTTPException(
                 status_code=409,
                 detail="complete Microsoft Entra admin consent before validation",
@@ -2187,9 +2216,7 @@ def create_app(
                 status_code=409,
                 detail="complete Microsoft Entra admin consent before collection",
             )
-        return queue_entra_collection(
-            request, background_tasks, repo, current_tenant, target
-        )
+        return queue_entra_collection(request, background_tasks, repo, current_tenant, target)
 
     @app.post("/v1/connections/{connection_id}/github/collect", status_code=202)
     def collect_github_repository_source(
@@ -2208,9 +2235,7 @@ def create_app(
                 status_code=409,
                 detail="complete GitHub App installation before collecting source",
             )
-        return queue_github_collection(
-            request, background_tasks, repo, current_tenant, target
-        )
+        return queue_github_collection(request, background_tasks, repo, current_tenant, target)
 
     @app.post(
         "/v1/connections/{connection_id}/aws/collect-deployments",
@@ -2302,11 +2327,14 @@ def create_app(
         durable_collection = collection_kind_by_provider.get(str(target["provider"]))
         if collection_status is not None and durable_collection is not None:
             collection_kind, collection_label = durable_collection
-            if collection_status(
-                current_tenant,
-                str(connection_id),
-                collection_kind=collection_kind,
-            )["state"] == "running":
+            if (
+                collection_status(
+                    current_tenant,
+                    str(connection_id),
+                    collection_kind=collection_kind,
+                )["state"]
+                == "running"
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -2325,8 +2353,7 @@ def create_app(
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "wait for the active GCP deployment collection to finish "
-                        "before disabling"
+                        "wait for the active GCP deployment collection to finish before disabling"
                     ),
                 )
         with request.app.state.azure_deployment_collection_lock:
@@ -2334,8 +2361,7 @@ def create_app(
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "wait for the active Azure deployment collection to finish "
-                        "before disabling"
+                        "wait for the active Azure deployment collection to finish before disabling"
                     ),
                 )
         with request.app.state.aws_deployment_collection_lock:
@@ -2343,8 +2369,7 @@ def create_app(
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "wait for the active AWS deployment collection to finish "
-                        "before disabling"
+                        "wait for the active AWS deployment collection to finish before disabling"
                     ),
                 )
         row = repo.disable_connection(current_tenant, str(connection_id))
@@ -2464,6 +2489,262 @@ def create_app(
     def vulnerability_summary(request: Request) -> dict[str, Any]:
         repo, current_tenant = _context(request)
         return repo.vulnerability_summary(current_tenant)
+
+    @app.post("/v1/ci/github/{connection_id}/vulnerability-imports", status_code=201)
+    def create_github_vulnerability_import(
+        request: Request,
+        response: Response,
+        background_tasks: BackgroundTasks,
+        connection_id: UUID,
+        imported: GitHubVulnerabilityImportCreate,
+    ) -> dict[str, Any]:
+        repo, current_tenant, identity = _github_ci_context(request, str(connection_id))
+        response.headers["Cache-Control"] = "no-store"
+        report_store = request.app.state.evidence_report_store
+        dispatcher = request.app.state.vulnerability_import_dispatcher
+        if report_store is None or dispatcher is None:
+            raise HTTPException(
+                status_code=503,
+                detail="automatic vulnerability evidence import is not configured",
+            )
+        try:
+            image_digest = normalize_image_digest(imported.image_digest)
+            target = repo.resolve_workload_by_image_digest(current_tenant, image_digest)
+        except ValueError as error:
+            if str(error).startswith("No active cloud-observed workload"):
+                for provider, collection_kind, collector in (
+                    ("aws", "aws_deployments", request.app.state.aws_deployment_collector),
+                    ("gcp", "gcp_deployments", request.app.state.gcp_deployment_collector),
+                    (
+                        "azure",
+                        "azure_deployments",
+                        request.app.state.azure_deployment_collector,
+                    ),
+                ):
+                    for provider_connection_id in repo.list_healthy_connection_ids(
+                        current_tenant,
+                        provider=provider,
+                        limit=20,
+                    ):
+                        provider_connection = repo.get_connection_validation_target(
+                            current_tenant, provider_connection_id
+                        )
+                        if provider_connection is not None:
+                            queue_durable_collection(
+                                request,
+                                background_tasks,
+                                repo,
+                                current_tenant,
+                                provider_connection,
+                                collection_kind=collection_kind,
+                                collector=collector,
+                                unavailable_detail="deployment collection is unavailable",
+                                dispatch_failure_detail=(
+                                    "deployment collection could not be refreshed"
+                                ),
+                            )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The deployed image is not visible yet. Denali started a fresh cloud "
+                        "collection; retry this request shortly."
+                    ),
+                    headers={"Retry-After": "20"},
+                ) from error
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+        job_id = str(uuid4())
+        object_keys = report_store.staged_object_keys(
+            tenant_id=current_tenant,
+            job_id=job_id,
+        )
+        expires_at = datetime.now(UTC) + timedelta(minutes=10)
+        try:
+            job, reused = repo.create_github_vulnerability_import_upload(
+                current_tenant,
+                job_id=job_id,
+                target_asset_id=str(target["id"]),
+                source_connection_id=str(connection_id),
+                source_repository_id=identity.repository_id,
+                source_run_id=identity.run_id,
+                source_run_attempt=identity.run_attempt,
+                source_workflow_sha=identity.workflow_sha,
+                source_image_digest=image_digest,
+                syft_object_key=object_keys["syft"],
+                grype_object_key=object_keys["grype"],
+                expected_syft_bytes=imported.syft.size_bytes,
+                expected_grype_bytes=imported.grype.size_bytes,
+                expected_syft_sha256=imported.syft.sha256,
+                expected_grype_sha256=imported.grype.sha256,
+                staging_expires_at=expires_at,
+                authoritative=imported.authoritative,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+        if reused:
+            expected = (
+                ("target_asset_id", str(target["id"])),
+                ("expected_syft_bytes", imported.syft.size_bytes),
+                ("expected_grype_bytes", imported.grype.size_bytes),
+                ("expected_syft_sha256", imported.syft.sha256),
+                ("expected_grype_sha256", imported.grype.sha256),
+            )
+            if any(str(job.get(name)) != str(value) for name, value in expected):
+                raise HTTPException(
+                    status_code=409,
+                    detail="this workflow attempt already declared different evidence",
+                )
+            if job["state"] != "staging":
+                if job["state"] in {"queued", "running", "succeeded"}:
+                    return {"id": str(job["id"]), "state": str(job["state"]), "uploads": {}}
+                raise HTTPException(
+                    status_code=409,
+                    detail="this workflow attempt can no longer upload evidence",
+                )
+            expires_at = job["staging_expires_at"]
+            object_keys = {
+                "syft": str(job["syft_object_key"]),
+                "grype": str(job["grype_object_key"]),
+            }
+
+        lifetime = max(60, min(600, int((expires_at - datetime.now(UTC)).total_seconds())))
+        uploads = {
+            "syft": report_store.create_upload(
+                object_key=object_keys["syft"],
+                sha256_hex=imported.syft.sha256,
+                expires_in_seconds=lifetime,
+            ),
+            "grype": report_store.create_upload(
+                object_key=object_keys["grype"],
+                sha256_hex=imported.grype.sha256,
+                expires_in_seconds=lifetime,
+            ),
+        }
+        logger.info(
+            "GitHub Actions vulnerability evidence upload reserved",
+            extra={
+                "tenant_id": current_tenant,
+                "connection_id": str(connection_id),
+                "job_id": str(job["id"]),
+                "repository_id": identity.repository_id,
+                "run_id": identity.run_id,
+            },
+        )
+        return {
+            "id": str(job["id"]),
+            "state": str(job["state"]),
+            "expires_at": expires_at.isoformat(),
+            "uploads": uploads,
+        }
+
+    @app.post(
+        "/v1/ci/github/{connection_id}/vulnerability-imports/{job_id}/complete",
+        status_code=202,
+    )
+    def complete_github_vulnerability_import(
+        request: Request,
+        connection_id: UUID,
+        job_id: UUID,
+    ) -> dict[str, Any]:
+        repo, current_tenant, identity = _github_ci_context(request, str(connection_id))
+        report_store = request.app.state.evidence_report_store
+        dispatcher = request.app.state.vulnerability_import_dispatcher
+        if report_store is None or dispatcher is None:
+            raise HTTPException(
+                status_code=503,
+                detail="automatic vulnerability evidence import is not configured",
+            )
+        source = {
+            "source_connection_id": str(connection_id),
+            "source_repository_id": identity.repository_id,
+            "source_run_id": identity.run_id,
+            "source_run_attempt": identity.run_attempt,
+            "source_workflow_sha": identity.workflow_sha,
+        }
+        job = repo.github_vulnerability_import_upload(
+            current_tenant,
+            job_id=str(job_id),
+            **source,
+        )
+        if job is None:
+            raise HTTPException(status_code=404, detail="evidence upload reservation not found")
+        if job["state"] in {"queued", "running", "succeeded"}:
+            return {"id": str(job["id"]), "state": str(job["state"])}
+        if job["state"] != "staging":
+            raise HTTPException(status_code=409, detail="evidence upload reservation is inactive")
+        try:
+            report_store.verify_upload(
+                object_key=str(job["syft_object_key"]),
+                size_bytes=int(job["expected_syft_bytes"]),
+                sha256_hex=str(job["expected_syft_sha256"]),
+            )
+            report_store.verify_upload(
+                object_key=str(job["grype_object_key"]),
+                size_bytes=int(job["expected_grype_bytes"]),
+                sha256_hex=str(job["expected_grype_sha256"]),
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=409,
+                detail="both evidence reports must finish uploading before completion",
+            ) from error
+        try:
+            queued, should_dispatch = repo.queue_github_vulnerability_import_job(
+                current_tenant,
+                job_id=str(job_id),
+                **source,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if should_dispatch:
+            try:
+                call_id = dispatcher(str(job_id))
+                if call_id:
+                    repo.set_vulnerability_import_call_id(str(job_id), call_id)
+            except Exception as error:
+                repo.fail_vulnerability_import_job(
+                    str(job_id), "Unable to dispatch evidence import worker."
+                )
+                report_store.delete_documents(
+                    (str(job["syft_object_key"]), str(job["grype_object_key"]))
+                )
+                raise HTTPException(
+                    status_code=503, detail="evidence import worker unavailable"
+                ) from error
+        return {"id": str(queued["id"]), "state": str(queued["state"])}
+
+    @app.get("/v1/ci/github/{connection_id}/vulnerability-imports/{job_id}")
+    def github_vulnerability_import_status(
+        request: Request,
+        connection_id: UUID,
+        job_id: UUID,
+    ) -> dict[str, Any]:
+        repo, current_tenant, identity = _github_ci_context(request, str(connection_id))
+        job = repo.github_vulnerability_import_upload(
+            current_tenant,
+            job_id=str(job_id),
+            source_connection_id=str(connection_id),
+            source_repository_id=identity.repository_id,
+            source_run_id=identity.run_id,
+            source_run_attempt=identity.run_attempt,
+            source_workflow_sha=identity.workflow_sha,
+        )
+        if job is None:
+            raise HTTPException(status_code=404, detail="vulnerability import not found")
+        return {
+            "id": str(job["id"]),
+            "target_asset_id": str(job["target_asset_id"]),
+            "state": str(job["state"]),
+            "attempt_count": int(job.get("attempt_count") or 0),
+            "result": job.get("result"),
+            "error_summary": job.get("error_summary"),
+            "created_at": job.get("created_at"),
+            "started_at": job.get("started_at"),
+            "completed_at": job.get("completed_at"),
+        }
 
     @app.post("/v1/vulnerabilities/imports", status_code=202)
     def create_vulnerability_import(
@@ -2777,14 +3058,10 @@ def _context_for_tenant(request: Request, tenant_id: str) -> tuple[InventoryRead
     return repository, normalized
 
 
-def _with_validation_state(
-    request: Request, tenant_id: str, row: dict[str, Any]
-) -> dict[str, Any]:
+def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
     connection_key = (tenant_id, str(result["id"]))
-    result["validation_state"] = _connection_validation_state(
-        request, tenant_id, str(result["id"])
-    )
+    result["validation_state"] = _connection_validation_state(request, tenant_id, str(result["id"]))
     result["source_collection_state"] = "idle"
     result["last_source_collection"] = None
     result["evidence_collection_state"] = "idle"
@@ -2799,9 +3076,7 @@ def _with_validation_state(
         "gcp": ("gcp_deployments", "deployment"),
         "github": ("github_source", "source"),
     }
-    collection_status = getattr(
-        request.app.state.repository, "connection_collection_status", None
-    )
+    collection_status = getattr(request.app.state.repository, "connection_collection_status", None)
     durable_collection = collection_kind_by_provider.get(str(result["provider"]))
     if collection_status is not None and durable_collection is not None:
         collection_kind, field_prefix = durable_collection
@@ -2824,28 +3099,20 @@ def _with_validation_state(
         result["source_collection_state"] = "running" if collecting else "idle"
         result["last_source_collection"] = collection_result
     with request.app.state.gcp_deployment_collection_lock:
-        gcp_collecting = (
-            connection_key in request.app.state.active_gcp_deployment_collections
-        )
+        gcp_collecting = connection_key in request.app.state.active_gcp_deployment_collections
         gcp_collection_result = request.app.state.gcp_deployment_collection_results.get(
             connection_key
         )
     if result["provider"] == "gcp":
-        result["deployment_collection_state"] = (
-            "running" if gcp_collecting else "idle"
-        )
+        result["deployment_collection_state"] = "running" if gcp_collecting else "idle"
         result["last_deployment_collection"] = gcp_collection_result
     with request.app.state.azure_deployment_collection_lock:
-        azure_collecting = (
-            connection_key in request.app.state.active_azure_deployment_collections
-        )
+        azure_collecting = connection_key in request.app.state.active_azure_deployment_collections
         azure_collection_result = request.app.state.azure_deployment_collection_results.get(
             connection_key
         )
     if result["provider"] == "azure":
-        result["deployment_collection_state"] = (
-            "running" if azure_collecting else "idle"
-        )
+        result["deployment_collection_state"] = "running" if azure_collecting else "idle"
         result["last_deployment_collection"] = azure_collection_result
     with request.app.state.aws_deployment_collection_lock:
         aws_collecting = connection_key in request.app.state.active_aws_deployment_collections
@@ -2853,44 +3120,33 @@ def _with_validation_state(
             connection_key
         )
     if result["provider"] == "aws":
-        result["deployment_collection_state"] = (
-            "running" if aws_collecting else "idle"
-        )
+        result["deployment_collection_state"] = "running" if aws_collecting else "idle"
         result["last_deployment_collection"] = aws_collection_result
     result["setup_capabilities"] = _connection_setup_capabilities(request, result)
     return result
 
 
-def _connection_setup_capabilities(
-    request: Request, result: dict[str, Any]
-) -> dict[str, bool]:
+def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> dict[str, bool]:
     return {
         "cloudformation_quick_create": (
-            result["provider"] == "aws"
-            and request.app.state.cloudformation_launcher is not None
+            result["provider"] == "aws" and request.app.state.cloudformation_launcher is not None
         ),
         "azure_cloud_shell": (
-            result["provider"] == "azure"
-            and request.app.state.azure_setup_launcher is not None
+            result["provider"] == "azure" and request.app.state.azure_setup_launcher is not None
         ),
         "gcp_cloud_shell": (
-            result["provider"] == "gcp"
-            and request.app.state.gcp_setup_launcher is not None
+            result["provider"] == "gcp" and request.app.state.gcp_setup_launcher is not None
         ),
         "github_app": (
-            result["provider"] == "github"
-            and request.app.state.github_app_client is not None
+            result["provider"] == "github" and request.app.state.github_app_client is not None
         ),
         "entra_admin_consent": (
-            result["provider"] == "entra"
-            and request.app.state.entra_consent_client is not None
+            result["provider"] == "entra" and request.app.state.entra_consent_client is not None
         ),
     }
 
 
-def _connection_validation_state(
-    request: Request, tenant_id: str, connection_id: str
-) -> str:
+def _connection_validation_state(request: Request, tenant_id: str, connection_id: str) -> str:
     repository = request.app.state.repository
     durable_state = getattr(repository, "connection_validation_job_state", None)
     if durable_state is not None:
@@ -2916,7 +3172,70 @@ def _is_public_request(request: Request) -> bool:
         "/v1/connections/entra/setup/callback",
     }:
         return True
+    if re.fullmatch(
+        r"/v1/ci/github/[0-9a-fA-F-]{36}/vulnerability-imports"
+        r"(?:/[0-9a-fA-F-]{36}(?:/complete)?)?",
+        request.url.path,
+    ):
+        return True
     return False
+
+
+def _github_ci_context(
+    request: Request, connection_id: str
+) -> tuple[InventoryReader, str, GitHubActionsIdentity]:
+    repository = request.app.state.repository
+    verifier = request.app.state.github_actions_token_verifier
+    if repository is None:
+        raise HTTPException(status_code=503, detail="Denali storage is not configured")
+    if verifier is None:
+        raise HTTPException(status_code=503, detail="GitHub Actions authentication unavailable")
+    authorization = request.headers.get("Authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+    if separator != " " or scheme.casefold() != "bearer" or not token.strip():
+        raise HTTPException(
+            status_code=401,
+            detail="GitHub Actions identity token is required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    audience = _github_ci_audience(connection_id)
+    try:
+        identity = verifier.verify(token.strip(), audience=audience)
+    except GitHubOidcAuthenticationError as error:
+        raise HTTPException(
+            status_code=401,
+            detail=str(error),
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from error
+    context = repository.github_ci_repository_context(
+        connection_id,
+        repository_id=identity.repository_id,
+        repository_full_name=identity.repository,
+    )
+    if context is None or int(context["repository_owner_id"]) != identity.repository_owner_id:
+        raise HTTPException(
+            status_code=403,
+            detail="workflow repository is not selected on this GitHub connection",
+        )
+    default_branch = str(context.get("default_branch") or "")
+    expected_ref = f"refs/heads/{default_branch}"
+    expected_workflow_prefix = f"{identity.repository}/.github/workflows/"
+    if (
+        not default_branch
+        or identity.ref != expected_ref
+        or not identity.workflow_ref.startswith(expected_workflow_prefix)
+        or not identity.workflow_ref.endswith(f"@{expected_ref}")
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="vulnerability evidence must come from a workflow on the default branch",
+        )
+    return repository, str(context["tenant_id"]), identity
+
+
+def _github_ci_audience(connection_id: str) -> str:
+    web_url = os.environ.get("DENALI_WEB_URL", "http://127.0.0.1:3080").rstrip("/")
+    return f"{web_url}/api/v1/ci/github/{connection_id}"
 
 
 def _requires_admin(request: Request) -> bool:
@@ -3008,8 +3327,7 @@ def _gcp_setup_launcher_from_environment() -> GcpSetupScriptLauncher | None:
     )
 
 
-def _gcp_principal_provisioner_from_environment(
-) -> GcpConnectionPrincipalProvisioner | None:
+def _gcp_principal_provisioner_from_environment() -> GcpConnectionPrincipalProvisioner | None:
     operator_project_id = os.environ.get("DENALI_GCP_OPERATOR_PROJECT_ID")
     if not operator_project_id:
         return None
@@ -3112,9 +3430,7 @@ def _gcp_projects_from_completion(payload: dict[str, Any]) -> list[dict[str, str
     seen: set[str] = set()
     for item in raw_projects:
         if not isinstance(item, dict):
-            raise HTTPException(
-                status_code=422, detail="Google Cloud project selection is invalid"
-            )
+            raise HTTPException(status_code=422, detail="Google Cloud project selection is invalid")
         project_id = str(item.get("id", ""))
         name = str(item.get("name", "")).strip()
         project_number = str(item.get("number", ""))
@@ -3125,9 +3441,7 @@ def _gcp_projects_from_completion(payload: dict[str, Any]) -> list[dict[str, str
             or not project_number.isdigit()
             or not 6 <= len(project_number) <= 30
         ):
-            raise HTTPException(
-                status_code=422, detail="Google Cloud project selection is invalid"
-            )
+            raise HTTPException(status_code=422, detail="Google Cloud project selection is invalid")
         if project_id not in seen:
             seen.add(project_id)
             projects.append({"id": project_id, "name": name, "number": project_number})
@@ -3187,9 +3501,7 @@ def _require_current_setup_expiry(
         raise HTTPException(status_code=409, detail=detail)
 
 
-def _bounded_environment_integer(
-    name: str, *, default: int, minimum: int, maximum: int
-) -> int:
+def _bounded_environment_integer(name: str, *, default: int, minimum: int, maximum: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
         return default

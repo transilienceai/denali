@@ -1298,6 +1298,7 @@ function Vulnerabilities({
       <VulnerabilityMetric icon={ShieldCheck} tone="fixable" label="Fix available" value={metricValue(fixable)} detail={metricDetail} />
       <VulnerabilityMetric icon={Bug} tone="exploit" label="Exploit evidence" value={metricValue(exploited)} detail={metricDetail} />
     </section>
+    {!assessed && <section className="vulnerability-automation-note"><ShieldCheck /><div><strong>Waiting for automatic deployment evidence</strong><p>Connected repository workflows can submit a Syft SBOM and Grype scan after deployment. Denali links the pair only when its immutable image digest exactly matches a workload independently observed in the cloud—no workload selection is required.</p></div></section>}
     {canWrite && workloads.length > 0 && (
       <VulnerabilityImportPanel workloads={workloads} onChanged={onChanged} />
     )}
@@ -1312,7 +1313,7 @@ function Vulnerabilities({
       <div className="vulnerabilities-table" role="table" aria-label="AI vulnerabilities">
         <div className="vulnerabilities-table-head" role="row"><span>Vulnerability</span><span>Severity</span><span>Component</span><span>Fix</span><span>Scanner</span><span>Last seen</span><span /></div>
         {filtered.map((item) => <VulnerabilityTableRow key={item.id} item={item} onClick={() => onOpenVulnerability(item.id)} />)}
-        {filtered.length === 0 && <div className="empty-state"><ShieldCheck /><strong>{vulnerabilities.length === 0 ? "No vulnerability assessment has been imported" : "No vulnerabilities match these filters"}</strong><span>{vulnerabilities.length === 0 ? "Connect a CI-generated Syft SBOM and Grype JSON report for each deployed artifact." : "Reset the filters or include resolved vulnerabilities."}</span></div>}
+        {filtered.length === 0 && <div className="empty-state"><ShieldCheck /><strong>{vulnerabilities.length === 0 ? "No deployed image has been assessed yet" : "No vulnerabilities match these filters"}</strong><span>{vulnerabilities.length === 0 ? "Evidence will appear here after a connected deployment workflow scans an exact cloud-observed image." : "Reset the filters or include resolved vulnerabilities."}</span></div>}
       </div>
     </section>
     <p className="fixture-note"><ShieldCheck size={15} /> A package match is evidence, not certainty. Scanner match method, Denali-derived confidence, database version, and component correlation stay visible.</p>
@@ -1404,10 +1405,11 @@ function VulnerabilityImportPanel({
   }
 
   return (
-    <section className="panel vulnerability-import-panel">
+    <details className="panel vulnerability-import-panel">
+      <summary><span><strong>Advanced: import scanner evidence manually</strong><small>Use this recovery path only when a deployment workflow cannot submit its scan.</small></span><ChevronRight /></summary>
       <div className="vulnerability-import-copy">
-        <span className="eyebrow">IMPORT SCANNER EVIDENCE</span>
-        <h3>Attach a CI scan to an observed workload</h3>
+        <span className="eyebrow">MANUAL RECOVERY</span>
+        <h3>Attach an existing scanner pair</h3>
         <p>Upload native Syft and Grype JSON generated for the same exact deployed artifact. Denali verifies that both reports identify the same container image before attaching their evidence.</p>
       </div>
       <div className="vulnerability-import-fields">
@@ -1421,7 +1423,7 @@ function VulnerabilityImportPanel({
       </div>
       {message && <div className="vulnerability-import-status complete"><CircleCheck />{message}</div>}
       {error && <div className="vulnerability-import-status error"><CircleAlert />{error}</div>}
-    </section>
+    </details>
   );
 }
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -60,9 +60,7 @@ END
 _TENANT_EVIDENCE_LOCK_NAMESPACE = "denali-tenant-evidence"
 
 
-def _lock_tenant_evidence_mutation(
-    connection: psycopg.Connection[Any], tenant_id: str
-) -> None:
+def _lock_tenant_evidence_mutation(connection: psycopg.Connection[Any], tenant_id: str) -> None:
     """Serialize one tenant's evidence writes within the caller's transaction."""
 
     connection.execute(
@@ -89,9 +87,7 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
     elif credential_type == "gcp_service_account":
         credential_reference["principal_email"] = internal_reference["principal_email"]
         if internal_reference.get("principal_unique_id"):
-            credential_reference["principal_unique_id"] = internal_reference[
-                "principal_unique_id"
-            ]
+            credential_reference["principal_unique_id"] = internal_reference["principal_unique_id"]
     elif credential_type == "github_app_installation":
         credential_reference["app_id"] = internal_reference["app_id"]
         credential_reference["app_slug"] = internal_reference["app_slug"]
@@ -113,11 +109,7 @@ def _deployment_identity_from_attributes(
 
     # Preserve eligibility for AWS observations written before the shared identity
     # contract existed. New provider collectors must emit the explicit fields above.
-    if (
-        provider == "aws"
-        and service in {"lambda", "ecs"}
-        and not isinstance(raw_identifiers, dict)
-    ):
+    if provider == "aws" and service in {"lambda", "ecs"} and not isinstance(raw_identifiers, dict):
         logical_id = attributes.get("logical_id")
         if not isinstance(logical_id, str) or not logical_id:
             return None
@@ -153,9 +145,7 @@ def _deployment_identity_from_attributes(
         for value in values:
             if not isinstance(value, str) or not value:
                 return None
-            identifiers.append(
-                {"name": name, "value": value, "comparison": "exact"}
-            )
+            identifiers.append({"name": name, "value": value, "comparison": "exact"})
     if not identifiers:
         return None
     return {
@@ -630,12 +620,8 @@ class PostgresInventoryRepository:
                     connection, tenant_id, ("vertex_cloud_audit_activity",)
                 )
                 evaluations = (
-                    evaluate_repeated_failed_ai_signins(
-                        snapshot, coverage_state=sign_in_coverage
-                    ),
-                    evaluate_unreviewed_ai_consent(
-                        snapshot, coverage_state=consent_coverage
-                    ),
+                    evaluate_repeated_failed_ai_signins(snapshot, coverage_state=sign_in_coverage),
+                    evaluate_unreviewed_ai_consent(snapshot, coverage_state=consent_coverage),
                     evaluate_unreviewed_model_invocation(
                         snapshot, coverage_state=model_activity_coverage
                     ),
@@ -740,9 +726,7 @@ class PostgresInventoryRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_runtime_detection(
-        self, tenant_id: str, detection_id: str
-    ) -> dict[str, Any] | None:
+    def get_runtime_detection(self, tenant_id: str, detection_id: str) -> dict[str, Any] | None:
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             detection = connection.execute(
                 """
@@ -1215,9 +1199,7 @@ class PostgresInventoryRepository:
                         """,
                         (tenant_id, evaluation.rule_uid),
                     ).fetchall()
-                    missing = [
-                        row for row in existing if row["correlation_key"] not in active_keys
-                    ]
+                    missing = [row for row in existing if row["correlation_key"] not in active_keys]
                     for row in missing:
                         contributors = connection.execute(
                             """
@@ -1241,13 +1223,9 @@ class PostgresInventoryRepository:
                             (tenant_id, row["id"], tenant_id, row["id"]),
                         ).fetchone()
                         current_contributor = bool(
-                            contributors["findings_open"]
-                            or contributors["detections_open"]
+                            contributors["findings_open"] or contributors["detections_open"]
                         )
-                        if (
-                            current_contributor
-                            and evaluation.state is not CoverageState.COMPLETE
-                        ):
+                        if current_contributor and evaluation.state is not CoverageState.COMPLETE:
                             state = "unknown"
                             reason = "correlation_incomplete"
                         elif contributors["findings_open"] is False:
@@ -1310,9 +1288,7 @@ class PostgresInventoryRepository:
         return {
             "confirmed_issues": sum(len(item.candidates) for item in evaluations),
             "evaluation_state": aggregate_state.value,
-            "incomplete_candidates": sum(
-                item.incomplete_candidates for item in evaluations
-            ),
+            "incomplete_candidates": sum(item.incomplete_candidates for item in evaluations),
             "ambiguous_resource_references": sum(
                 item.ambiguous_resource_references for item in evaluations
             ),
@@ -2179,9 +2155,7 @@ class PostgresInventoryRepository:
     def connection_validation_job_state(self, tenant_id: str, connection_id: str) -> str:
         return str(self.connection_validation_status(tenant_id, connection_id)["state"])
 
-    def connection_validation_status(
-        self, tenant_id: str, connection_id: str
-    ) -> dict[str, Any]:
+    def connection_validation_status(self, tenant_id: str, connection_id: str) -> dict[str, Any]:
         """Return active and latest terminal validation-job state without validation data."""
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
@@ -2330,9 +2304,7 @@ class PostgresInventoryRepository:
                 (summary[:500], job_id),
             )
 
-    def complete_connection_collection_job(
-        self, job_id: str, result: dict[str, Any]
-    ) -> None:
+    def complete_connection_collection_job(self, job_id: str, result: dict[str, Any]) -> None:
         with psycopg.connect(self._dsn) as connection:
             connection.execute(
                 """
@@ -2470,6 +2442,294 @@ class PostgresInventoryRepository:
             raise ValueError("target workload is unavailable or already has an active import")
         return dict(row)
 
+    def github_ci_repository_context(
+        self,
+        connection_id: str,
+        *,
+        repository_id: int,
+        repository_full_name: str,
+    ) -> dict[str, Any] | None:
+        """Resolve a CI identity through one healthy GitHub connection and selected repository."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                SELECT c.tenant_id, c.id AS connection_id,
+                       selected.repository_id, selected.repository_full_name,
+                       selected.repository_owner_id, selected.default_branch
+                FROM provider_connection c
+                CROSS JOIN LATERAL (
+                    SELECT (repository->>'id')::bigint AS repository_id,
+                           repository->>'full_name' AS repository_full_name,
+                           (repository->>'owner_id')::bigint AS repository_owner_id,
+                           repository->>'default_branch' AS default_branch
+                    FROM jsonb_array_elements(c.configuration->'repositories') repository
+                    WHERE repository->>'id' ~ '^[0-9]+$'
+                      AND repository->>'owner_id' ~ '^[0-9]+$'
+                      AND (repository->>'id')::bigint = %s
+                      AND lower(repository->>'full_name') = lower(%s)
+                    LIMIT 1
+                ) selected
+                WHERE c.id = %s::uuid AND c.provider = 'github'
+                  AND c.lifecycle_state = 'active' AND c.health_state = 'healthy'
+                """,
+                (repository_id, repository_full_name, connection_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def resolve_workload_by_image_digest(self, tenant_id: str, image_digest: str) -> dict[str, Any]:
+        """Resolve one independently observed workload from an immutable image digest."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT a.id, a.natural_key, aa.display_name
+                FROM asset a
+                JOIN asset_assertion aa
+                  ON aa.tenant_id = a.tenant_id AND aa.asset_id = a.id
+                WHERE a.tenant_id = %s::uuid AND a.kind = 'ai_workload'
+                  AND a.lifecycle_state = 'active'
+                  AND aa.lifecycle_state = 'active' AND aa.withdrawn_at IS NULL
+                  AND aa.assertion_type = 'observed' AND aa.confidence = 1.0
+                  AND aa.connector_id IN (
+                    'denali.aws_deployments',
+                    'denali.gcp_deployments',
+                    'denali.azure_deployments'
+                  )
+                  AND aa.attributes->'image_digests' ? %s
+                ORDER BY a.id
+                LIMIT 2
+                """,
+                (tenant_id, image_digest),
+            ).fetchall()
+        if not rows:
+            raise ValueError(
+                "No active cloud-observed workload has this exact image digest. "
+                "Run provider collection after deployment and retry."
+            )
+        if len(rows) != 1:
+            raise ValueError(
+                "More than one active cloud-observed workload has this image digest. "
+                "Denali will not guess which deployment the scan describes."
+            )
+        return dict(rows[0])
+
+    def create_github_vulnerability_import_upload(
+        self,
+        tenant_id: str,
+        *,
+        job_id: str,
+        target_asset_id: str,
+        source_connection_id: str,
+        source_repository_id: int,
+        source_run_id: int,
+        source_run_attempt: int,
+        source_workflow_sha: str,
+        source_image_digest: str,
+        syft_object_key: str,
+        grype_object_key: str,
+        expected_syft_bytes: int,
+        expected_grype_bytes: int,
+        expected_syft_sha256: str,
+        expected_grype_sha256: str,
+        staging_expires_at: datetime,
+        authoritative: bool,
+    ) -> tuple[dict[str, Any], bool]:
+        """Create an idempotent short-lived upload reservation for a trusted workflow run."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    """
+                    UPDATE vulnerability_import_job
+                    SET state = 'failed', completed_at = now(),
+                        error_summary = 'Evidence upload expired.'
+                    WHERE tenant_id = %s::uuid AND state = 'staging'
+                      AND staging_expires_at < now()
+                    """,
+                    (tenant_id,),
+                )
+                existing = connection.execute(
+                    """
+                    SELECT id, state, target_asset_id, syft_object_key, grype_object_key,
+                           expected_syft_bytes, expected_grype_bytes,
+                           expected_syft_sha256, expected_grype_sha256,
+                           staging_expires_at
+                    FROM vulnerability_import_job
+                    WHERE tenant_id = %s::uuid AND source_type = 'github_actions'
+                      AND source_connection_id = %s::uuid
+                      AND source_repository_id = %s AND source_run_id = %s
+                      AND source_run_attempt = %s AND source_image_digest = %s
+                    FOR UPDATE
+                    """,
+                    (
+                        tenant_id,
+                        source_connection_id,
+                        source_repository_id,
+                        source_run_id,
+                        source_run_attempt,
+                        source_image_digest,
+                    ),
+                ).fetchone()
+                if existing is not None:
+                    return dict(existing), True
+                try:
+                    row = connection.execute(
+                        """
+                        INSERT INTO vulnerability_import_job (
+                          id, tenant_id, target_asset_id, state, authoritative,
+                          syft_object_key, grype_object_key, source_type,
+                          source_connection_id, source_repository_id, source_run_id,
+                          source_run_attempt, source_workflow_sha, source_image_digest,
+                          expected_syft_bytes, expected_grype_bytes,
+                          expected_syft_sha256, expected_grype_sha256, staging_expires_at
+                        ) VALUES (
+                          %s::uuid, %s::uuid, %s::uuid, 'staging', %s,
+                          %s, %s, 'github_actions', %s::uuid, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s, %s
+                        )
+                        RETURNING id, state, target_asset_id, syft_object_key, grype_object_key,
+                                  expected_syft_bytes, expected_grype_bytes,
+                                  expected_syft_sha256, expected_grype_sha256,
+                                  staging_expires_at
+                        """,
+                        (
+                            job_id,
+                            tenant_id,
+                            target_asset_id,
+                            authoritative,
+                            syft_object_key,
+                            grype_object_key,
+                            source_connection_id,
+                            source_repository_id,
+                            source_run_id,
+                            source_run_attempt,
+                            source_workflow_sha,
+                            source_image_digest,
+                            expected_syft_bytes,
+                            expected_grype_bytes,
+                            expected_syft_sha256,
+                            expected_grype_sha256,
+                            staging_expires_at,
+                        ),
+                    ).fetchone()
+                except psycopg.errors.UniqueViolation as error:
+                    raise ValueError(
+                        "the workload already has an active evidence import"
+                    ) from error
+        if row is None:
+            raise RuntimeError("evidence upload reservation was not created")
+        return dict(row), False
+
+    def queue_github_vulnerability_import_job(
+        self,
+        tenant_id: str,
+        *,
+        job_id: str,
+        source_connection_id: str,
+        source_repository_id: int,
+        source_run_id: int,
+        source_run_attempt: int,
+        source_workflow_sha: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically move a verified staged upload into the durable worker queue."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                row = connection.execute(
+                    """
+                    SELECT id, state, target_asset_id, staging_expires_at,
+                           syft_object_key, grype_object_key,
+                           expected_syft_bytes, expected_grype_bytes,
+                           expected_syft_sha256, expected_grype_sha256
+                    FROM vulnerability_import_job
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid
+                      AND source_type = 'github_actions'
+                      AND source_connection_id = %s::uuid
+                      AND source_repository_id = %s AND source_run_id = %s
+                      AND source_run_attempt = %s AND source_workflow_sha = %s
+                    FOR UPDATE
+                    """,
+                    (
+                        tenant_id,
+                        job_id,
+                        source_connection_id,
+                        source_repository_id,
+                        source_run_id,
+                        source_run_attempt,
+                        source_workflow_sha,
+                    ),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("evidence upload reservation was not found")
+                if row["state"] in {"queued", "running", "succeeded"}:
+                    return dict(row), False
+                if row["state"] != "staging":
+                    raise ValueError("evidence upload reservation is no longer active")
+                if row["staging_expires_at"] <= datetime.now(UTC):
+                    connection.execute(
+                        """
+                        UPDATE vulnerability_import_job
+                        SET state = 'failed', completed_at = now(),
+                            error_summary = 'Evidence upload expired.'
+                        WHERE id = %s::uuid AND state = 'staging'
+                        """,
+                        (job_id,),
+                    )
+                    raise ValueError("evidence upload reservation has expired")
+                queued = connection.execute(
+                    """
+                    UPDATE vulnerability_import_job SET state = 'queued'
+                    WHERE id = %s::uuid AND state = 'staging'
+                    RETURNING id, state, target_asset_id
+                    """,
+                    (job_id,),
+                ).fetchone()
+        if queued is None:
+            raise RuntimeError("evidence upload could not be queued")
+        return dict(queued), True
+
+    def github_vulnerability_import_upload(
+        self,
+        tenant_id: str,
+        *,
+        job_id: str,
+        source_connection_id: str,
+        source_repository_id: int,
+        source_run_id: int,
+        source_run_attempt: int,
+        source_workflow_sha: str,
+    ) -> dict[str, Any] | None:
+        """Return a claim-scoped upload reservation without exposing it to another run."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                SELECT id, state, target_asset_id, staging_expires_at,
+                       syft_object_key, grype_object_key,
+                       expected_syft_bytes, expected_grype_bytes,
+                       expected_syft_sha256, expected_grype_sha256,
+                       attempt_count, result, error_summary,
+                       created_at, started_at, completed_at
+                FROM vulnerability_import_job
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                  AND source_type = 'github_actions'
+                  AND source_connection_id = %s::uuid
+                  AND source_repository_id = %s AND source_run_id = %s
+                  AND source_run_attempt = %s AND source_workflow_sha = %s
+                """,
+                (
+                    tenant_id,
+                    job_id,
+                    source_connection_id,
+                    source_repository_id,
+                    source_run_id,
+                    source_run_attempt,
+                    source_workflow_sha,
+                ),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def claim_vulnerability_import_job(
         self, job_id: str, *, lease_seconds: int
     ) -> dict[str, Any] | None:
@@ -2513,9 +2773,7 @@ class PostgresInventoryRepository:
                 (summary[:500], job_id),
             )
 
-    def complete_vulnerability_import_job(
-        self, job_id: str, result: dict[str, Any]
-    ) -> None:
+    def complete_vulnerability_import_job(self, job_id: str, result: dict[str, Any]) -> None:
         with psycopg.connect(self._dsn) as connection:
             connection.execute(
                 """
@@ -3470,14 +3728,10 @@ class PostgresInventoryRepository:
         return CoverageState.UNKNOWN
 
     @classmethod
-    def _cross_signal_issue_coverage_state(
-        cls, connection, tenant_id: str
-    ) -> CoverageState:
+    def _cross_signal_issue_coverage_state(cls, connection, tenant_id: str) -> CoverageState:
         """Combine sign-in collection coverage with consent-rule evaluation coverage."""
 
-        sign_in_state = cls._detection_coverage_state(
-            connection, tenant_id, ("entra_ai_signins",)
-        )
+        sign_in_state = cls._detection_coverage_state(connection, tenant_id, ("entra_ai_signins",))
         row = connection.execute(
             """
             SELECT state
@@ -3533,9 +3787,7 @@ class PostgresInventoryRepository:
         ).fetchall()
         activity_ids: dict[str, list[str]] = {}
         for row in activity_rows:
-            activity_ids.setdefault(str(row["detection_id"]), []).append(
-                str(row["activity_id"])
-            )
+            activity_ids.setdefault(str(row["detection_id"]), []).append(str(row["activity_id"]))
         asset_ids: dict[str, list[str]] = {}
         for row in asset_rows:
             asset_ids.setdefault(str(row["detection_id"]), []).append(str(row["asset_id"]))

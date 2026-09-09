@@ -147,6 +147,33 @@ defense in depth. Raw reports are transient objects and are deleted after the du
 reaches a terminal state; only normalized bounded evidence remains in PostgreSQL. See
 [ADR 0031](../architecture/0031-hosted-vulnerability-evidence-import.md).
 
+The normal hosted path is automatic submission from a selected repository's default-branch
+deployment workflow. Give that job `id-token: write`, set the non-secret GitHub Actions repository
+variable `DENALI_CONNECTION_ID` to the existing GitHub connection UUID, and submit the exact
+deployed `sha256` image digest. The workflow receives checksum-bound, short-lived upload URLs; it
+does not need a Denali token or secret. See
+[ADR 0032](../architecture/0032-github-oidc-vulnerability-evidence.md).
+
+After the deployment job has produced native reports for the immutable image, submit them with the
+repository action pinned to a reviewed Denali commit:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+
+steps:
+  # Build, push, deploy, and generate syft.json plus grype.json first.
+  - uses: transilienceai/denali/.github/actions/submit-vulnerability-evidence@<pinned-denali-sha>
+    with:
+      connection-id: ${{ vars.DENALI_CONNECTION_ID }}
+      image-digest: ${{ steps.deploy.outputs.image-digest }}
+```
+
+The digest must identify the deployed manifest, not merely an image tag or source revision. The
+action automatically requests a fresh cloud collection and retries when the deployment is not yet
+visible to Denali.
+
 ## 4. Configure Vercel and the domain
 
 Create a Vercel project with `web` as its Root Directory. Set:

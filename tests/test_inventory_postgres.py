@@ -251,6 +251,33 @@ def software_inventory_batch(observed_at: datetime, *, run_id: str) -> Inventory
     )
 
 
+def cloud_observed_workload_batch(observed_at: datetime, *, image_digest: str) -> InventoryBatch:
+    workload = AssetAssertion(
+        asset=AssetRef(AssetKind.AI_WORKLOAD, "arn:aws:lambda:us-east-1:123:function:anna"),
+        coverage_plane="aws_lambda_deployment_inventory",
+        display_name="Anna",
+        assertion_type=AssertionType.OBSERVED,
+        confidence=1.0,
+        evidence=Evidence("aws_control_plane", "aws://lambda/anna", observed_at),
+        attributes={"provider": "aws", "image_digests": [image_digest]},
+    )
+    return InventoryBatch(
+        connector_id="denali.aws_deployments",
+        connection_id="aws-fixture",
+        run_id=f"aws-fixture-{uuid.uuid4()}",
+        scope_key="aws:123456789012:us-east-1",
+        collected_at=observed_at,
+        coverage=(
+            Coverage(
+                "aws_lambda_deployment_inventory",
+                CoverageState.COMPLETE,
+                "aws:123456789012:us-east-1",
+            ),
+        ),
+        assets=(workload,),
+    )
+
+
 @pytest.fixture
 def repository():
     assert DSN
@@ -265,6 +292,180 @@ def test_clerk_organization_mapping_is_stable_and_isolated(repository) -> None:
     first = repo.resolve_tenant("org_DenaliPilotA")
     assert repo.resolve_tenant("org_DenaliPilotA") == first
     assert repo.resolve_tenant("org_DenaliPilotB") != first
+
+
+def test_github_ci_import_resolves_tenant_repository_and_exact_observed_digest(
+    repository,
+) -> None:
+    tenant, repo = repository
+    other_tenant = repo.resolve_tenant(f"org_GitHubCiOther{uuid.uuid4().hex}")
+    now = datetime.now(UTC)
+    image_digest = f"sha256:{'a' * 64}"
+    repo.ingest(tenant, cloud_observed_workload_batch(now, image_digest=image_digest))
+    target = repo.resolve_workload_by_image_digest(tenant, image_digest)
+    connection_id = str(uuid.uuid4())
+    repository_id = 12345
+    owner_id = 67890
+    repo.create_connection(
+        tenant,
+        connection_id=connection_id,
+        provider="github",
+        display_name="GitHub CI fixture",
+        credential_type="github_app_installation",
+        credential_reference={"installation_id": 42, "app_id": 7, "app_slug": "denali"},
+        declared_scopes=list(GITHUB_SCOPES),
+        coverage_plan=[],
+        configuration={
+            "repositories": [
+                {
+                    "id": repository_id,
+                    "full_name": "example/anna",
+                    "owner_id": owner_id,
+                    "default_branch": "main",
+                }
+            ]
+        },
+    )
+    repo.record_connection_validation(
+        tenant,
+        connection_id,
+        {
+            "started_at": now,
+            "completed_at": now,
+            "health_state": "healthy",
+            "credential_state": "passed",
+            "account_id_observed": "42",
+            "results": [],
+            "summary": "Fixture validation passed.",
+        },
+    )
+
+    context = repo.github_ci_repository_context(
+        connection_id,
+        repository_id=repository_id,
+        repository_full_name="EXAMPLE/ANNA",
+    )
+    assert context is not None
+    assert str(context["tenant_id"]) == tenant
+    assert context["repository_owner_id"] == owner_id
+    assert context["default_branch"] == "main"
+    assert (
+        repo.github_ci_repository_context(
+            connection_id,
+            repository_id=99999,
+            repository_full_name="example/anna",
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="No active cloud-observed workload"):
+        repo.resolve_workload_by_image_digest(other_tenant, image_digest)
+
+    job_id = str(uuid.uuid4())
+    values = {
+        "job_id": job_id,
+        "target_asset_id": str(target["id"]),
+        "source_connection_id": connection_id,
+        "source_repository_id": repository_id,
+        "source_run_id": 111,
+        "source_run_attempt": 1,
+        "source_workflow_sha": "b" * 40,
+        "source_image_digest": image_digest,
+        "syft_object_key": f"private/{job_id}/syft.json",
+        "grype_object_key": f"private/{job_id}/grype.json",
+        "expected_syft_bytes": 100,
+        "expected_grype_bytes": 200,
+        "expected_syft_sha256": "c" * 64,
+        "expected_grype_sha256": "d" * 64,
+        "staging_expires_at": now + timedelta(minutes=10),
+        "authoritative": True,
+    }
+    staged, reused = repo.create_github_vulnerability_import_upload(tenant, **values)
+    duplicate, duplicate_reused = repo.create_github_vulnerability_import_upload(
+        tenant,
+        **{**values, "job_id": str(uuid.uuid4())},
+    )
+    assert staged["state"] == "staging"
+    assert reused is False
+    assert duplicate["id"] == staged["id"]
+    assert duplicate_reused is True
+    source = {
+        "source_connection_id": connection_id,
+        "source_repository_id": repository_id,
+        "source_run_id": 111,
+        "source_run_attempt": 1,
+        "source_workflow_sha": "b" * 40,
+    }
+    assert (
+        repo.github_vulnerability_import_upload(
+            other_tenant,
+            job_id=job_id,
+            **source,
+        )
+        is None
+    )
+    queued, should_dispatch = repo.queue_github_vulnerability_import_job(
+        tenant,
+        job_id=job_id,
+        **source,
+    )
+    duplicate_queue, duplicate_dispatch = repo.queue_github_vulnerability_import_job(
+        tenant,
+        job_id=job_id,
+        **source,
+    )
+    assert queued["state"] == "queued"
+    assert should_dispatch is True
+    assert duplicate_queue["state"] == "queued"
+    assert duplicate_dispatch is False
+    claimed = repo.claim_vulnerability_import_job(job_id, lease_seconds=60)
+    assert claimed is not None
+    assert claimed["source_image_digest"] == image_digest
+    repo.fail_vulnerability_import_job(job_id, "fixture cleanup")
+
+    expired_job_id = str(uuid.uuid4())
+    expired, expired_reused = repo.create_github_vulnerability_import_upload(
+        tenant,
+        **{
+            **values,
+            "job_id": expired_job_id,
+            "source_run_attempt": 2,
+            "staging_expires_at": now - timedelta(seconds=1),
+        },
+    )
+    assert expired["state"] == "staging"
+    assert expired_reused is False
+    with pytest.raises(ValueError, match="expired"):
+        repo.queue_github_vulnerability_import_job(
+            tenant,
+            job_id=expired_job_id,
+            **{**source, "source_run_attempt": 2},
+        )
+
+    second = cloud_observed_workload_batch(now, image_digest=image_digest)
+    second_workload = replace(
+        second.assets[0],
+        asset=AssetRef(AssetKind.AI_WORKLOAD, "arn:aws:lambda:us-east-1:123:function:anna-copy"),
+        display_name="Anna copy",
+    )
+    repo.ingest(
+        tenant,
+        replace(
+            second,
+            connection_id="aws-fixture-copy",
+            run_id=f"aws-copy-{uuid.uuid4()}",
+            scope_key="aws:123456789012:us-west-2",
+            coverage=(
+                Coverage(
+                    "aws_lambda_deployment_inventory",
+                    CoverageState.COMPLETE,
+                    "aws:123456789012:us-west-2",
+                ),
+            ),
+            assets=(second_workload,),
+        ),
+    )
+    with pytest.raises(ValueError, match="More than one active cloud-observed workload"):
+        repo.resolve_workload_by_image_digest(tenant, image_digest)
 
 
 def test_tenant_evidence_mutations_are_serialized_without_blocking_other_tenants(
@@ -282,9 +483,7 @@ def test_tenant_evidence_mutations_are_serialized_without_blocking_other_tenants
         )
         with ThreadPoolExecutor(max_workers=2) as pool:
             blocked = pool.submit(repo.ingest, tenant, demo_batch(datetime.now(UTC)))
-            independent = pool.submit(
-                repo.ingest, other_tenant, demo_batch(datetime.now(UTC))
-            )
+            independent = pool.submit(repo.ingest, other_tenant, demo_batch(datetime.now(UTC)))
             try:
                 with pytest.raises(FutureTimeoutError):
                     blocked.result(timeout=0.1)
@@ -456,9 +655,9 @@ def test_connection_validation_jobs_are_deduplicated_and_expire(repository) -> N
         ).fetchone()
     assert state == "failed"
     assert error_summary == "Validation dispatch timed out."
-    assert repo.connection_validation_status(tenant, connection_id)["last_result"][
-        "state"
-    ] == "failed"
+    assert (
+        repo.connection_validation_status(tenant, connection_id)["last_result"]["state"] == "failed"
+    )
 
 
 def test_entra_consent_state_and_collection_jobs_are_tenant_bound_and_durable(
@@ -560,9 +759,7 @@ def test_entra_consent_state_and_collection_jobs_are_tenant_bound_and_durable(
         str(job["id"]),
         {"state": "complete", "completed_at": now.isoformat()},
     )
-    status = repo.connection_collection_status(
-        tenant, connection_id, collection_kind="entra_ai"
-    )
+    status = repo.connection_collection_status(tenant, connection_id, collection_kind="entra_ai")
     assert status["state"] == "idle"
     assert status["last_result"]["state"] == "complete"
 
@@ -579,9 +776,7 @@ def test_entra_consent_state_and_collection_jobs_are_tenant_bound_and_durable(
         )
         assert provider_created is True
         assert provider_job["collection_kind"] == collection_kind
-        repo.fail_connection_collection_job(
-            str(provider_job["id"]), "fixture dispatch failure"
-        )
+        repo.fail_connection_collection_job(str(provider_job["id"]), "fixture dispatch failure")
         provider_status = repo.connection_collection_status(
             tenant,
             connection_id,
@@ -1440,9 +1635,7 @@ metadata:
     cloud.googleapis.com/location: us-central1
 """
     )
-    targets = tuple(
-        DeploymentTarget.from_record(item) for item in repo.deployment_targets(tenant)
-    )
+    targets = tuple(DeploymentTarget.from_record(item) for item in repo.deployment_targets(tenant))
     correlated = CodeToCloudConnector(
         tmp_path,
         targets=targets,
@@ -1491,16 +1684,16 @@ def test_code_to_cloud_query_preserves_proven_runtime_context(repository, tmp_pa
                 display_name="anna-agent",
                 assertion_type=AssertionType.OBSERVED,
                 confidence=1.0,
-                    evidence=evidence,
-                    attributes={
-                        "provider": "aws",
-                        "service": "lambda",
-                        "runtime_kind": "serverless_function",
-                        "logical_id": "AgentFnC1FD126F",
-                        "deployment_identifiers": {
-                            "cloudformation_logical_id": ["AgentFnC1FD126F"],
-                            "function_name": ["anna-agent"],
-                        },
+                evidence=evidence,
+                attributes={
+                    "provider": "aws",
+                    "service": "lambda",
+                    "runtime_kind": "serverless_function",
+                    "logical_id": "AgentFnC1FD126F",
+                    "deployment_identifiers": {
+                        "cloudformation_logical_id": ["AgentFnC1FD126F"],
+                        "function_name": ["anna-agent"],
+                    },
                     "account_id": "123456789012",
                     "region": "ap-south-1",
                     "deployment_artifact": {
@@ -1548,9 +1741,7 @@ def test_code_to_cloud_query_preserves_proven_runtime_context(repository, tmp_pa
         ),
     )
     repo.ingest(tenant, observed)
-    targets = tuple(
-        DeploymentTarget.from_record(item) for item in repo.deployment_targets(tenant)
-    )
+    targets = tuple(DeploymentTarget.from_record(item) for item in repo.deployment_targets(tenant))
     assert [item.natural_key for item in targets] == [workload.natural_key]
 
     (tmp_path / "stack.ts").write_text(
