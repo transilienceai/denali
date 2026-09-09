@@ -5,6 +5,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from denali.api.app import DEFAULT_LOCAL_TENANT, create_app
+from denali.api.github_oidc import GitHubActionsIdentity
 
 ASSET_ID = "11111111-1111-4111-8111-111111111111"
 FINDING_ID = "22222222-2222-4222-8222-222222222222"
@@ -12,6 +13,8 @@ ISSUE_ID = "33333333-3333-4333-8333-333333333333"
 VULNERABILITY_ID = "55555555-5555-4555-8555-555555555555"
 ACTIVITY_ID = "66666666-6666-4666-8666-666666666666"
 DETECTION_ID = "77777777-7777-4777-8777-777777777777"
+GITHUB_CONNECTION_ID = "88888888-8888-4888-8888-888888888888"
+IMAGE_DIGEST = f"sha256:{'a' * 64}"
 
 
 class RepositoryStub:
@@ -211,9 +214,7 @@ class RepositoryStub:
             }
         ]
 
-    def get_runtime_detection(
-        self, tenant_id: str, detection_id: str
-    ) -> dict[str, Any] | None:
+    def get_runtime_detection(self, tenant_id: str, detection_id: str) -> dict[str, Any] | None:
         if detection_id != DETECTION_ID:
             return None
         return {
@@ -389,9 +390,7 @@ class VulnerabilityImportRepositoryStub(RepositoryStub):
         assert self.job is not None
         self.job.update(state="failed", error_summary=summary)
 
-    def vulnerability_import_status(
-        self, tenant_id: str, job_id: str
-    ) -> dict[str, Any] | None:
+    def vulnerability_import_status(self, tenant_id: str, job_id: str) -> dict[str, Any] | None:
         if self.job is None or self.job["id"] != job_id:
             return None
         return {
@@ -402,6 +401,50 @@ class VulnerabilityImportRepositoryStub(RepositoryStub):
             "result": None,
             "error_summary": None,
         }
+
+    def github_ci_repository_context(
+        self, connection_id: str, *, repository_id: int, repository_full_name: str
+    ) -> dict[str, Any] | None:
+        if (
+            connection_id != GITHUB_CONNECTION_ID
+            or repository_id != 12345
+            or repository_full_name.casefold() != "example/anna"
+        ):
+            return None
+        return {
+            "tenant_id": DEFAULT_LOCAL_TENANT,
+            "connection_id": connection_id,
+            "repository_id": repository_id,
+            "repository_full_name": repository_full_name,
+            "repository_owner_id": 456,
+            "default_branch": "main",
+        }
+
+    def resolve_workload_by_image_digest(self, tenant_id: str, image_digest: str) -> dict[str, Any]:
+        assert tenant_id == DEFAULT_LOCAL_TENANT
+        if image_digest != IMAGE_DIGEST:
+            raise ValueError("No active cloud-observed workload has this exact image digest.")
+        return {"id": ASSET_ID, "display_name": "Demo workload"}
+
+    def create_github_vulnerability_import_upload(
+        self, tenant_id: str, **values: Any
+    ) -> tuple[dict[str, Any], bool]:
+        self.job = {"id": values["job_id"], "state": "staging", **values}
+        return self.job, False
+
+    def github_vulnerability_import_upload(
+        self, tenant_id: str, **values: Any
+    ) -> dict[str, Any] | None:
+        if self.job is None or self.job["id"] != values["job_id"]:
+            return None
+        return self.job
+
+    def queue_github_vulnerability_import_job(
+        self, tenant_id: str, **values: Any
+    ) -> tuple[dict[str, Any], bool]:
+        assert self.job is not None
+        self.job["state"] = "queued"
+        return self.job, True
 
 
 class EvidenceStoreStub:
@@ -420,6 +463,82 @@ class EvidenceStoreStub:
 
     def delete_documents(self, object_keys: tuple[str, ...]) -> None:
         self.deleted.append(object_keys)
+
+    def staged_object_keys(self, *, tenant_id: str, job_id: str) -> dict[str, str]:
+        return {
+            "syft": f"private/{tenant_id}/{job_id}/syft.json",
+            "grype": f"private/{tenant_id}/{job_id}/grype.json",
+        }
+
+    def create_upload(
+        self, *, object_key: str, sha256_hex: str, expires_in_seconds: int
+    ) -> dict[str, Any]:
+        assert 60 <= expires_in_seconds <= 600
+        return {
+            "url": f"https://uploads.example/{object_key}",
+            "headers": {"x-amz-checksum-sha256": sha256_hex},
+        }
+
+    def verify_upload(self, *, object_key: str, size_bytes: int, sha256_hex: str) -> None:
+        assert object_key.startswith("private/")
+        assert size_bytes == 100
+        assert len(sha256_hex) == 64
+
+
+class GitHubTokenVerifierStub:
+    def __init__(self, *, ref: str = "refs/heads/main"):
+        self.ref = ref
+
+    def verify(self, token: str, *, audience: str) -> GitHubActionsIdentity:
+        assert token == "signed-github-token"
+        assert audience.endswith(f"/api/v1/ci/github/{GITHUB_CONNECTION_ID}")
+        return GitHubActionsIdentity(
+            repository="example/anna",
+            repository_id=12345,
+            repository_owner_id=456,
+            run_id=789,
+            run_attempt=1,
+            ref=self.ref,
+            workflow_ref=f"example/anna/.github/workflows/deploy.yml@{self.ref}",
+            workflow_sha="b" * 40,
+            event_name="push",
+        )
+
+
+class MissingDigestRepositoryStub(VulnerabilityImportRepositoryStub):
+    def __init__(self):
+        super().__init__()
+        self.collection_job: dict[str, Any] | None = None
+
+    def resolve_workload_by_image_digest(self, tenant_id: str, image_digest: str) -> dict[str, Any]:
+        raise ValueError(
+            "No active cloud-observed workload has this exact image digest. "
+            "Run provider collection after deployment and retry."
+        )
+
+    def list_healthy_connection_ids(
+        self, tenant_id: str, *, provider: str, limit: int = 50
+    ) -> list[str]:
+        return ["99999999-9999-4999-8999-999999999999"] if provider == "aws" else []
+
+    def get_connection_validation_target(
+        self, tenant_id: str, connection_id: str
+    ) -> dict[str, Any] | None:
+        return {"id": connection_id, "provider": "aws", "lifecycle_state": "active"}
+
+    def create_connection_collection_job(
+        self, tenant_id: str, connection_id: str, *, collection_kind: str
+    ) -> tuple[dict[str, Any], bool]:
+        self.collection_job = {
+            "id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+            "connection_id": connection_id,
+            "collection_kind": collection_kind,
+        }
+        return self.collection_job, True
+
+    def set_connection_collection_call_id(self, job_id: str, call_id: str) -> None:
+        assert self.collection_job is not None
+        self.collection_job["modal_call_id"] = call_id
 
 
 def test_vulnerability_import_is_staged_and_durably_dispatched() -> None:
@@ -483,6 +602,149 @@ def test_vulnerability_import_rejects_non_workload_target_before_staging() -> No
         )
     assert response.status_code == 404
     assert store.documents == {}
+
+
+def test_github_workflow_upload_is_oidc_bound_digest_resolved_and_durably_dispatched() -> None:
+    repository = VulnerabilityImportRepositoryStub()
+    store = EvidenceStoreStub()
+    dispatched: list[str] = []
+    app = create_app(
+        repository=repository,
+        evidence_report_store=store,
+        github_actions_token_verifier=GitHubTokenVerifierStub(),
+        vulnerability_import_dispatcher=lambda job_id: dispatched.append(job_id) or "call-ci",
+        migrate_on_start=False,
+    )
+    headers = {"Authorization": "Bearer signed-github-token"}
+    payload = {
+        "image_digest": IMAGE_DIGEST,
+        "syft": {"size_bytes": 100, "sha256": "c" * 64},
+        "grype": {"size_bytes": 100, "sha256": "d" * 64},
+        "authoritative": True,
+    }
+
+    with TestClient(app) as test_client:
+        created = test_client.post(
+            f"/v1/ci/github/{GITHUB_CONNECTION_ID}/vulnerability-imports",
+            headers=headers,
+            json=payload,
+        )
+        assert created.status_code == 201
+        assert created.headers["cache-control"] == "no-store"
+        assert created.json()["state"] == "staging"
+        assert set(created.json()["uploads"]) == {"syft", "grype"}
+        job_id = created.json()["id"]
+        completed = test_client.post(
+            f"/v1/ci/github/{GITHUB_CONNECTION_ID}/vulnerability-imports/{job_id}/complete",
+            headers=headers,
+        )
+        status = test_client.get(
+            f"/v1/ci/github/{GITHUB_CONNECTION_ID}/vulnerability-imports/{job_id}",
+            headers=headers,
+        )
+
+    assert completed.status_code == 202
+    assert completed.json()["state"] == "queued"
+    assert status.status_code == 200
+    assert status.json()["state"] == "queued"
+    assert dispatched == [job_id]
+    assert repository.job is not None
+    assert repository.job["target_asset_id"] == ASSET_ID
+    assert repository.job["source_repository_id"] == 12345
+    assert repository.job["source_image_digest"] == IMAGE_DIGEST
+    assert repository.job["modal_call_id"] == "call-ci"
+
+
+def test_github_workflow_upload_rejects_missing_token_and_non_default_branch() -> None:
+    repository = VulnerabilityImportRepositoryStub()
+    payload = {
+        "image_digest": IMAGE_DIGEST,
+        "syft": {"size_bytes": 100, "sha256": "c" * 64},
+        "grype": {"size_bytes": 100, "sha256": "d" * 64},
+    }
+    app = create_app(
+        repository=repository,
+        evidence_report_store=EvidenceStoreStub(),
+        github_actions_token_verifier=GitHubTokenVerifierStub(ref="refs/heads/feature"),
+        vulnerability_import_dispatcher=lambda job_id: job_id,
+        migrate_on_start=False,
+    )
+
+    with TestClient(app) as test_client:
+        missing = test_client.post(
+            f"/v1/ci/github/{GITHUB_CONNECTION_ID}/vulnerability-imports",
+            json=payload,
+        )
+        wrong_branch = test_client.post(
+            f"/v1/ci/github/{GITHUB_CONNECTION_ID}/vulnerability-imports",
+            headers={"Authorization": "Bearer signed-github-token"},
+            json=payload,
+        )
+
+    assert missing.status_code == 401
+    assert wrong_branch.status_code == 403
+    assert repository.job is None
+
+
+def test_github_workflow_upload_never_accepts_a_client_tenant_or_workload() -> None:
+    repository = VulnerabilityImportRepositoryStub()
+    app = create_app(
+        repository=repository,
+        evidence_report_store=EvidenceStoreStub(),
+        github_actions_token_verifier=GitHubTokenVerifierStub(),
+        vulnerability_import_dispatcher=lambda job_id: job_id,
+        migrate_on_start=False,
+    )
+    payload = {
+        "tenant_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "target_asset_id": ASSET_ID,
+        "image_digest": IMAGE_DIGEST,
+        "syft": {"size_bytes": 100, "sha256": "c" * 64},
+        "grype": {"size_bytes": 100, "sha256": "d" * 64},
+    }
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            f"/v1/ci/github/{GITHUB_CONNECTION_ID}/vulnerability-imports",
+            headers={"Authorization": "Bearer signed-github-token"},
+            json=payload,
+        )
+
+    assert response.status_code == 422
+    assert repository.job is None
+
+
+def test_github_workflow_missing_digest_starts_durable_cloud_refresh() -> None:
+    repository = MissingDigestRepositoryStub()
+    dispatched: list[str] = []
+    app = create_app(
+        repository=repository,
+        evidence_report_store=EvidenceStoreStub(),
+        github_actions_token_verifier=GitHubTokenVerifierStub(),
+        collection_dispatcher=lambda job_id: dispatched.append(job_id) or "collect-call",
+        vulnerability_import_dispatcher=lambda job_id: job_id,
+        migrate_on_start=False,
+    )
+    payload = {
+        "image_digest": IMAGE_DIGEST,
+        "syft": {"size_bytes": 100, "sha256": "c" * 64},
+        "grype": {"size_bytes": 100, "sha256": "d" * 64},
+    }
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            f"/v1/ci/github/{GITHUB_CONNECTION_ID}/vulnerability-imports",
+            headers={"Authorization": "Bearer signed-github-token"},
+            json=payload,
+        )
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "20"
+    assert "started a fresh cloud collection" in response.json()["detail"]
+    assert dispatched == ["aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"]
+    assert repository.collection_job is not None
+    assert repository.collection_job["collection_kind"] == "aws_deployments"
+    assert repository.collection_job["modal_call_id"] == "collect-call"
 
 
 def test_governance_update_is_validated_and_persisted() -> None:

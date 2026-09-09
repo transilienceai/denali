@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from base64 import b64encode
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any, Protocol
@@ -31,6 +32,18 @@ class EvidenceReportStore(Protocol):
     def get_document(self, object_key: str) -> Any: ...
 
     def delete_documents(self, object_keys: tuple[str, ...]) -> None: ...
+
+    def staged_object_keys(self, *, tenant_id: str, job_id: str) -> dict[str, str]: ...
+
+    def create_upload(
+        self,
+        *,
+        object_key: str,
+        sha256_hex: str,
+        expires_in_seconds: int,
+    ) -> dict[str, Any]: ...
+
+    def verify_upload(self, *, object_key: str, size_bytes: int, sha256_hex: str) -> None: ...
 
 
 class VulnerabilityImportRepository(Protocol):
@@ -91,6 +104,60 @@ class S3EvidenceReportStore:
             raise
         return object_keys
 
+    def staged_object_keys(self, *, tenant_id: str, job_id: str) -> dict[str, str]:
+        return {
+            name: f"denali/evidence-imports/{tenant_id}/{job_id}/{name}.json"
+            for name in ("syft", "grype")
+        }
+
+    def create_upload(
+        self,
+        *,
+        object_key: str,
+        sha256_hex: str,
+        expires_in_seconds: int,
+    ) -> dict[str, Any]:
+        if _SHA256_HEX_RE.fullmatch(sha256_hex) is None:
+            raise ValueError("evidence checksum must be a sha256 digest")
+        if not 60 <= expires_in_seconds <= 900:
+            raise ValueError("evidence upload lifetime must be between 60 and 900 seconds")
+        checksum = b64encode(bytes.fromhex(sha256_hex)).decode("ascii")
+        headers = {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+            "x-amz-server-side-encryption": "AES256",
+            "x-amz-checksum-sha256": checksum,
+        }
+        url = self._s3_client.generate_presigned_url(
+            "put_object",
+            Params={
+                "Bucket": self._bucket_name,
+                "Key": object_key,
+                "ContentType": headers["Content-Type"],
+                "CacheControl": headers["Cache-Control"],
+                "ServerSideEncryption": "AES256",
+                "ChecksumSHA256": checksum,
+            },
+            ExpiresIn=expires_in_seconds,
+        )
+        return {"url": url, "headers": headers}
+
+    def verify_upload(self, *, object_key: str, size_bytes: int, sha256_hex: str) -> None:
+        if not 1 <= size_bytes <= MAX_REPORT_BYTES:
+            raise ValueError("evidence report size is outside the hosted limit")
+        if _SHA256_HEX_RE.fullmatch(sha256_hex) is None:
+            raise ValueError("evidence checksum must be a sha256 digest")
+        response = self._s3_client.head_object(
+            Bucket=self._bucket_name,
+            Key=object_key,
+            ChecksumMode="ENABLED",
+        )
+        expected_checksum = b64encode(bytes.fromhex(sha256_hex)).decode("ascii")
+        if response.get("ContentLength") != size_bytes:
+            raise ValueError("staged evidence size does not match its declaration")
+        if response.get("ChecksumSHA256") != expected_checksum:
+            raise ValueError("staged evidence checksum does not match its declaration")
+
     def get_document(self, object_key: str) -> Any:
         response = self._s3_client.get_object(Bucket=self._bucket_name, Key=object_key)
         body = response["Body"].read(MAX_REPORT_BYTES + 1)
@@ -119,7 +186,12 @@ def encode_report(document: Any) -> bytes:
     return body
 
 
-def validate_report_pair(syft_document: Any, grype_document: Any) -> None:
+def validate_report_pair(
+    syft_document: Any,
+    grype_document: Any,
+    *,
+    expected_image_digest: str | None = None,
+) -> None:
     """Require native reports that identify the same scanned container artifact."""
 
     syft_descriptor = _mapping(syft_document).get("descriptor")
@@ -143,6 +215,14 @@ def validate_report_pair(syft_document: Any, grype_document: Any) -> None:
         raise ValueError("both reports must identify the scanned container image")
     if syft_identifiers.isdisjoint(grype_identifiers):
         raise ValueError("the Syft and Grype reports describe different container images")
+    if expected_image_digest is not None:
+        expected = expected_image_digest.strip().casefold()
+        if _SHA256_HEX_RE.fullmatch(expected.removeprefix("sha256:")) is None:
+            raise ValueError("the expected image digest is invalid")
+        if not expected.startswith("sha256:"):
+            expected = f"sha256:{expected}"
+        if expected not in syft_identifiers or expected not in grype_identifiers:
+            raise ValueError("the reports do not describe the cloud-observed image digest")
 
 
 def run_durable_vulnerability_import_job(
@@ -175,7 +255,11 @@ def run_durable_vulnerability_import_job(
             target_name = str(asset.get("display_name") or asset["natural_key"])
             syft_document = report_store.get_document(object_keys[0])
             grype_document = report_store.get_document(object_keys[1])
-            validate_report_pair(syft_document, grype_document)
+            validate_report_pair(
+                syft_document,
+                grype_document,
+                expected_image_digest=job.get("source_image_digest"),
+            )
             scope_key = target.canonical_key
             syft_batch = SyftJsonConnector().collect(
                 syft_document,

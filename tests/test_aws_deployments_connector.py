@@ -21,6 +21,8 @@ class LambdaClient:
             "FunctionArn": f"arn:aws:lambda:us-east-1:123456789012:function:{FunctionName}",
             "Role": "arn:aws:iam::123456789012:role/lambda-role",
             "Runtime": "python3.13",
+            "PackageType": "Image" if FunctionName == "agent" else "Zip",
+            "CodeSha256": "a" * 64 if FunctionName == "agent" else "zip-checksum",
             "Environment": {
                 "Variables": {
                     "BEDROCK_MODEL_ID": "global.anthropic.claude-sonnet-4-5-v1:0",
@@ -35,6 +37,15 @@ class LambdaClient:
         return {
             "Tags": {
                 "aws:cloudformation:logical-id": "AgentFunctionA1B2C3D4",
+            }
+        }
+
+    def get_function(self, *, FunctionName: str) -> dict[str, Any]:
+        return {
+            "Code": {
+                "ResolvedImageUri": (
+                    f"123456789012.dkr.ecr.us-east-1.amazonaws.com/agent@sha256:{'a' * 64}"
+                )
             }
         }
 
@@ -53,7 +64,7 @@ class EcsClient:
                 "containerDefinitions": [
                     {
                         "name": "worker",
-                        "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/worker@sha256:abc",
+                        "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/worker:deployed",
                         "environment": [
                             {
                                 "name": "PROPOSAL_CRITIC_MODEL_ID",
@@ -80,6 +91,14 @@ class SameModelEcsClient(EcsClient):
             "global.anthropic.claude-sonnet-4-5-v1:0"
         )
         return response
+
+
+class EcrClient:
+    def describe_images(self, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["registryId"] == "123456789012"
+        assert kwargs["repositoryName"] == "worker"
+        assert kwargs["imageIds"] == [{"imageTag": "deployed"}]
+        return {"imageDetails": [{"imageDigest": f"sha256:{'b' * 64}"}]}
 
 
 class EksClient:
@@ -123,6 +142,7 @@ class Session:
         "ecs": EcsClient(),
         "eks": EksClient(),
         "sagemaker": SageMakerClient(),
+        "ecr": EcrClient(),
     }
 
     def client(self, service: str, **kwargs: Any) -> Any:
@@ -214,6 +234,9 @@ def test_collects_four_explicit_aws_deployment_contracts_without_secret_values()
         "eks",
         "sagemaker",
     }
+    by_service = {item.attributes["service"]: item for item in workloads}
+    assert by_service["lambda"].attributes["image_digests"] == [f"sha256:{'a' * 64}"]
+    assert by_service["ecs"].attributes["image_digests"] == [f"sha256:{'b' * 64}"]
     identities = {
         (item.attributes["runtime_kind"], tuple(item.attributes["deployment_identifiers"]))
         for item in workloads
@@ -264,9 +287,7 @@ def test_shared_model_is_asserted_once_with_each_workload_relationship_retained(
     ).collect()
 
     models = [item for item in batch.assets if item.asset.kind is AssetKind.AI_MODEL]
-    model_links = [
-        item for item in batch.relationships if item.kind is RelationshipKind.USES
-    ]
+    model_links = [item for item in batch.relationships if item.kind is RelationshipKind.USES]
     assert len(models) == 1
     assert len(model_links) == 2
     assert {item.target for item in model_links} == {models[0].asset}

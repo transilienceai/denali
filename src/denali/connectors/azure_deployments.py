@@ -18,6 +18,7 @@ from denali.connections.azure import (
     authorized_azure_request,
     valid_azure_uuid,
 )
+from denali.connectors.container_images import image_digests
 from denali.domain import (
     ActivityBatch,
     ActivityCategory,
@@ -851,6 +852,7 @@ def _asset_assertions(
         "endpoint": parsed["endpoint"],
         "model_configuration_keys": parsed["model_configuration_keys"],
         "ai_classification": parsed["classification"],
+        "image_digests": image_digests(parsed["images"]),
     }
     cloud_assertion = AssetAssertion(
         asset=cloud_ref,

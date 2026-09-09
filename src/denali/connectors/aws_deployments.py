@@ -50,6 +50,7 @@ from denali.connectors.aws_bedrock import AwsBedrockRegionConnector
 from denali.connectors.aws_bedrock_activity import AwsBedrockActivityConnector
 from denali.connectors.aws_deployment_iam_posture import AwsDeploymentIamPostureConnector
 from denali.connectors.aws_stack import _model_entries
+from denali.connectors.container_images import image_digests
 from denali.domain import (
     AssertionType,
     AssetAssertion,
@@ -69,9 +70,7 @@ CAPABILITIES = ConnectorCapabilities(inventory=True, relationships=True)
 MAX_PAGES = 100
 MAX_RESOURCES = 10_000
 PAGE_SIZE = 100
-_CLASSIFICATION_MODEL_KEY_RE = re.compile(
-    r"^[A-Z][A-Z0-9_]*(?:MODEL_ID|MODEL_NAME|ENDPOINT_NAME)$"
-)
+_CLASSIFICATION_MODEL_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*(?:MODEL_ID|MODEL_NAME|ENDPOINT_NAME)$")
 _BEDROCK_MODEL_PREFIXES = (
     "global.",
     "us.",
@@ -400,6 +399,24 @@ class AwsDeploymentConnector:
             model_keys = _model_keys(environment)
             models = _bedrock_model_entries(environment)
             logical_id = _tag_value(tags, "aws:cloudformation:logical-id")
+            resolved_image = None
+            if config.get("PackageType") == "Image":
+                try:
+                    function = client.get_function(FunctionName=name)
+                    code = function.get("Code", {}) if isinstance(function, dict) else {}
+                    resolved_image = _text(code.get("ResolvedImageUri"))
+                except Exception as error:
+                    warnings.append(_failure("lambda:GetFunction", error))
+            digests = (
+                image_digests(
+                    [
+                        resolved_image,
+                        f"sha256:{config.get('CodeSha256', '')}",
+                    ]
+                )
+                if config.get("PackageType") == "Image"
+                else []
+            )
             output.append(
                 self._parsed(
                     service="lambda",
@@ -424,6 +441,8 @@ class AwsDeploymentConnector:
                     extra={
                         "runtime": _text(config.get("Runtime")),
                         "state": _text(config.get("State")),
+                        "images": [resolved_image] if resolved_image else [],
+                        "image_digests": digests,
                     },
                 )
             )
@@ -439,6 +458,7 @@ class AwsDeploymentConnector:
             maxResults=PAGE_SIZE,
         )
         output: list[dict[str, Any]] = []
+        ecr_client = None
         for family in families:
             if not isinstance(family, str) or not family:
                 warnings.append("ECS task family omitted because its name was invalid")
@@ -482,6 +502,24 @@ class AwsDeploymentConnector:
                     )
                 )
             tags = response.get("tags", [])
+            digests = set(image_digests(images))
+            for image in images:
+                if image_digests([image]) or "@" in image:
+                    continue
+                try:
+                    if ecr_client is None:
+                        ecr_client = self.session.client("ecr", region_name=self.region)
+                    resolved = _resolve_ecr_image_digest(
+                        ecr_client,
+                        image,
+                        account_id=self.account_id,
+                        region=self.region,
+                    )
+                except Exception as error:
+                    warnings.append(_failure("ecr:DescribeImages", error))
+                    continue
+                if resolved:
+                    digests.add(resolved)
             logical_id = _tag_value(tags, "aws:cloudformation:logical-id")
             arn = _text(task.get("taskDefinitionArn")) or _arn(
                 self.partition,
@@ -508,6 +546,7 @@ class AwsDeploymentConnector:
                     extra={
                         "container_names": sorted(set(containers)),
                         "images": sorted(set(images)),
+                        "image_digests": sorted(digests),
                         "revision": task.get("revision"),
                     },
                 )
@@ -687,6 +726,34 @@ def _assertions(
         for role in sorted({role for role in parsed["role_arns"] if isinstance(role, str) and role})
     )
     return cloud, workload, identities
+
+
+def _resolve_ecr_image_digest(
+    client: Any,
+    image: str,
+    *,
+    account_id: str,
+    region: str,
+) -> str | None:
+    if image_digests([image]):
+        return image_digests([image])[0]
+    match = re.fullmatch(
+        r"(?P<account>[0-9]{12})\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.[^/]+/"
+        r"(?P<repository>[A-Za-z0-9._/-]+):(?P<tag>[A-Za-z0-9._-]{1,300})",
+        image,
+    )
+    if match is None or match.group("account") != account_id or match.group("region") != region:
+        return None
+    response = client.describe_images(
+        registryId=account_id,
+        repositoryName=match.group("repository"),
+        imageIds=[{"imageTag": match.group("tag")}],
+    )
+    details = response.get("imageDetails", []) if isinstance(response, dict) else []
+    if not isinstance(details, list) or len(details) != 1 or not isinstance(details[0], dict):
+        return None
+    digests = image_digests([details[0].get("imageDigest")])
+    return digests[0] if digests else None
 
 
 def _model_assertions(

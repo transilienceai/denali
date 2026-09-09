@@ -152,6 +152,7 @@ _SCOPE_METADATA = {
                 "plane": "aws_lambda_deployments",
                 "permissions": (
                     "lambda:ListFunctions",
+                    "lambda:GetFunction",
                     "lambda:GetFunctionConfiguration",
                     "lambda:ListTags",
                 ),
@@ -163,6 +164,7 @@ _SCOPE_METADATA = {
                     "ecs:ListTaskDefinitionFamilies",
                     "ecs:DescribeTaskDefinition",
                     "ecs:ListTagsForResource",
+                    "ecr:DescribeImages",
                 ),
             },
             {
@@ -401,8 +403,7 @@ class AwsConnectionValidator:
         regional_plan = aws_coverage_plan(connection["declared_scopes"], scan_regions)
         if self._max_workers == 1 or len(regional_plan) < 2:
             regional_results = [
-                self._validate_plane(session, planned, configuration)
-                for planned in regional_plan
+                self._validate_plane(session, planned, configuration) for planned in regional_plan
             ]
         else:
             worker_state = local()
@@ -458,9 +459,7 @@ class AwsConnectionValidator:
             "label": planned["label"],
             "region": planned["region"],
         }
-        if not self._service_available(
-            session, planned["plane"], planned["region"], configuration
-        ):
+        if not self._service_available(session, planned["plane"], planned["region"], configuration):
             result.update(
                 state="not_applicable",
                 detail="The AWS SDK has no endpoint for this service in the discovered Region.",
@@ -618,20 +617,20 @@ class AwsConnectionValidator:
         elif plane == "bedrock_guardrails":
             _regional_client(session, "bedrock", region).list_guardrails(maxResults=1)
         elif plane == "agentcore_runtimes":
-            _regional_client(
-                session, "bedrock-agentcore-control", region
-            ).list_agent_runtimes(maxResults=1)
+            _regional_client(session, "bedrock-agentcore-control", region).list_agent_runtimes(
+                maxResults=1
+            )
         elif plane == "agentcore_gateways":
-            _regional_client(
-                session, "bedrock-agentcore-control", region
-            ).list_gateways(maxResults=1)
+            _regional_client(session, "bedrock-agentcore-control", region).list_gateways(
+                maxResults=1
+            )
         elif plane == "agentcore_workload_identities":
             client = _regional_client(session, "bedrock-agentcore-control", region)
             client.list_workload_identities(maxResults=1)
         elif plane == "agentcore_memories":
-            _regional_client(
-                session, "bedrock-agentcore-control", region
-            ).list_memories(maxResults=1)
+            _regional_client(session, "bedrock-agentcore-control", region).list_memories(
+                maxResults=1
+            )
         elif plane == "bedrock_management_activity":
             _regional_client(session, "cloudtrail", region).lookup_events(
                 LookupAttributes=[
@@ -686,16 +685,16 @@ def _credential_failure(
                 "excluded_enabled_regions": [],
             },
             *[
-            {
-                "scope": item["scope"],
-                "plane": item["plane"],
-                "label": item["label"],
-                "region": item["region"],
-                "state": "unknown",
-                "detail": "Not attempted because credential validation failed.",
-            }
-            for item in connection["coverage_plan"]
-            if item["plane"] != AWS_REGION_DISCOVERY_PLANE
+                {
+                    "scope": item["scope"],
+                    "plane": item["plane"],
+                    "label": item["label"],
+                    "region": item["region"],
+                    "state": "unknown",
+                    "detail": "Not attempted because credential validation failed.",
+                }
+                for item in connection["coverage_plan"]
+                if item["plane"] != AWS_REGION_DISCOVERY_PLANE
             ],
         ],
         "summary": f"Unable to validate the configured role ({code}).",
