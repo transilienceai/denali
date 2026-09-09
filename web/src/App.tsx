@@ -1,10 +1,3 @@
-import { Icon, type IconifyIcon } from "@iconify/react";
-import awsIcon from "@iconify-icons/logos/aws";
-import githubIcon from "@iconify-icons/logos/github-icon";
-import googleCloudIcon from "@iconify-icons/logos/google-cloud";
-import googleIcon from "@iconify-icons/logos/google-icon";
-import microsoftAzureIcon from "@iconify-icons/logos/microsoft-azure";
-import microsoftEntraIcon from "@iconify-icons/selfhst/microsoft-entra-id";
 import {
   Activity,
   AppWindow,
@@ -152,13 +145,13 @@ const CONNECTION_PROVIDER_LABELS: Record<ConnectionProvider, string> = {
   google_workspace: "Google Workspace",
 };
 
-const CONNECTION_PROVIDER_ICONS: Record<ConnectionProvider, IconifyIcon> = {
-  aws: awsIcon,
-  azure: microsoftAzureIcon,
-  entra: microsoftEntraIcon,
-  gcp: googleCloudIcon,
-  github: githubIcon,
-  google_workspace: googleIcon,
+const CONNECTION_PROVIDER_ICONS: Record<ConnectionProvider, string> = {
+  aws: "/provider-icons/aws.svg",
+  azure: "/provider-icons/azure.svg",
+  entra: "/provider-icons/entra.svg",
+  gcp: "/provider-icons/gcp.svg",
+  github: "/provider-icons/github.svg",
+  google_workspace: "/provider-icons/google-workspace.svg",
 };
 
 function ConnectionProviderIcon({ provider }: { provider: ConnectionProvider }) {
@@ -168,7 +161,7 @@ function ConnectionProviderIcon({ provider }: { provider: ConnectionProvider }) 
     aria-label={CONNECTION_PROVIDER_LABELS[provider]}
     title={CONNECTION_PROVIDER_LABELS[provider]}
   >
-    <Icon icon={CONNECTION_PROVIDER_ICONS[provider]} aria-hidden="true" />
+    <img src={CONNECTION_PROVIDER_ICONS[provider]} alt="" aria-hidden="true" />
   </span>;
 }
 

@@ -11,9 +11,6 @@
   },
   "dependencies": {
     "@clerk/react": "^6.14.8",
-    "@iconify-icons/logos": "^2.0.1",
-    "@iconify-icons/selfhst": "^2.0.2",
-    "@iconify/react": "^6.0.2",
     "lucide-react": "1.34.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
