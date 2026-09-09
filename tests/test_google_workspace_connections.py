@@ -71,6 +71,29 @@ def test_validator_checks_both_planes_with_short_lived_delegation() -> None:
     assert validation["account_id_observed"] == "iisecurity.in"
     assert subjects == ["kkmookhey@iisecurity.in"]
     assert [call[0] for call in reports.calls] == ["gemini_in_workspace_apps", "token"]
+    assert all(call[1]["follow_pagination"] is False for call in reports.calls)
+
+
+def test_validator_does_not_paginate_through_a_busy_report_plane() -> None:
+    class BusyReports(FakeReports):
+        def list(self, application_name, **kwargs):
+            if kwargs.get("follow_pagination") is not False:
+                raise RuntimeError("validation attempted to enumerate report activity")
+            return ({"id": {"applicationName": application_name}},)
+
+    reports = BusyReports()
+    operator = GoogleWorkspaceOperator(
+        service_account="workspace@project.iam.gserviceaccount.com",
+        oauth_client_id="123456789",
+        client_factory=lambda _subject: reports,
+    )
+
+    validation = GoogleWorkspaceConnectionValidator(operator, now=lambda: NOW).validate(
+        connection()
+    )
+
+    assert validation["health_state"] == "healthy"
+    assert [item["state"] for item in validation["results"]] == ["passed", "passed"]
 
 
 def test_validator_never_treats_a_forbidden_plane_as_zero() -> None:

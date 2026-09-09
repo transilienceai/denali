@@ -1,6 +1,9 @@
 from datetime import UTC, datetime
 
-from denali.connectors.google_workspace import GoogleWorkspaceConnector
+from denali.connectors.google_workspace import (
+    GoogleWorkspaceConnector,
+    GoogleWorkspaceReportsClient,
+)
 
 NOW = datetime(2026, 9, 8, 12, tzinfo=UTC)
 
@@ -128,3 +131,39 @@ def test_one_failed_report_plane_remains_explicitly_partial() -> None:
     assert [item.state.value for item in inventory.coverage] == ["failed", "complete"]
     assert [item.state.value for item in activity.coverage] == ["failed", "complete"]
     assert "forbidden payload" not in repr(inventory.coverage)
+
+
+def test_reports_validation_probe_ignores_next_page_token() -> None:
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "items": [{"id": {"uniqueQualifier": "first"}}],
+                "nextPageToken": "more-records-exist",
+            }
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, *, timeout):
+            self.calls.append((url, timeout))
+            return Response()
+
+    client = GoogleWorkspaceReportsClient.__new__(GoogleWorkspaceReportsClient)
+    client._session = Session()
+    client._timeout = 30.0
+
+    records = client.list(
+        "gemini_in_workspace_apps",
+        start_time=datetime(2026, 9, 8, 11, tzinfo=UTC),
+        end_time=NOW,
+        max_results=1,
+        limit=2,
+        follow_pagination=False,
+    )
+
+    assert records == ({"id": {"uniqueQualifier": "first"}},)
+    assert len(client._session.calls) == 1

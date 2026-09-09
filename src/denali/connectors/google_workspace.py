@@ -58,6 +58,7 @@ class GoogleWorkspaceReportsClient:
         end_time: datetime,
         max_results: int = 1000,
         limit: int = MAX_REPORT_RECORDS,
+        follow_pagination: bool = True,
     ) -> tuple[dict[str, Any], ...]:
         if not 1 <= max_results <= 1000:
             raise ValueError("Google Workspace max_results must be between 1 and 1000")
@@ -100,6 +101,8 @@ class GoogleWorkspaceReportsClient:
                         raise GoogleWorkspaceRecordLimitReached(
                             f"Google Workspace collection exceeded the {limit}-record safety limit"
                         )
+            if not follow_pagination:
+                return tuple(records)
             token = payload.get("nextPageToken")
             if token is None:
                 url = None
