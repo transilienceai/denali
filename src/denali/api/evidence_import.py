@@ -57,6 +57,8 @@ class VulnerabilityImportRepository(Protocol):
 
     def ingest_vulnerabilities(self, tenant_id: str, batch: Any) -> dict[str, int]: ...
 
+    def evaluate_issues(self, tenant_id: str) -> dict[str, Any]: ...
+
     def complete_vulnerability_import_job(self, job_id: str, result: dict[str, Any]) -> None: ...
 
     def record_vulnerability_import_failure(
@@ -289,11 +291,16 @@ def run_durable_vulnerability_import_job(
             )
             component_result = repository.ingest(tenant_id, syft_batch)
             vulnerability_result = repository.ingest_vulnerabilities(tenant_id, grype_batch)
+            issue_result = repository.evaluate_issues(tenant_id)
             result = {
                 "state": "complete",
                 "component_count": int(component_result.get("assets", 0)),
                 "vulnerability_observations": int(vulnerability_result["observations"]),
                 "vulnerability_count": int(vulnerability_result["vulnerabilities"]),
+                "confirmed_issue_count": int(issue_result.get("confirmed_issues", 0)),
+                "issue_evaluation_state": str(
+                    issue_result.get("evaluation_state", "unknown")
+                ),
                 "syft_coverage": syft_batch.coverage[0].state.value,
                 "grype_coverage": grype_batch.coverage[0].state.value,
             }
