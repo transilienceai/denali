@@ -39,6 +39,7 @@ class WorkspaceReportsClient(Protocol):
         end_time: datetime,
         max_results: int = 1000,
         limit: int = 20_000,
+        follow_pagination: bool = True,
     ) -> tuple[dict[str, Any], ...]: ...
 
 
@@ -144,6 +145,7 @@ class GoogleWorkspaceConnectionValidator:
                     end_time=end,
                     max_results=1,
                     limit=2,
+                    follow_pagination=False,
                 )
                 result.update(
                     state="passed",
