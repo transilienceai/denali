@@ -1,0 +1,923 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Customer proposal overview of Denali AI Security capabilities, production coverage, features, use cases, architecture, and roadmap as of September 2026.">
+  <title>Denali AI Security — Capabilities, Use Cases &amp; Roadmap</title>
+  <style>
+    :root {
+      --navy: #0a1729;
+      --navy-2: #12243b;
+      --ink: #17263b;
+      --muted: #5f6f83;
+      --line: #dce4ec;
+      --paper: #ffffff;
+      --wash: #f5f8fb;
+      --coral: #ec6b4f;
+      --coral-soft: #fff0eb;
+      --teal: #1f9d8b;
+      --teal-soft: #e8f7f4;
+      --blue: #4079d2;
+      --blue-soft: #edf4ff;
+      --amber: #b77b17;
+      --amber-soft: #fff6df;
+      --shadow: 0 18px 45px rgba(13, 31, 52, .10);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #eaf0f5;
+      font-family: Inter, Aptos, "Segoe UI", Arial, sans-serif;
+      line-height: 1.58;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; }
+    p { margin: 0 0 1rem; }
+    h1, h2, h3, h4 { margin: 0; line-height: 1.16; letter-spacing: -.025em; }
+    h2 { font-size: clamp(1.8rem, 3vw, 2.55rem); }
+    h3 { font-size: 1.18rem; }
+    strong { color: var(--ink); }
+
+    .document {
+      width: min(1180px, calc(100% - 32px));
+      margin: 28px auto;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      min-height: 680px;
+      padding: 74px 72px 52px;
+      position: relative;
+      overflow: hidden;
+      color: white;
+      background:
+        radial-gradient(circle at 86% 20%, rgba(39, 187, 165, .22), transparent 28%),
+        radial-gradient(circle at 65% 86%, rgba(236, 107, 79, .20), transparent 28%),
+        linear-gradient(140deg, #071321 0%, #102a43 62%, #123947 100%);
+    }
+
+    .hero::before,
+    .hero::after {
+      content: "";
+      position: absolute;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 50%;
+      transform: rotate(-17deg);
+    }
+    .hero::before { width: 540px; height: 250px; right: -130px; top: 85px; }
+    .hero::after { width: 690px; height: 340px; right: -170px; top: 40px; }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .mark {
+      width: 50px;
+      height: 50px;
+      display: grid;
+      place-items: center;
+      border-radius: 14px;
+      background: linear-gradient(145deg, #ff8d6f, #d9533d);
+      box-shadow: 0 12px 28px rgba(0,0,0,.2);
+      font-size: 1.45rem;
+    }
+
+    .brand strong { display: block; color: white; font-size: 1.22rem; letter-spacing: -.02em; }
+    .brand span { display: block; color: #aebfd0; font-size: .78rem; text-transform: uppercase; letter-spacing: .16em; }
+
+    .hero-copy {
+      max-width: 750px;
+      margin-top: 110px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 20px;
+      color: #92e1d5;
+      font-size: .74rem;
+      font-weight: 800;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 24px; height: 2px; background: currentColor; }
+
+    .hero h1 {
+      max-width: 760px;
+      color: white;
+      font-size: clamp(3rem, 7vw, 5.9rem);
+      font-weight: 780;
+      letter-spacing: -.06em;
+    }
+    .hero h1 em { color: #ff9a7d; font-style: normal; }
+    .hero .lead {
+      max-width: 680px;
+      margin-top: 26px;
+      color: #c8d5e1;
+      font-size: 1.15rem;
+      line-height: 1.7;
+    }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 28px;
+      margin-top: 54px;
+      padding-top: 22px;
+      border-top: 1px solid rgba(255,255,255,.16);
+      color: #aebfd0;
+      font-size: .82rem;
+    }
+    .hero-meta strong { color: white; }
+
+    .toc {
+      display: grid;
+      grid-template-columns: 1.15fr 2fr;
+      gap: 44px;
+      padding: 54px 72px;
+      color: white;
+      background: var(--navy);
+    }
+    .toc h2 { color: white; font-size: 1.5rem; }
+    .toc p { margin-top: 12px; color: #9fb0c3; font-size: .92rem; }
+    .toc ol {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 11px 28px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: toc;
+    }
+    .toc li { counter-increment: toc; }
+    .toc a { display: flex; gap: 11px; text-decoration: none; color: #d9e4ee; font-size: .9rem; }
+    .toc a::before { content: "0" counter(toc); color: #ff8d6f; font-weight: 800; }
+
+    main > section { padding: 72px; }
+    main > section:nth-child(even) { background: var(--wash); }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(190px, .72fr) minmax(0, 2fr);
+      gap: 50px;
+      margin-bottom: 38px;
+    }
+    .section-index { color: var(--coral); font-size: .74rem; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    .section-head p { max-width: 760px; margin: 15px 0 0; color: var(--muted); font-size: 1.02rem; }
+
+    .summary-grid,
+    .capability-grid,
+    .use-case-grid,
+    .roadmap-grid,
+    .principle-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .summary-card,
+    .capability-card,
+    .use-case,
+    .roadmap-card,
+    .principle-card {
+      padding: 26px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: white;
+    }
+
+    .summary-card { min-height: 190px; }
+    .summary-card .number { color: var(--coral); font-size: 2.35rem; font-weight: 800; letter-spacing: -.06em; }
+    .summary-card p, .capability-card p, .use-case p, .roadmap-card p, .principle-card p {
+      margin: 9px 0 0;
+      color: var(--muted);
+      font-size: .91rem;
+    }
+
+    .callout {
+      display: grid;
+      grid-template-columns: 48px 1fr;
+      gap: 18px;
+      align-items: start;
+      margin-top: 24px;
+      padding: 22px 24px;
+      border: 1px solid #bce4dc;
+      border-radius: 15px;
+      background: var(--teal-soft);
+    }
+    .callout .icon, .cap-icon, .use-icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 11px;
+      color: var(--teal);
+      background: white;
+      font-weight: 800;
+    }
+    .callout p { margin: 4px 0 0; color: #426b66; font-size: .91rem; }
+
+    .status-row { display: flex; flex-wrap: wrap; gap: 9px; margin: 0 0 28px; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: .72rem;
+      font-weight: 800;
+      letter-spacing: .03em;
+    }
+    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .available { color: #167563; background: var(--teal-soft); }
+    .accepted { color: #2f67b8; background: var(--blue-soft); }
+    .pilot { color: #96640f; background: var(--amber-soft); }
+    .planned { color: #6e7785; background: #eef1f4; }
+
+    .capability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .capability-card { min-height: 230px; }
+    .capability-card header { display: flex; gap: 15px; align-items: center; }
+    .cap-icon { color: var(--coral); background: var(--coral-soft); }
+    .capability-card ul, .use-case ul, .roadmap-card ul, .scope-list {
+      margin: 15px 0 0;
+      padding-left: 19px;
+      color: var(--muted);
+      font-size: .88rem;
+    }
+    li + li { margin-top: 6px; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 15px; background: white; }
+    table { width: 100%; border-collapse: collapse; min-width: 780px; font-size: .86rem; }
+    th { padding: 14px 17px; text-align: left; color: #526176; background: #eef3f7; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+    td { padding: 16px 17px; border-top: 1px solid var(--line); vertical-align: top; }
+    td:first-child { font-weight: 750; color: var(--ink); }
+    td p { margin: 0; color: var(--muted); }
+
+    .use-case-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .use-case { min-height: 260px; position: relative; overflow: hidden; }
+    .use-case::after {
+      content: attr(data-number);
+      position: absolute;
+      right: 18px;
+      top: 8px;
+      color: #eef2f5;
+      font-size: 4.6rem;
+      font-weight: 850;
+      line-height: 1;
+      z-index: 0;
+    }
+    .use-case > * { position: relative; z-index: 1; }
+    .use-icon { margin-bottom: 18px; color: var(--blue); background: var(--blue-soft); }
+    .outcome { margin-top: 15px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--ink); font-size: .85rem; font-weight: 720; }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr;
+      gap: 12px;
+      align-items: stretch;
+      margin: 10px 0 28px;
+    }
+    .arch-node { padding: 21px 15px; border: 1px solid var(--line); border-radius: 14px; background: white; text-align: center; }
+    .arch-node strong { display: block; }
+    .arch-node span { display: block; margin-top: 5px; color: var(--muted); font-size: .78rem; }
+    .arrow { align-self: center; color: var(--coral); font-size: 1.4rem; font-weight: 900; }
+
+    .principle-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .principle-card { display: grid; grid-template-columns: 38px 1fr; gap: 15px; min-height: 150px; }
+    .principle-card .tick { color: var(--teal); font-size: 1.35rem; font-weight: 900; }
+
+    .evidence-flow {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin: 26px 0 0;
+    }
+    .evidence-step { padding: 18px; border-radius: 12px; color: white; background: var(--navy-2); }
+    .evidence-step span { color: #80d7c8; font-size: .7rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .evidence-step strong { display: block; margin-top: 6px; color: white; font-size: .94rem; }
+    .evidence-step p { margin: 6px 0 0; color: #afbed0; font-size: .78rem; }
+
+    .roadmap-grid { align-items: start; }
+    .roadmap-card { padding-top: 0; overflow: hidden; }
+    .roadmap-card .horizon { margin: 0 -26px 23px; padding: 15px 26px; color: white; background: var(--navy-2); font-size: .76rem; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; }
+    .roadmap-card:nth-child(2) .horizon { background: #315f86; }
+    .roadmap-card:nth-child(3) .horizon { background: #287f75; }
+    .roadmap-card .status { margin-top: 16px; }
+
+    .poc-timeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 30px; }
+    .poc-phase { position: relative; padding: 25px 20px 22px; border-top: 4px solid var(--blue); background: white; }
+    .poc-phase + .poc-phase { border-left: 1px solid var(--line); }
+    .poc-phase:nth-child(2) { border-top-color: #5a8ddb; }
+    .poc-phase:nth-child(3) { border-top-color: var(--teal); }
+    .poc-phase:nth-child(4) { border-top-color: var(--coral); }
+    .poc-phase span { color: var(--muted); font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+    .poc-phase h3 { margin-top: 7px; }
+    .poc-phase p { margin: 9px 0 0; color: var(--muted); font-size: .82rem; }
+
+    .boundary-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 26px; }
+    .boundary { display: flex; gap: 12px; padding: 16px; border-radius: 12px; background: #fff; border: 1px solid var(--line); color: var(--muted); font-size: .86rem; }
+    .boundary b { color: var(--coral); }
+
+    .next-step {
+      padding: 68px 72px;
+      display: grid;
+      grid-template-columns: 1.6fr .8fr;
+      gap: 50px;
+      align-items: center;
+      color: white;
+      background: linear-gradient(135deg, #0b1a2b, #173750);
+    }
+    .next-step h2 { color: white; }
+    .next-step p { max-width: 680px; margin-top: 16px; color: #b9c8d5; }
+    .next-card { padding: 24px; border: 1px solid rgba(255,255,255,.15); border-radius: 15px; background: rgba(255,255,255,.06); }
+    .next-card strong { color: white; }
+    .next-card span { display: block; margin-top: 6px; color: #aebfd0; font-size: .85rem; }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 30px;
+      padding: 26px 72px;
+      color: #718095;
+      background: #f0f4f7;
+      font-size: .75rem;
+    }
+
+    .page-break { break-before: page; }
+
+    @media (max-width: 850px) {
+      .hero, main > section, .next-step { padding: 46px 28px; }
+      .toc, footer { padding: 35px 28px; }
+      .hero { min-height: auto; }
+      .hero-copy { margin-top: 72px; }
+      .toc, .section-head, .next-step { grid-template-columns: 1fr; gap: 24px; }
+      .summary-grid, .capability-grid, .use-case-grid, .roadmap-grid, .principle-grid { grid-template-columns: 1fr; }
+      .architecture { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); justify-self: center; }
+      .evidence-flow, .poc-timeline, .boundary-list { grid-template-columns: 1fr; }
+      .poc-phase + .poc-phase { border-left: 0; border-top-width: 4px; }
+    }
+
+    @media print {
+      @page { size: A4; margin: 13mm; }
+      body { background: white; font-size: 9.5pt; }
+      .document { width: 100%; margin: 0; box-shadow: none; }
+      .hero { min-height: 257mm; padding: 26mm 18mm; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .hero-copy { margin-top: 45mm; }
+      .toc { break-before: page; }
+      main > section, .toc, .next-step { padding: 14mm 13mm; }
+      .toc { grid-template-columns: 1.15fr 2fr; }
+      .section-head { grid-template-columns: minmax(35mm, .72fr) minmax(0, 2fr); }
+      .next-step { grid-template-columns: 1.6fr .8fr; break-inside: avoid; }
+      .summary-grid, .roadmap-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .capability-grid, .use-case-grid, .principle-grid, .boundary-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .architecture { grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr; }
+      .evidence-flow, .poc-timeline { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .arrow { transform: none; justify-self: auto; }
+      .summary-card, .capability-card, .use-case, .principle-card,
+      .callout, .evidence-step, .poc-phase, .boundary, tr { break-inside: avoid; }
+      .summary-grid, .capability-grid, .use-case-grid, .roadmap-grid, .principle-grid { gap: 4mm; }
+      .capability-card, .use-case { min-height: 0; }
+      .table-wrap, .roadmap-card { break-inside: auto; }
+      thead { display: table-header-group; }
+      .use-case::after { display: none; }
+      table { min-width: 0; font-size: 7.6pt; }
+      th, td { padding: 2.8mm 3mm; }
+      footer { padding: 7mm 13mm; }
+      a { text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <article class="document">
+    <header class="hero">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">▲</div>
+        <div><strong>Denali</strong><span>AI Security</span></div>
+      </div>
+      <div class="hero-copy">
+        <div class="eyebrow">Customer proposal overview</div>
+        <h1>Know your AI.<br><em>Prove the risk.</em></h1>
+        <p class="lead">An evidence-backed platform for discovering AI systems across code, cloud, and enterprise applications; connecting source to runtime; evaluating posture and vulnerabilities; and investigating activity without turning missing data into false assurance.</p>
+        <div class="hero-meta">
+          <span><strong>Document</strong><br>Capabilities, features, use cases &amp; roadmap</span>
+          <span><strong>Edition</strong><br>Updated 9 September 2026</span>
+          <span><strong>Deployment</strong><br>Live hosted multi-tenant service and open-source local stack</span>
+        </div>
+      </div>
+    </header>
+
+    <nav class="toc" aria-label="Table of contents">
+      <div>
+        <h2>Proposal at a glance</h2>
+        <p>A practical view of what Denali does today, where it creates customer value, and how the platform is expected to evolve.</p>
+      </div>
+      <ol>
+        <li><a href="#executive-summary">Executive summary</a></li>
+        <li><a href="#capabilities">Capabilities &amp; features</a></li>
+        <li><a href="#coverage">Provider &amp; evidence coverage</a></li>
+        <li><a href="#use-cases">Customer use cases</a></li>
+        <li><a href="#architecture">Architecture &amp; security</a></li>
+        <li><a href="#differentiation">Why Denali</a></li>
+        <li><a href="#roadmap">Product roadmap</a></li>
+        <li><a href="#evaluation">Evaluation approach</a></li>
+      </ol>
+    </nav>
+
+    <main>
+      <section id="executive-summary">
+        <div class="section-head">
+          <div class="section-index">01 / Executive summary</div>
+          <div>
+            <h2>AI security built around evidence, not assumptions</h2>
+            <p>Denali helps security, cloud, application, and AI governance teams understand which AI systems exist, how they are deployed, which enterprise AI applications are being used, what identities and capabilities they rely on, which weaknesses are supported by evidence, and where runtime behavior requires attention.</p>
+          </div>
+        </div>
+
+        <div class="summary-grid">
+          <div class="summary-card">
+            <div class="number">01</div>
+            <h3>Discover the estate</h3>
+            <p>Build a normalized AI inventory across source repositories, cloud resources, applications, identities, models, tools, data stores, workloads, and software components.</p>
+          </div>
+          <div class="summary-card">
+            <div class="number">02</div>
+            <h3>Connect code to runtime</h3>
+            <p>Correlate immutable source declarations with independently observed cloud workloads using exact deployment identifiers—not names or fuzzy similarity.</p>
+          </div>
+          <div class="summary-card">
+            <div class="number">03</div>
+            <h3>Prioritize explainably</h3>
+            <p>Combine findings, vulnerabilities, proven relationships, and runtime detections into deterministic issues that retain every supporting fact and coverage limit.</p>
+          </div>
+        </div>
+
+        <div class="callout">
+          <div class="icon" aria-hidden="true">✓</div>
+          <div>
+            <strong>Core proposition</strong>
+            <p>Denali separates inventory, findings, vulnerabilities, runtime activity, detections, issues, and coverage. A healthy connection proves access—not collection. A missing signal never becomes a reassuring zero. This creates a defensible evidence trail for security decisions, governance reviews, and customer assurance.</p>
+          </div>
+        </div>
+
+        <div class="callout">
+          <div class="icon" aria-hidden="true">↗</div>
+          <div>
+            <strong>Latest production update</strong>
+            <p>Google Workspace is now a first-class, keyless connection for bounded Gemini and AI-related OAuth audit evidence. Healthy provider validation automatically starts durable evidence collection; cloud collection refreshes dependent source correlation and rule evaluation. Deployment workflows can also submit matching Syft and Grype evidence through GitHub OIDC without a Denali API key, while a secure administrator upload remains available as a recovery path. The connection experience now exposes clearer setup progress, per-plane validation, evidence readiness, and background collection status.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="capabilities" class="page-break">
+        <div class="section-head">
+          <div class="section-index">02 / Capabilities</div>
+          <div>
+            <h2>A unified view from AI inventory to runtime evidence</h2>
+            <p>Denali’s current product surfaces cover discovery, assessment, correlation, monitoring, evidence quality, governance, and provider lifecycle management.</p>
+          </div>
+        </div>
+
+        <div class="status-row" aria-label="Status legend">
+          <span class="status available">Implemented</span>
+          <span class="status accepted">Live-provider accepted</span>
+          <span class="status pilot">Production acceptance in progress</span>
+          <span class="status planned">Planned or deferred</span>
+        </div>
+
+        <div class="capability-grid">
+          <article class="capability-card">
+            <header><div class="cap-icon">AI</div><h3>AI inventory and evidence graph</h3></header>
+            <p>Provider-neutral inventory with evidence-bearing assertions and relationships.</p>
+            <ul>
+              <li>Agents, models, applications, MCP servers and tools, guardrails, frameworks, pipelines, data stores, workloads, repositories, identities, endpoints, cloud resources, and components.</li>
+              <li>Lifecycle, first/last seen, governance status, discovery source, connection, collection run, scope, and evidence locator.</li>
+              <li>Exact relationships such as runs-as, invokes, reads, writes, contains, and deployed-by.</li>
+              <li>Active, withdrawn, stale, ambiguous, unresolved, and unknown states remain visible.</li>
+            </ul>
+          </article>
+
+          <article class="capability-card">
+            <header><div class="cap-icon">&lt;/&gt;</div><h3>Source and code-to-cloud lineage</h3></header>
+            <p>Trace AI applications from immutable source context to independently observed runtime.</p>
+            <ul>
+              <li>GitHub App-backed or local static analysis of Python, TypeScript, JavaScript, Terraform, CloudFormation/SAM, Kubernetes, Cloud Run, ARM, and Bicep.</li>
+              <li>Exact provider, account/project/subscription, Region/location, workload, revision, image, and execution-identity comparisons.</li>
+              <li>Proven, unmatched, and ambiguous candidates shown separately.</li>
+              <li>Declared tools and actions are explicitly labelled “not observed” until runtime evidence proves execution.</li>
+            </ul>
+          </article>
+
+          <article class="capability-card">
+            <header><div class="cap-icon">!</div><h3>Posture findings and vulnerabilities</h3></header>
+            <p>Normalize evaluated conditions and scanner observations without flattening their source context.</p>
+            <ul>
+              <li>Atomic configuration findings with severity, state, risk, remediation, compliance mappings, history, and evidence.</li>
+              <li>Scanner-neutral vulnerability records linked to exact software-component occurrences and workload artifacts.</li>
+              <li>Syft SBOM and Grype vulnerability pipelines with exact deployed-image matching; OCSF and Prowler-compatible finding intake.</li>
+              <li>Automated, checksum-bound GitHub Actions submission through OIDC—without CI API keys—with a secure administrator upload as an advanced fallback.</li>
+              <li>Fix version, CVSS, exploit state, matching method, confidence, and scanner disagreement retained; successful imports automatically refresh issue evaluation.</li>
+            </ul>
+          </article>
+
+          <article class="capability-card">
+            <header><div class="cap-icon">↗</div><h3>Issues and capability paths</h3></header>
+            <p>Prioritize security consequences that are supported by multiple independent evidence classes.</p>
+            <ul>
+              <li>Deterministic issue correlation across findings, identities, models, workloads, data, tools, and runtime detections.</li>
+              <li>Compact path visualization with contributing facts and direct evidence locators.</li>
+              <li>Coverage and incomplete candidates shown before totals are interpreted.</li>
+              <li>Stable lifecycle, confidence, first/last seen, and re-evaluation behavior.</li>
+            </ul>
+          </article>
+
+          <article class="capability-card">
+            <header><div class="cap-icon">◎</div><h3>Runtime activity and detections</h3></header>
+            <p>Normalize bounded runtime metadata and evaluate narrow, reproducible security conditions.</p>
+            <ul>
+              <li>AWS Bedrock management activity, Vertex AI audit activity, Google Workspace Gemini and OAuth audit activity, and Entra sign-in or application-management activity.</li>
+              <li>Exact actor, model, application, workload, time, outcome, and correlation context.</li>
+              <li>Evidence-linked rules for repeated Entra AI sign-in failures, high-impact consent changes, and invocation of an exact unreviewed model.</li>
+              <li>Raw activity remains separate from detections and issues.</li>
+            </ul>
+          </article>
+
+          <article class="capability-card">
+            <header><div class="cap-icon">▦</div><h3>AI application discovery</h3></header>
+            <p>Find evidence-backed AI applications in Microsoft Entra and Google Workspace for review.</p>
+            <ul>
+              <li>Entra application and service-principal inventory, delegated grants, application roles, sign-ins, and directory changes.</li>
+              <li>Workspace Gemini feature-use activity and catalog-matched OAuth authorization or use events from a bounded audit window.</li>
+              <li>Conservative app-ID and boundary-aware name matching.</li>
+              <li>Explicit distinction between “catalog match,” “observed use,” and policy-defined unauthorized use.</li>
+              <li>Licensing or permission gaps remain partial/failed coverage—not zero activity.</li>
+            </ul>
+          </article>
+
+          <article class="capability-card">
+            <header><div class="cap-icon">✓</div><h3>Coverage, confidence, and governance</h3></header>
+            <p>Make evidence quality and human decisions first-class product data.</p>
+            <ul>
+              <li>Coverage states: complete, partial, failed, not supported, and unknown.</li>
+              <li>Per-connector, connection, plane, scope, and collection-run provenance.</li>
+              <li>Human governance states: approved, unreviewed, or unwanted, with notes and ownership context.</li>
+              <li>Deep links, filters, drawers, history, and evidence views support review workflows.</li>
+            </ul>
+          </article>
+
+          <article class="capability-card">
+            <header><div class="cap-icon">☁</div><h3>Self-service provider connections</h3></header>
+            <p>Onboard read-only cloud and repository access without customer-managed static credentials.</p>
+            <ul>
+              <li>AWS assume-role with external ID and explicit account/Region scope.</li>
+              <li>Azure tenant consent with selected subscriptions and per-plane validation.</li>
+              <li>Microsoft Entra administrator consent for a fixed read-only Graph evidence bundle.</li>
+              <li>GCP connection-specific keyless principal with selected projects.</li>
+              <li>Google Workspace domain-wide delegation for one disclosed read-only Admin Reports scope; no service-account key or customer token is stored.</li>
+              <li>GitHub App installation with exact repositories and temporary installation tokens.</li>
+              <li>Per-plane validation and background progress remain visible; healthy validation automatically queues the provider’s first durable collection, while manual collection remains available for retry and refresh.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="coverage">
+        <div class="section-head">
+          <div class="section-index">03 / Coverage</div>
+          <div>
+            <h2>Multi-cloud and source coverage with explicit boundaries</h2>
+            <p>Denali separates access validation from actual collection. The matrix below describes implemented collection paths and the evidence each one can provide.</p>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Source</th><th>Implemented coverage</th><th>Customer access model</th><th>Current maturity</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>AWS</td>
+                <td><p>Bedrock models and Agents, AgentCore, Lambda, ECS, EKS, SageMaker, CloudFormation topology/posture, IAM and invocation-logging posture, deployment identity, and bounded Bedrock management activity.</p></td>
+                <td><p>Customer-owned read-only role; Denali assumes it using external ID and hosted OIDC—no access keys.</p></td>
+                <td><span class="status accepted">Production setup and collection observed</span></td>
+              </tr>
+              <tr>
+                <td>Microsoft Azure</td>
+                <td><p>Container Apps, Function Apps, AKS, AI services, AI Search, Machine Learning, Bot Service, Resource Graph, and management activity validation.</p></td>
+                <td><p>Multi-tenant application consent plus customer-assigned Reader access to explicitly selected subscriptions.</p></td>
+                <td><span class="status accepted">Production setup and validation observed</span></td>
+              </tr>
+              <tr>
+                <td>Google Cloud</td>
+                <td><p>Vertex AI resources, Agent Builder, Dialogflow, Cloud Run, Functions Gen2, GKE, Cloud Asset snapshots, and Vertex audit activity.</p></td>
+                <td><p>Unique keyless service-account principal per connection; customer selects projects and grants viewer roles.</p></td>
+                <td><span class="status accepted">Production setup reported working</span></td>
+              </tr>
+              <tr>
+                <td>Google Workspace</td>
+                <td><p>Gemini-in-Workspace feature-use audit events and catalog-matched AI OAuth application activity. Produces bounded AI application inventory and runtime activity without prompts, responses, IP addresses, raw reports, or customer tokens.</p></td>
+                <td><p>A Workspace super administrator authorizes one fixed read-only Admin Reports scope through domain-wide delegation. Denali uses short-lived delegated credentials.</p></td>
+                <td><span class="status pilot">Production authorization observed; final two-plane revalidation pending</span></td>
+              </tr>
+              <tr>
+                <td>GitHub</td>
+                <td><p>Exact repository identity, immutable revision, bounded source analysis, workflow inventory, posture, declarations, and code-to-cloud correlation.</p></td>
+                <td><p>Organization-owned GitHub App with Metadata, Contents, and Actions read-only permissions; exact repositories selected.</p></td>
+                <td><span class="status accepted">Production installation observed</span></td>
+              </tr>
+              <tr>
+                <td>Microsoft Entra</td>
+                <td><p>AI enterprise applications, service principals, delegated grants, app roles, sign-ins, and application-management audits.</p></td>
+                <td><p>Separate read-only Microsoft Graph consent boundary; licensing limits remain explicit.</p></td>
+                <td><span class="status accepted">Production consent and validation observed</span></td>
+              </tr>
+              <tr>
+                <td>Scanners &amp; interchange</td>
+                <td><p>Syft, Grype, OCSF findings, Prowler OCSF, Kubernetes snapshots, and provider-neutral runtime JSON imports. Vulnerability evidence is correlated to an independently observed immutable image digest.</p></td>
+                <td><p>GitHub Actions OIDC and short-lived checksum-bound uploads are the primary hosted path; authenticated administrator upload is the recovery path. Raw scanner objects are transient.</p></td>
+                <td><span class="status available">Automated path implemented</span></td>
+              </tr>
+              <tr>
+                <td>MCP</td>
+                <td><p>Streamable HTTP initialization and paginated <code>tools/list</code> observation.</p></td>
+                <td><p>Read-only discovery; Denali does not invoke customer tools during observation.</p></td>
+                <td><span class="status available">Implemented</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">
+          <div class="icon" aria-hidden="true">i</div>
+          <div>
+            <strong>How to read maturity</strong>
+            <p>“Production observed” records the successful setup, consent, validation, or collection step explicitly exercised so far; it is not a claim that every lifecycle edge case has passed. Full provider acceptance still requires create, setup or callback, validation, collection, disable, and delete evidence. Coverage remains independent: a healthy connection proves access, while a complete collection proves only the declared plane and bounded window.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="use-cases" class="page-break">
+        <div class="section-head">
+          <div class="section-index">04 / Use cases</div>
+          <div>
+            <h2>From board-level governance to engineering investigation</h2>
+            <p>Denali supports complementary workflows across security leadership, cloud security, AppSec, SOC, platform engineering, and AI governance.</p>
+          </div>
+        </div>
+
+        <div class="use-case-grid">
+          <article class="use-case" data-number="01">
+            <div class="use-icon">01</div>
+            <h3>Enterprise AI inventory and AI-BOM</h3>
+            <p>Establish a defensible baseline of AI systems across code, cloud, SaaS applications, models, tools, identities, data dependencies, and software components.</p>
+            <ul><li>Identify new, changed, unreviewed, or withdrawn assets.</li><li>Trace every asset to its source, scope, and observation time.</li><li>Support governance attestation and architecture review.</li></ul>
+            <div class="outcome">Outcome: a living, evidence-backed register rather than a manually maintained spreadsheet.</div>
+          </article>
+
+          <article class="use-case" data-number="02">
+            <div class="use-icon">02</div>
+            <h3>Code-to-cloud ownership and lineage</h3>
+            <p>Answer which repository produced or declares a workload, which identity runs it, which model it targets, and which tools or data actions it can perform.</p>
+            <ul><li>Resolve exact deployment identifiers across AWS, Azure, GCP, and Kubernetes.</li><li>Keep unproven or ambiguous links visible without asserting them.</li><li>Give cloud and application teams a shared investigation view.</li></ul>
+            <div class="outcome">Outcome: faster ownership, impact analysis, and remediation routing.</div>
+          </article>
+
+          <article class="use-case" data-number="03">
+            <div class="use-icon">03</div>
+            <h3>AI posture and software supply-chain risk</h3>
+            <p>Combine AI-specific configuration conditions with SBOM and vulnerability evidence for the exact deployed artifact.</p>
+            <ul><li>Inspect atomic findings before accepting a higher-order risk conclusion.</li><li>Prioritize fixable vulnerabilities in deployed AI workloads.</li><li>Preserve scanner disagreement, fix status, and coverage.</li></ul>
+            <div class="outcome">Outcome: fewer generic alerts and clearer, evidence-linked remediation decisions.</div>
+          </article>
+
+          <article class="use-case" data-number="04">
+            <div class="use-icon">04</div>
+            <h3>Attack-path and issue prioritization</h3>
+            <p>Surface security consequences only when the required findings and capability relationships are independently supported.</p>
+            <ul><li>Show the path across workload, identity, model, tool, and data.</li><li>Explain why the issue exists and what evidence is missing.</li><li>Track lifecycle without erasing historical observations.</li></ul>
+            <div class="outcome">Outcome: explainable prioritization that can withstand technical and audit review.</div>
+          </article>
+
+          <article class="use-case" data-number="05">
+            <div class="use-icon">05</div>
+            <h3>Runtime monitoring and investigation</h3>
+            <p>Normalize provider audit metadata and detect narrow patterns such as repeated AI app sign-in failures, consent changes, or use of an unreviewed model.</p>
+            <ul><li>Correlate activity to exact independently inventoried entities.</li><li>Keep unresolved actors and resources visible for investigation.</li><li>Retain event evidence without collecting prompt or response content.</li></ul>
+            <div class="outcome">Outcome: AI-specific operational context for SOC and cloud security teams.</div>
+          </article>
+
+          <article class="use-case" data-number="06">
+            <div class="use-icon">06</div>
+            <h3>AI application discovery and consent review</h3>
+            <p>Identify enterprise AI applications in Microsoft Entra and Google Workspace, then evaluate permissions or observed activity without prematurely labelling them “shadow AI.”</p>
+            <ul><li>Review Entra app identity, publisher, grants, roles, sign-ins, and administrative changes.</li><li>Review Workspace Gemini feature use and catalog-matched AI OAuth application events within the collected audit window.</li><li>Apply explicit approved, unreviewed, or unwanted governance while keeping catalog match, observed use, and confirmed risk separate.</li></ul>
+            <div class="outcome">Outcome: a cross-platform SaaS AI governance workflow with honest evidence and coverage boundaries.</div>
+          </article>
+
+          <article class="use-case" data-number="07">
+            <div class="use-icon">07</div>
+            <h3>Multi-tenant security service delivery</h3>
+            <p>Operate isolated customer or business-unit workspaces using Clerk Organizations mapped to internal tenant UUIDs and server-side authorization.</p>
+            <ul><li>Read access for members; mutations limited to administrators.</li><li>Tenant-scoped database queries and provider callbacks.</li><li>Same-origin browser-to-API routing; secrets never reach the browser.</li></ul>
+            <div class="outcome">Outcome: a controlled hosted multi-tenant foundation for managed or enterprise delivery.</div>
+          </article>
+
+          <article class="use-case" data-number="08">
+            <div class="use-icon">08</div>
+            <h3>Evidence consolidation and assurance</h3>
+            <p>Bring cloud observations, source analysis, enterprise AI application evidence, OCSF findings, SBOMs, vulnerabilities, and runtime events into a consistent investigation model.</p>
+            <ul><li>Preserve original source identity and bounded evidence locators.</li><li>Distinguish observed facts from inferred security conclusions.</li><li>Expose coverage gaps before interpreting counts or trends.</li></ul>
+            <div class="outcome">Outcome: one defensible evidence model across fragmented AI security signals.</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="architecture">
+        <div class="section-head">
+          <div class="section-index">05 / Architecture</div>
+          <div>
+            <h2>Secure by boundary: browser, API, worker, and data</h2>
+            <p>The hosted service keeps authentication, authorization, secrets, durable state, background work, and customer cloud access in deliberately separate trust zones.</p>
+          </div>
+        </div>
+
+        <div class="architecture" aria-label="Hosted architecture flow">
+          <div class="arch-node"><strong>Browser</strong><span>Relative /api requests<br>Clerk session</span></div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="arch-node"><strong>Vercel</strong><span>Static web app<br>Same-origin rewrite</span></div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="arch-node"><strong>Modal FastAPI</strong><span>Authorization boundary<br>Durable workers</span></div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="arch-node"><strong>Neon PostgreSQL</strong><span>Tenant-scoped<br>Durable source of truth</span></div>
+        </div>
+
+        <div class="principle-grid">
+          <div class="principle-card"><div class="tick">✓</div><div><h3>Keyless customer access</h3><p>AWS assume-role, Azure and Entra consent/RBAC, GCP workload identity, Google Workspace domain-wide delegation, and GitHub App installation replace uploaded access keys and personal tokens.</p></div></div>
+          <div class="principle-card"><div class="tick">✓</div><div><h3>Server-side tenant resolution</h3><p>The API derives the Denali tenant from the verified active Clerk Organization. Client-supplied tenant identifiers never select customer data.</p></div></div>
+          <div class="principle-card"><div class="tick">✓</div><div><h3>Secrets stay backend-only</h3><p>Database, Clerk backend, and provider secrets live in Modal Secrets. Vercel receives only the public Clerk publishable key and Modal routing origin.</p></div></div>
+          <div class="principle-card"><div class="tick">✓</div><div><h3>Bounded evidence retention</h3><p>Denali retains normalized metadata and evidence needed for explanation—not raw prompts, responses, tokens, secrets, private keys, caller IPs, or unbounded payloads.</p></div></div>
+          <div class="principle-card"><div class="tick">✓</div><div><h3>Durable background work</h3><p>Hosted validation, provider collection, and vulnerability imports use PostgreSQL job records, leases, bounded terminal states, and Modal workers that receive durable identifiers only.</p></div></div>
+          <div class="principle-card"><div class="tick">✓</div><div><h3>Explicit lifecycle safeguards</h3><p>Connections validate declared read planes independently, can be disabled before deletion, and preserve previously collected evidence after configuration removal.</p></div></div>
+        </div>
+      </section>
+
+      <section id="differentiation">
+        <div class="section-head">
+          <div class="section-index">06 / Differentiation</div>
+          <div>
+            <h2>What makes Denali different</h2>
+            <p>Denali is designed as an independent AI security product—not a re-skinned CSPM and not a generic log viewer.</p>
+          </div>
+        </div>
+
+        <div class="evidence-flow">
+          <div class="evidence-step"><span>Observe</span><strong>Inventory &amp; activity</strong><p>Record provider and repository facts with source identity.</p></div>
+          <div class="evidence-step"><span>Correlate</span><strong>Exact relationships</strong><p>Join only independently supported identifiers.</p></div>
+          <div class="evidence-step"><span>Evaluate</span><strong>Findings &amp; detections</strong><p>Apply deterministic rules with explicit coverage.</p></div>
+          <div class="evidence-step"><span>Prioritize</span><strong>Issues &amp; paths</strong><p>Compose sufficient evidence into explainable consequences.</p></div>
+        </div>
+
+        <div class="boundary-list">
+          <div class="boundary"><b>01</b><span><strong>Evidence before verdicts.</strong> Similar names do not prove identity, deployment, ownership, use, or risk.</span></div>
+          <div class="boundary"><b>02</b><span><strong>Coverage before counts.</strong> Partial, failed, unsupported, and unknown remain visible.</span></div>
+          <div class="boundary"><b>03</b><span><strong>Source and runtime stay independent.</strong> A code declaration is not execution evidence.</span></div>
+          <div class="boundary"><b>04</b><span><strong>Open ecosystem.</strong> PostgreSQL-backed, Apache 2.0 open source, and compatible with OCSF, Syft, Grype, and Prowler inputs.</span></div>
+          <div class="boundary"><b>05</b><span><strong>Customer-controlled access.</strong> Provider grants are read-only, scoped, reviewable, and revocable at the source.</span></div>
+          <div class="boundary"><b>06</b><span><strong>No silent content collection.</strong> Prompt/response telemetry requires a separate policy, consent, permission, redaction, and retention decision.</span></div>
+        </div>
+      </section>
+
+      <section id="roadmap" class="page-break">
+        <div class="section-head">
+          <div class="section-index">07 / Roadmap</div>
+          <div>
+            <h2>A roadmap from accepted foundations to scaled operations</h2>
+            <p>The roadmap is organized by delivery horizon rather than committed dates. Sequence and timing should be aligned to customer priorities and acceptance evidence.</p>
+          </div>
+        </div>
+
+        <div class="roadmap-grid">
+          <article class="roadmap-card">
+            <div class="horizon">Foundation — delivered</div>
+            <h3>Production-capable evidence platform</h3>
+            <ul>
+              <li>Provider-neutral inventory, relationships, coverage, governance, findings, vulnerabilities, issues, activity, and detections.</li>
+              <li>Self-service AWS, Azure, Microsoft Entra, Google Cloud, Google Workspace, and GitHub connections using scoped, revocable access.</li>
+              <li>Exact code-to-cloud correlation across AWS, Azure, GCP, and Kubernetes.</li>
+              <li>Durable validation and collection orchestration with automatic first collection, dependent source refresh, and rule evaluation.</li>
+              <li>Automated Syft and Grype submission from deployment workflows through GitHub OIDC and exact image-digest correlation.</li>
+              <li>Live Clerk, Vercel, Modal, and Neon multi-tenant service plus the open-source local Compose product.</li>
+            </ul>
+            <span class="status available">Implemented</span>
+          </article>
+
+          <article class="roadmap-card">
+            <div class="horizon">Horizon 1 — operationalize</div>
+            <h3>Operational acceptance and evidence depth</h3>
+            <ul>
+              <li>Complete and record hosted create → setup/callback → validate → collect → disable → delete acceptance for every enabled provider.</li>
+              <li>Establish scheduled refresh, freshness objectives, retry visibility, and operator alerts beyond the automatic first collection.</li>
+              <li>Roll the GitHub OIDC scanner action into representative deployment workflows so vulnerability and issue views carry non-fixture evidence.</li>
+              <li>Expand evidence-backed detections and customer-ready issue paths across AWS, Azure, Google Cloud, Entra, and Google Workspace.</li>
+              <li>Split Neon runtime and migration roles; enable alerts, backups, and restore drills.</li>
+              <li>Add route-level frontend bundle splitting and continue performance and accessibility refinement.</li>
+            </ul>
+            <span class="status pilot">Current priority</span>
+          </article>
+
+          <article class="roadmap-card">
+            <div class="horizon">Horizon 2 — expand</div>
+            <h3>Broader identity, SaaS, and workflow coverage</h3>
+            <ul>
+              <li>Expand Google Workspace coverage beyond bounded Gemini and OAuth audit observations where a genuinely read-only, customer-reviewable permission model is available.</li>
+              <li>GitHub branch-protection and pull-request posture through a separate Administration-read permission plane.</li>
+              <li>GitHub installation and repository lifecycle reconciliation; GitHub Enterprise Server support.</li>
+              <li>Slack and Jira onboarding for collaboration and ticket workflows.</li>
+              <li>OpenTelemetry and OpenInference runtime evidence with explicit tenant opt-in, redaction, retention, and coverage semantics.</li>
+              <li>User-authored correlation rules, richer cross-cloud vulnerability and exposure paths, ticket assignment, and bounded response workflows.</li>
+            </ul>
+            <span class="status planned">Planned</span>
+          </article>
+        </div>
+
+        <div class="callout">
+          <div class="icon" aria-hidden="true">→</div>
+          <div>
+            <strong>Longer-term opportunities</strong>
+            <p>Potential extensions include user-authored correlation rules, richer cross-cloud vulnerability and exposure paths, additional enterprise application catalogs, and policy-aware response integration. Automated remediation remains deliberately outside Denali’s current product boundary. Prompt and response telemetry is not silently assumed; it requires explicit customer opt-in and a separate permission, redaction, encryption, retention, and evidence design.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="evaluation">
+        <div class="section-head">
+          <div class="section-index">08 / Evaluation</div>
+          <div>
+            <h2>A practical customer evaluation path</h2>
+            <p>A focused proof of value can start with a deliberately bounded set of repositories, cloud accounts, projects or subscriptions, enterprise application directories, and runtime audit sources.</p>
+          </div>
+        </div>
+
+        <div class="poc-timeline">
+          <div class="poc-phase"><span>Phase 1</span><h3>Scope &amp; connect</h3><p>Agree success criteria, evidence boundaries, provider scopes, and data-retention expectations. Configure read-only connections.</p></div>
+          <div class="poc-phase"><span>Phase 2</span><h3>Discover &amp; correlate</h3><p>Collect a bounded AI inventory and prove selected repository-to-workload relationships with exact identifiers.</p></div>
+          <div class="poc-phase"><span>Phase 3</span><h3>Assess &amp; observe</h3><p>Collect posture and runtime metadata; submit exact-artifact SBOM and vulnerability evidence; evaluate detections and evidence-backed issues.</p></div>
+          <div class="poc-phase"><span>Phase 4</span><h3>Review &amp; decide</h3><p>Validate coverage, review findings and paths with owners, document outcomes, gaps, and the production adoption plan.</p></div>
+        </div>
+
+        <div class="table-wrap" style="margin-top:28px">
+          <table>
+            <thead><tr><th>Suggested success measure</th><th>Evidence of success</th></tr></thead>
+            <tbody>
+              <tr><td>Inventory accuracy</td><td><p>Selected AI assets and identities are present with attributable source, scope, freshness, and lifecycle.</p></td></tr>
+              <tr><td>Lineage confidence</td><td><p>Chosen repositories link to independently observed workloads only when all required exact identifiers agree.</p></td></tr>
+              <tr><td>Risk explainability</td><td><p>Priority issues show every contributing finding, vulnerability, relationship, activity record, and missing coverage condition.</p></td></tr>
+              <tr><td>Access minimization</td><td><p>No customer access keys, service-account JSON, personal access tokens, OAuth refresh tokens, prompt content, or response content is required or retained.</p></td></tr>
+              <tr><td>Operational fit</td><td><p>Security, cloud, and application owners can navigate from a business concern to evidence and accountable remediation ownership.</p></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">
+          <div class="icon" aria-hidden="true">i</div>
+          <div>
+            <strong>Important acceptance principle</strong>
+            <p>Provider onboarding is accepted only after a real create, setup/callback, validation, disable, and delete pass. Collection is tested separately. Mocks and a healthy badge demonstrate contracts and access—they do not prove that customer inventory exists or that risk is absent.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <section class="next-step">
+      <div>
+        <div class="eyebrow">Recommended next step</div>
+        <h2>Select one high-value AI application for an evidence-backed evaluation.</h2>
+        <p>Start with a repository, its corresponding cloud workload, execution identity, model, and one posture or runtime source. This produces a concrete source-to-runtime story while keeping permissions and evidence scope small and reviewable.</p>
+      </div>
+      <div class="next-card">
+        <strong>Proposed workshop</strong>
+        <span>90 minutes · architecture, scope, permissions, success measures, and evaluation plan</span>
+      </div>
+    </section>
+
+    <footer>
+      <span>Denali AI Security · Customer proposal overview · Updated 9 September 2026</span>
+      <span>Open-source platform · Apache License 2.0</span>
+    </footer>
+  </article>
+</body>
+</html>
