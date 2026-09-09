@@ -1,3 +1,10 @@
+import { Icon, type IconifyIcon } from "@iconify/react";
+import awsIcon from "@iconify-icons/logos/aws";
+import githubIcon from "@iconify-icons/logos/github-icon";
+import googleCloudIcon from "@iconify-icons/logos/google-cloud";
+import googleIcon from "@iconify-icons/logos/google-icon";
+import microsoftAzureIcon from "@iconify-icons/logos/microsoft-azure";
+import microsoftEntraIcon from "@iconify-icons/selfhst/microsoft-entra-id";
 import {
   Activity,
   AppWindow,
@@ -145,6 +152,15 @@ const CONNECTION_PROVIDER_LABELS: Record<ConnectionProvider, string> = {
   google_workspace: "Google Workspace",
 };
 
+const CONNECTION_PROVIDER_ICONS: Record<ConnectionProvider, IconifyIcon> = {
+  aws: awsIcon,
+  azure: microsoftAzureIcon,
+  entra: microsoftEntraIcon,
+  gcp: googleCloudIcon,
+  github: githubIcon,
+  google_workspace: googleIcon,
+};
+
 function ConnectionProviderIcon({ provider }: { provider: ConnectionProvider }) {
   return <span
     className={`connection-provider-icon ${provider}`}
@@ -152,32 +168,7 @@ function ConnectionProviderIcon({ provider }: { provider: ConnectionProvider }) 
     aria-label={CONNECTION_PROVIDER_LABELS[provider]}
     title={CONNECTION_PROVIDER_LABELS[provider]}
   >
-    {provider === "aws" ? <svg viewBox="0 0 32 32" aria-hidden="true">
-      <text x="3.25" y="18.5" className="aws-wordmark">aws</text>
-      <path className="aws-smile" d="M6 22.2c5.5 3.8 12.6 4.2 19.2.7" />
-      <path className="aws-arrow" d="m22.4 21.8 3.6.7-1.2 3.4" />
-    </svg> : provider === "azure" ? <svg viewBox="0 0 32 32" aria-hidden="true">
-      <path fill="#0089d6" d="M13.1 3h7.7L10.5 27H3.2z" />
-      <path fill="#0078d4" d="m18.2 11.4 10.6 15.5H11.9z" />
-      <path fill="#36a9e1" d="m13.1 3 7.7.1-5.7 16.8-4.6 7.1H3.2z" opacity=".7" />
-    </svg> : provider === "entra" ? <svg viewBox="0 0 32 32" aria-hidden="true">
-      <path fill="#5b5fc7" d="m16 3 11 6.2-4.1 14.2L16 29 9.1 23.4 5 9.2z" />
-      <path fill="#7f6fd9" d="M16 3v26l6.9-5.6L27 9.2z" />
-      <path fill="#50a6d8" d="m5 9.2 11 6.4 11-6.4L16 3z" />
-      <path fill="#b4a0ff" d="m9.1 23.4 6.9-7.8 6.9 7.8L16 29z" />
-    </svg> : provider === "gcp" ? <svg viewBox="0 0 32 32" aria-hidden="true">
-      <path fill="none" stroke="#4285f4" strokeWidth="4.1" strokeLinecap="round" d="M9.1 23.4H24a5 5 0 0 0 1.1-9.9" />
-      <path fill="none" stroke="#34a853" strokeWidth="4.1" strokeLinecap="round" d="M9.1 23.4A6.1 6.1 0 0 1 5 17.7" />
-      <path fill="none" stroke="#fbbc04" strokeWidth="4.1" strokeLinecap="round" d="M5 17.7A6.1 6.1 0 0 1 8.9 12" />
-      <path fill="none" stroke="#ea4335" strokeWidth="4.1" strokeLinecap="round" d="M8.9 12a8.2 8.2 0 0 1 15.6 1.3" />
-    </svg> : provider === "google_workspace" ? <svg viewBox="0 0 32 32" aria-hidden="true">
-      <path fill="#4285f4" d="M27.7 16.3c0-.9-.1-1.7-.2-2.5H16v4.7h6.6a5.7 5.7 0 0 1-2.5 3.7v3.1h4c2.3-2.2 3.6-5.3 3.6-9z" />
-      <path fill="#34a853" d="M16 28.2c3.3 0 6.1-1.1 8.1-2.9l-4-3.1c-1.1.8-2.5 1.2-4.1 1.2-3.2 0-5.9-2.2-6.9-5.1H5v3.2a12.2 12.2 0 0 0 11 6.7z" />
-      <path fill="#fbbc04" d="M9.1 18.3a7.4 7.4 0 0 1 0-4.7v-3.2H5a12.2 12.2 0 0 0 0 11.1z" />
-      <path fill="#ea4335" d="M16 8.5c1.8 0 3.5.6 4.7 1.8l3.5-3.5A11.8 11.8 0 0 0 16 3.7 12.2 12.2 0 0 0 5 10.4l4.1 3.2c1-2.9 3.7-5.1 6.9-5.1z" />
-    </svg> : <svg viewBox="0 0 32 32" aria-hidden="true">
-      <path fill="currentColor" d="M16 3.2a13 13 0 0 0-4.1 25.3c.7.1.9-.3.9-.6v-2.5c-3.8.8-4.6-1.6-4.6-1.6-.6-1.6-1.5-2-1.5-2-1.2-.8.1-.8.1-.8 1.4.1 2.1 1.4 2.1 1.4 1.2 2.1 3.2 1.5 4 .1.1-.9.5-1.5.9-1.8-3-.3-6.2-1.5-6.2-6.4 0-1.4.5-2.6 1.4-3.5-.1-.4-.6-1.7.1-3.5 0 0 1.1-.4 3.6 1.3a12.4 12.4 0 0 1 6.6 0c2.5-1.7 3.6-1.3 3.6-1.3.7 1.8.2 3.1.1 3.5.9.9 1.4 2.1 1.4 3.5 0 5-3.2 6.1-6.2 6.4.5.4.9 1.2.9 2.5v3.8c0 .4.2.8.9.6A13 13 0 0 0 16 3.2z" />
-    </svg>}
+    <Icon icon={CONNECTION_PROVIDER_ICONS[provider]} aria-hidden="true" />
   </span>;
 }
 
