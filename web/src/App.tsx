@@ -48,6 +48,7 @@ import {
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { waitForAcceptedOperation } from "./connectionPolling";
+import { getConnectionProgress, type ConnectionProgressStepState } from "./connectionProgress";
 import {
   AI_APPLICATION_DISCOVERY_LABEL,
   closeDrawerTransition,
@@ -2493,10 +2494,14 @@ function ConnectionsPage({
   async function validateConnection(connection: Connection) {
     setBusy(`validate:${connection.id}`);
     setActionError(null);
+    setActionNotice(null);
     try {
-      await api.validateConnection(connection.id);
+      const accepted = await api.validateConnection(connection.id);
+      setActionNotice(accepted.status === "already_running" ? `${connection.display_name} validation is already running.` : `${connection.display_name} validation started in the background.`);
       await waitForValidation(connection, 150);
+      setActionNotice(`${connection.display_name} validation completed. Review the result, then collect evidence when ready.`);
     } catch (cause) {
+      setActionNotice(null);
       setActionError(cause instanceof Error ? cause.message : "Unable to validate connection");
     } finally {
       setBusy(null);
@@ -2596,11 +2601,15 @@ function ConnectionsPage({
     }
     setBusy(`complete:${connection.id}`);
     setActionError(null);
+    setActionNotice(null);
     try {
-      await api.completeAzureSetup(connection.id, completionCode);
+      const accepted = await api.completeAzureSetup(connection.id, completionCode);
+      setActionNotice(accepted.status === "already_running" ? "Azure setup is recorded and validation is already running." : "Azure setup is recorded. Validation started in the background.");
       await waitForValidation(connection, 525);
       setAzureCompletionCode((current) => ({ ...current, [connection.id]: "" }));
+      setActionNotice("Azure validation completed. Review the result, then collect evidence when ready.");
     } catch (cause) {
+      setActionNotice(null);
       setActionError(cause instanceof Error ? cause.message : "Unable to complete Azure setup");
     } finally {
       setBusy(null);
@@ -2638,10 +2647,14 @@ function ConnectionsPage({
   async function completeGoogleWorkspaceSetup(connection: Connection) {
     setBusy(`complete:${connection.id}`);
     setActionError(null);
+    setActionNotice(null);
     try {
-      await api.completeGoogleWorkspaceSetup(connection.id);
+      const accepted = await api.completeGoogleWorkspaceSetup(connection.id);
+      setActionNotice(accepted.status === "already_running" ? "Google Workspace authorization is recorded and validation is already running." : "Google Workspace authorization is recorded. Validation started in the background.");
       await waitForValidation(connection, 150);
+      setActionNotice("Google Workspace validation completed. Review the result, then collect evidence when ready.");
     } catch (cause) {
+      setActionNotice(null);
       setActionError(cause instanceof Error ? cause.message : "Unable to verify Google Workspace authorization");
     } finally {
       setBusy(null);
@@ -2686,11 +2699,15 @@ function ConnectionsPage({
     }
     setBusy(`complete:${connection.id}`);
     setActionError(null);
+    setActionNotice(null);
     try {
-      await api.completeGcpSetup(connection.id, completionCode);
+      const accepted = await api.completeGcpSetup(connection.id, completionCode);
+      setActionNotice(accepted.status === "already_running" ? "Google Cloud setup is recorded and validation is already running." : "Google Cloud setup is recorded. Validation started in the background.");
       await waitForValidation(connection, 525);
       setGcpCompletionCode((current) => ({ ...current, [connection.id]: "" }));
+      setActionNotice("Google Cloud validation completed. Review the result, then collect evidence when ready.");
     } catch (cause) {
+      setActionNotice(null);
       setActionError(cause instanceof Error ? cause.message : "Unable to complete Google Cloud setup");
     } finally {
       setBusy(null);
@@ -2826,8 +2843,9 @@ function ConnectionsPage({
       {githubSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{githubSetupReturn.state === "succeeded" ? "GitHub App installation verified" : "GitHub App installation could not be verified"}</strong><small>{githubSetupReturn.state === "succeeded" ? "Denali confirmed the signed-in installer could access this exact installation, recorded its current repository IDs, discarded the temporary user token, and started read-only validation." : githubSetupReturn.detail ?? "Return to the connection and try the GitHub App setup again."}</small></span>
     </div>}
-    {actionNotice && <div className="connection-notice"><CircleCheck /><span>{actionNotice}</span></div>}
-    {actionError && <div className="connection-error"><CircleAlert /><span>{actionError}</span></div>}
+    {actionNotice && <div className="connection-notice" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{actionNotice}</span></div>}
+    {actionError && <div className="connection-error" role="alert"><CircleAlert aria-hidden="true" /><span>{actionError}</span></div>}
+    {selected && <ConnectionOperationStatus connection={selected} busy={busy} />}
     {canWrite && showCreate && <form className="panel connection-create" onSubmit={(event) => void createConnection(event)}>
       <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "google_workspace" ? "active" : ""} onClick={() => selectProvider("google_workspace")}>Google Workspace</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
       <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{provider === "aws" ? "Amazon Web Services" : provider === "azure" ? "Microsoft Azure" : provider === "entra" ? "Microsoft Entra" : provider === "gcp" ? "Google Cloud" : provider === "google_workspace" ? "Google Workspace" : "GitHub"}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "entra" ? "A tenant administrator grants Denali application-only Microsoft Graph read permissions. Denali stores the tenant boundary, not access tokens or customer credentials." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : provider === "google_workspace" ? "A Workspace super administrator authorizes Denali’s service account for one disclosed read-only audit scope. Denali stores the domain boundary and delegated admin identity, never a customer token or JSON key." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "entra" ? "ENTRA" : provider === "gcp" ? "GCP" : provider === "google_workspace" ? "WORKSPACE" : "GITHUB"}</span></div>
@@ -2885,6 +2903,33 @@ function ConnectionHealth({ connection, state }: { connection?: Connection; stat
   if (!collection) return <span className="connection-health unknown"><CircleHelp />Collection needed</span>;
   if (collection.state !== "complete") return <span className="connection-health partial"><CircleAlert />Needs attention</span>;
   return <span className="connection-health healthy"><CircleCheck />Ready</span>;
+}
+
+function ConnectionOperationStatus({ connection, busy }: { connection: Connection; busy: string | null }) {
+  const progress = getConnectionProgress(connection, busy);
+  if (!progress) return null;
+
+  return <section className={`connection-operation-status ${progress.phase}`} role="status" aria-live="polite" aria-atomic="true">
+    <span className="connection-operation-icon"><RefreshCw className="spin" aria-hidden="true" /></span>
+    <div className="connection-operation-copy">
+      <span>{progress.eyebrow}</span>
+      <strong>{progress.title}</strong>
+      <small>{progress.detail}</small>
+      <ol aria-label="Connection progress">
+        {progress.steps.map((step) => <li key={step.label} className={step.state} aria-current={step.state === "current" ? "step" : undefined}>
+          <ConnectionOperationStepIcon state={step.state} />
+          <span>{step.label}</span>
+        </li>)}
+      </ol>
+    </div>
+  </section>;
+}
+
+function ConnectionOperationStepIcon({ state }: { state: ConnectionProgressStepState }) {
+  if (state === "complete") return <CircleCheck aria-hidden="true" />;
+  if (state === "attention") return <CircleAlert aria-hidden="true" />;
+  if (state === "current") return <RefreshCw className="spin" aria-hidden="true" />;
+  return <CircleHelp aria-hidden="true" />;
 }
 
 function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareEntra, onCollectEntra, onCompleteGoogleWorkspace, onCollectGoogleWorkspace, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; onCompleteGoogleWorkspace: () => void; onCollectGoogleWorkspace: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
