@@ -58,6 +58,7 @@ def _validators():
     from denali.api.app import (
         _entra_consent_client_from_environment,
         _github_app_from_environment,
+        _google_workspace_operator_from_environment,
     )
     from denali.connections import (
         AwsConnectionValidator,
@@ -65,16 +66,21 @@ def _validators():
         EntraConnectionValidator,
         GcpConnectionValidator,
         GitHubConnectionValidator,
+        GoogleWorkspaceConnectionValidator,
     )
 
     github_app = _github_app_from_environment()
     entra_client = _entra_consent_client_from_environment()
+    workspace_operator = _google_workspace_operator_from_environment()
     return {
         "aws": AwsConnectionValidator(),
         "azure": AzureConnectionValidator(),
         "entra": EntraConnectionValidator(entra_client) if entra_client else None,
         "gcp": GcpConnectionValidator(),
         "github": GitHubConnectionValidator(github_app) if github_app else None,
+        "google_workspace": (
+            GoogleWorkspaceConnectionValidator(workspace_operator) if workspace_operator else None
+        ),
     }
 
 
@@ -113,6 +119,7 @@ _PRIMARY_COLLECTION_KINDS = {
     "entra": "entra_ai",
     "gcp": "gcp_deployments",
     "github": "github_source",
+    "google_workspace": "google_workspace_ai",
 }
 
 
@@ -158,6 +165,7 @@ def collection_worker(job_id: str) -> None:
     from denali.api.app import (
         _entra_consent_client_from_environment,
         _github_app_from_environment,
+        _google_workspace_operator_from_environment,
     )
     from denali.api.collection import run_durable_collection_job
     from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
@@ -165,12 +173,14 @@ def collection_worker(job_id: str) -> None:
     from denali.connectors.entra_connection import EntraConnectionCollector
     from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
     from denali.connectors.github_repository import GitHubRepositoryCollector
+    from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
     from denali.store.repository import PostgresInventoryRepository
 
     _configure_aws_oidc()
     _configure_gcp_oidc()
     entra_client = _entra_consent_client_from_environment()
     github_app = _github_app_from_environment()
+    workspace_operator = _google_workspace_operator_from_environment()
     run_durable_collection_job(
         PostgresInventoryRepository(os.environ["DENALI_DSN"]),
         {
@@ -179,6 +189,11 @@ def collection_worker(job_id: str) -> None:
             "entra_ai": EntraConnectionCollector(entra_client) if entra_client else None,
             "gcp_deployments": GcpConnectionDeploymentCollector(),
             "github_source": GitHubRepositoryCollector(github_app) if github_app else None,
+            "google_workspace_ai": (
+                GoogleWorkspaceConnectionCollector(workspace_operator)
+                if workspace_operator
+                else None
+            ),
         },
         job_id,
         on_succeeded=_after_collection_succeeded,
@@ -410,6 +425,10 @@ def configuration_status() -> None:
             "DENALI_GCP_OPERATOR_PROJECT_ID",
             "DENALI_GCP_WORKLOAD_IDENTITY_PROVIDER",
             "DENALI_GCP_RUNTIME_SERVICE_ACCOUNT",
+        ),
+        "google_workspace": (
+            "DENALI_GOOGLE_WORKSPACE_SERVICE_ACCOUNT",
+            "DENALI_GOOGLE_WORKSPACE_CLIENT_ID",
         ),
         "github": (
             "DENALI_GITHUB_APP_ID",

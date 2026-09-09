@@ -23,11 +23,13 @@ from denali.connections import (
     ENTRA_SCOPES,
     GCP_SCOPES,
     GITHUB_SCOPES,
+    GOOGLE_WORKSPACE_SCOPES,
     aws_coverage_plan,
     azure_coverage_plan,
     entra_coverage_plan,
     gcp_coverage_plan,
     github_coverage_plan,
+    google_workspace_coverage_plan,
 )
 from denali.connectors.code_to_cloud import CodeToCloudConnector, DeploymentTarget
 from denali.connectors.demo import demo_batch, demo_findings_batch
@@ -657,6 +659,78 @@ def test_connection_validation_jobs_are_deduplicated_and_expire(repository) -> N
     assert error_summary == "Validation dispatch timed out."
     assert (
         repo.connection_validation_status(tenant, connection_id)["last_result"]["state"] == "failed"
+    )
+
+
+def test_google_workspace_setup_and_collection_job_are_tenant_bound_and_durable(
+    repository,
+) -> None:
+    tenant, repo = repository
+    other_tenant = str(uuid.uuid4())
+    connection_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    plan = google_workspace_coverage_plan(
+        list(GOOGLE_WORKSPACE_SCOPES),
+        domain="example.com",
+        admin_email="admin@example.com",
+    )
+    repo.create_connection(
+        tenant,
+        connection_id=connection_id,
+        provider="google_workspace",
+        display_name="Workspace fixture",
+        credential_type="google_workspace_domain_wide_delegation",
+        credential_reference={
+            "service_account": "workspace@project.iam.gserviceaccount.com",
+            "oauth_client_id": "123456789",
+        },
+        declared_scopes=list(GOOGLE_WORKSPACE_SCOPES),
+        coverage_plan=plan,
+        configuration={
+            "domain": "example.com",
+            "admin_email": "admin@example.com",
+            "onboarding": {
+                "method": "google_workspace_domain_wide_delegation",
+                "status": "pending",
+            },
+        },
+    )
+
+    assert (
+        repo.complete_google_workspace_connection_setup(
+            other_tenant,
+            connection_id,
+            coverage_plan=plan,
+            completed_at=now,
+        )
+        is None
+    )
+    completed = repo.complete_google_workspace_connection_setup(
+        tenant,
+        connection_id,
+        coverage_plan=plan,
+        completed_at=now,
+    )
+    assert completed is not None
+    assert completed["configuration"]["onboarding"]["status"] == "completed"
+    assert completed["credential_reference"] == {
+        "type": "google_workspace_domain_wide_delegation",
+        "service_account": "workspace@project.iam.gserviceaccount.com",
+        "oauth_client_id": "123456789",
+    }
+
+    job, created = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind="google_workspace_ai"
+    )
+    assert created is True
+    assert job["collection_kind"] == "google_workspace_ai"
+    assert (
+        repo.connection_collection_status(
+            other_tenant,
+            connection_id,
+            collection_kind="google_workspace_ai",
+        )["state"]
+        == "idle"
     )
 
 

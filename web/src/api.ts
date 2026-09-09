@@ -11,6 +11,7 @@ import type {
   GcpSetupLaunch,
   GitHubConnectionCreate,
   GitHubSetupLaunch,
+  GoogleWorkspaceConnectionCreate,
   Connection,
   Coverage,
   CodeToCloudDeployment,
@@ -122,7 +123,7 @@ export const api = {
     }),
   connections: () => request<{ items: Connection[] }>("/v1/connections"),
   connection: (id: string) => request<Connection>(`/v1/connections/${id}`),
-  createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate) =>
+  createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate) =>
     request<Connection>("/v1/connections", {
       method: "POST",
       body: JSON.stringify(connection),
@@ -164,6 +165,16 @@ export const api = {
   collectEntraEvidence: (id: string) =>
     request<{ status: "started" | "already_running"; connection_id: string }>(
       `/v1/connections/${id}/entra/collect`,
+      { method: "POST" },
+    ),
+  completeGoogleWorkspaceSetup: (id: string) =>
+    request<{ status: "started" | "already_running"; connection_id: string }>(
+      `/v1/connections/${id}/google-workspace/setup/complete`,
+      { method: "POST" },
+    ),
+  collectGoogleWorkspaceEvidence: (id: string) =>
+    request<{ status: "started" | "already_running"; connection_id: string }>(
+      `/v1/connections/${id}/google-workspace/collect`,
       { method: "POST" },
     ),
   launchGcpSetup: (id: string) =>

@@ -68,6 +68,15 @@ from denali.connections.github import (
     GitHubConnectionValidator,
     github_coverage_plan,
 )
+from denali.connections.google_workspace import (
+    GOOGLE_WORKSPACE_AUDIT_SCOPE,
+    GOOGLE_WORKSPACE_SCOPE_GEMINI_ACTIVITY,
+    GOOGLE_WORKSPACE_SCOPE_OAUTH_ACTIVITY,
+    GOOGLE_WORKSPACE_SCOPES,
+    GoogleWorkspaceConnectionValidator,
+    GoogleWorkspaceOperator,
+    google_workspace_coverage_plan,
+)
 
 __all__ = [
     "AWS_COVERAGE_AUTOMATIC",
@@ -106,6 +115,12 @@ __all__ = [
     "GITHUB_SCOPES",
     "GitHubAppClient",
     "GitHubConnectionValidator",
+    "GOOGLE_WORKSPACE_AUDIT_SCOPE",
+    "GOOGLE_WORKSPACE_SCOPE_GEMINI_ACTIVITY",
+    "GOOGLE_WORKSPACE_SCOPE_OAUTH_ACTIVITY",
+    "GOOGLE_WORKSPACE_SCOPES",
+    "GoogleWorkspaceConnectionValidator",
+    "GoogleWorkspaceOperator",
     "ENTRA_SCOPE_APPLICATIONS",
     "ENTRA_SCOPE_DIRECTORY_AUDITS",
     "ENTRA_SCOPE_PERMISSIONS",
@@ -118,6 +133,7 @@ __all__ = [
     "azure_coverage_plan",
     "gcp_coverage_plan",
     "github_coverage_plan",
+    "google_workspace_coverage_plan",
     "entra_coverage_plan",
     "render_cloudformation",
     "render_setup_script",
