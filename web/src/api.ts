@@ -1,6 +1,7 @@
 import type {
   Asset,
   AssetDetail,
+  AssetPage,
   AwsConnectionCreate,
   AwsCloudFormationLaunch,
   AzureConnectionCreate,
@@ -230,7 +231,23 @@ export const api = {
       { method: "POST" },
     ),
   summary: () => request<Summary>("/v1/inventory/summary"),
-  assets: () => request<{ items: Asset[] }>("/v1/inventory/assets?limit=500"),
+  assets: (filters: {
+    category?: "all" | "ai" | "supporting" | "components";
+    kind?: string;
+    governance?: "all" | "approved" | "unreviewed" | "unwanted";
+    q?: string;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const query = new URLSearchParams();
+    query.set("category", filters.category ?? "all");
+    query.set("limit", String(filters.limit ?? 100));
+    query.set("offset", String(filters.offset ?? 0));
+    if (filters.kind) query.set("kind", filters.kind);
+    if (filters.governance && filters.governance !== "all") query.set("governance", filters.governance);
+    if (filters.q?.trim()) query.set("q", filters.q.trim());
+    return request<AssetPage>(`/v1/inventory/assets?${query.toString()}`);
+  },
   asset: (id: string) => request<AssetDetail>(`/v1/inventory/assets/${id}`),
   coverage: () => request<{ items: Coverage[] }>("/v1/sources/coverage"),
   findingSummary: () => request<FindingSummary>("/v1/findings/summary"),

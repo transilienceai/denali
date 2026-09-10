@@ -3739,7 +3739,10 @@ class PostgresInventoryRepository:
         tenant_id: str,
         *,
         kind: str | None = None,
+        kinds: tuple[str, ...] | None = None,
         lifecycle: str = "active",
+        governance: str | None = None,
+        search: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -3761,17 +3764,106 @@ class PostgresInventoryRepository:
         ) winner ON true
         WHERE a.tenant_id = %s::uuid
           AND (%s::text IS NULL OR a.kind = %s::text)
+          AND (%s::text[] IS NULL OR a.kind = ANY(%s::text[]))
           AND (%s::text IS NULL OR a.lifecycle_state = %s::text)
+          AND (%s::text IS NULL OR a.governance_status = %s::text)
+          AND (
+            %s::text IS NULL
+            OR POSITION(
+              lower(%s::text)
+              IN lower(concat_ws(
+                ' ', winner.display_name, a.natural_key, a.kind,
+                winner.attributes #>> '{{component,ecosystem}}',
+                winner.attributes #>> '{{component,purl}}',
+                winner.attributes #>> '{{component,target,natural_key}}'
+              ))
+            ) > 0
+          )
         ORDER BY COALESCE(winner.display_name, a.natural_key), a.kind, a.natural_key
         LIMIT %s OFFSET %s
         """
         lifecycle_filter = lifecycle or None
+        kinds_filter = list(kinds) if kinds else None
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             rows = connection.execute(
                 query,
-                (tenant_id, kind, kind, lifecycle_filter, lifecycle_filter, limit, offset),
+                (
+                    tenant_id,
+                    kind,
+                    kind,
+                    kinds_filter,
+                    kinds_filter,
+                    lifecycle_filter,
+                    lifecycle_filter,
+                    governance,
+                    governance,
+                    search,
+                    search,
+                    limit,
+                    offset,
+                ),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def count_assets(
+        self,
+        tenant_id: str,
+        *,
+        kind: str | None = None,
+        kinds: tuple[str, ...] | None = None,
+        lifecycle: str = "active",
+        governance: str | None = None,
+        search: str | None = None,
+    ) -> int:
+        lifecycle_filter = lifecycle or None
+        kinds_filter = list(kinds) if kinds else None
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                f"""
+                SELECT count(*) AS count
+                FROM asset a
+                LEFT JOIN LATERAL (
+                    SELECT aa.display_name, aa.attributes
+                    FROM asset_assertion aa
+                    WHERE aa.tenant_id = a.tenant_id AND aa.asset_id = a.id
+                      AND aa.withdrawn_at IS NULL
+                    ORDER BY {_ASSERTION_RANK_SQL} DESC, aa.last_seen_at DESC,
+                             aa.connector_id, aa.connection_id
+                    LIMIT 1
+                ) winner ON true
+                WHERE a.tenant_id = %s::uuid
+                  AND (%s::text IS NULL OR a.kind = %s::text)
+                  AND (%s::text[] IS NULL OR a.kind = ANY(%s::text[]))
+                  AND (%s::text IS NULL OR a.lifecycle_state = %s::text)
+                  AND (%s::text IS NULL OR a.governance_status = %s::text)
+                  AND (
+                    %s::text IS NULL
+                    OR POSITION(
+                      lower(%s::text)
+                      IN lower(concat_ws(
+                        ' ', winner.display_name, a.natural_key, a.kind,
+                        winner.attributes #>> '{{component,ecosystem}}',
+                        winner.attributes #>> '{{component,purl}}',
+                        winner.attributes #>> '{{component,target,natural_key}}'
+                      ))
+                    ) > 0
+                  )
+                """,
+                (
+                    tenant_id,
+                    kind,
+                    kind,
+                    kinds_filter,
+                    kinds_filter,
+                    lifecycle_filter,
+                    lifecycle_filter,
+                    governance,
+                    governance,
+                    search,
+                    search,
+                ),
+            ).fetchone()
+        return int(row["count"])
 
     def get_asset(self, tenant_id: str, asset_id: str) -> dict[str, Any] | None:
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:

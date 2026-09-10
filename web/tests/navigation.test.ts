@@ -22,6 +22,10 @@ test("AI application discovery uses precise product language without breaking it
 
 test("inventory navigation accepts resource kinds but never serializes click events", () => {
   assert.equal(navigationUrl("inventory", inventoryQuery("ai_workload")), "/inventory?kind=ai_workload");
+  assert.equal(
+    navigationUrl("inventory", inventoryQuery("software_component")),
+    "/inventory?kind=software_component&category=components",
+  );
   assert.equal(navigationUrl("inventory", inventoryQuery("all")), "/inventory");
   assert.equal(
     navigationUrl("inventory", inventoryQuery({ type: "click", currentTarget: {} })),
