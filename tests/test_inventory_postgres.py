@@ -19,6 +19,7 @@ import pytest
 
 from denali.connections import (
     AWS_SCOPE_BEDROCK_AGENTS,
+    AZURE_REPOS_SCOPES,
     AZURE_SCOPES,
     ENTRA_SCOPES,
     GCP_SCOPES,
@@ -26,6 +27,7 @@ from denali.connections import (
     GOOGLE_WORKSPACE_SCOPES,
     aws_coverage_plan,
     azure_coverage_plan,
+    azure_repos_coverage_plan,
     entra_coverage_plan,
     gcp_coverage_plan,
     github_coverage_plan,
@@ -842,6 +844,7 @@ def test_entra_consent_state_and_collection_jobs_are_tenant_bound_and_durable(
         "azure_deployments",
         "gcp_deployments",
         "github_source",
+        "azure_repos_source",
     ):
         provider_job, provider_created = repo.create_connection_collection_job(
             tenant,
@@ -1235,6 +1238,102 @@ def test_github_setup_consumes_transient_state_and_binds_exact_repositories(
         completed_at=now,
     )
     assert replay is None
+
+
+def test_azure_repos_setup_consumes_oauth_state_and_binds_exact_repositories(
+    repository,
+) -> None:
+    tenant, repo = repository
+    now = datetime.now(UTC)
+    connection_id = str(uuid.uuid4())
+    state_sha256 = "c" * 64
+    repositories = [
+        {
+            "id": str(uuid.uuid4()),
+            "name": "service-one",
+            "full_name": "Platform/service-one",
+            "project_id": str(uuid.uuid4()),
+            "project_name": "Platform",
+            "default_branch": "refs/heads/main",
+            "remote_url": "https://dev.azure.com/example/Platform/_git/service-one",
+        }
+    ]
+    created = repo.create_connection(
+        tenant,
+        connection_id=connection_id,
+        provider="azure_repos",
+        display_name="Fixture Azure Repos",
+        credential_type="azure_repos_service_principal",
+        credential_reference={"client_id": str(uuid.uuid4())},
+        declared_scopes=list(AZURE_REPOS_SCOPES),
+        coverage_plan=[],
+        configuration={
+            "tenant_id": str(uuid.uuid4()),
+            "organization": "example",
+            "coverage_mode": "exact-azure-repositories",
+            "repositories": [],
+            "onboarding": {"method": "azure_repos_entra_oauth", "status": "pending"},
+        },
+    )
+    assert created["credential_reference"]["type"] == "azure_repos_service_principal"
+    launched = repo.record_azure_repos_oauth_launch(
+        tenant,
+        connection_id,
+        oauth={
+            "state_sha256": state_sha256,
+            "pkce_verifier": "transient-pkce-verifier",
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(minutes=30)).isoformat(),
+        },
+    )
+    assert launched is not None
+    assert "pkce" not in str(launched)
+    cross_tenant = repo.stage_azure_repos_repository_selection(
+        str(uuid.uuid4()),
+        connection_id,
+        expected_state_sha256=state_sha256,
+        repositories=repositories,
+        authorized_at=now,
+        expires_at=now + timedelta(minutes=30),
+    )
+    assert cross_tenant is None
+    staged = repo.stage_azure_repos_repository_selection(
+        tenant,
+        connection_id,
+        expected_state_sha256=state_sha256,
+        repositories=repositories,
+        authorized_at=now,
+        expires_at=now + timedelta(minutes=30),
+    )
+    assert staged is not None
+    assert staged["configuration"]["repository_candidates"] == repositories
+    target = repo.get_connection_validation_target(tenant, connection_id)
+    assert target is not None
+    assert "oauth_state_sha256" not in target["credential_reference"]
+    assert "pkce_verifier" not in target["credential_reference"]
+    replay = repo.stage_azure_repos_repository_selection(
+        tenant,
+        connection_id,
+        expected_state_sha256=state_sha256,
+        repositories=repositories,
+        authorized_at=now,
+        expires_at=now + timedelta(minutes=30),
+    )
+    assert replay is None
+    plan = azure_repos_coverage_plan(
+        list(AZURE_REPOS_SCOPES), organization="example", repositories=repositories
+    )
+    completed = repo.complete_azure_repos_connection_setup(
+        tenant,
+        connection_id,
+        repositories=repositories,
+        coverage_plan=plan,
+        completed_at=now,
+    )
+    assert completed is not None
+    assert completed["configuration"]["repositories"] == repositories
+    assert "repository_candidates" not in completed["configuration"]
+    assert len(completed["coverage_plan"]) == len(AZURE_REPOS_SCOPES)
 
 
 def test_activity_can_be_filtered_by_correlated_asset(repository) -> None:

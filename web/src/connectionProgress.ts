@@ -16,6 +16,7 @@ export type ConnectionProgress = {
 const PROVIDER_LABELS: Record<Connection["provider"], string> = {
   aws: "AWS",
   azure: "Azure",
+  azure_repos: "Azure Repos",
   entra: "Microsoft Entra",
   gcp: "Google Cloud",
   github: "GitHub",
@@ -23,7 +24,9 @@ const PROVIDER_LABELS: Record<Connection["provider"], string> = {
 };
 
 function collectionState(connection: Connection) {
-  if (connection.provider === "github") return connection.source_collection_state;
+  if (connection.provider === "github" || connection.provider === "azure_repos") {
+    return connection.source_collection_state;
+  }
   if (connection.provider === "entra" || connection.provider === "google_workspace") {
     return connection.evidence_collection_state;
   }

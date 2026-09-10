@@ -97,7 +97,7 @@ export type ConnectionValidationResult = {
   project_id?: string;
   project_name?: string;
   project_number?: string;
-  repository_id?: number;
+  repository_id?: number | string;
   repository_full_name?: string;
   tenant_id?: string;
   domain?: string;
@@ -121,7 +121,7 @@ export type ConnectionCoveragePlan = {
   region: string;
   permissions: string[];
   validation_state: "not_validated";
-  repository_id?: number;
+  repository_id?: number | string;
   repository_node_id?: string;
   repository_full_name?: string;
   tenant_id?: string;
@@ -154,9 +154,34 @@ export type GitHubRepositoryBoundary = {
   default_branch: string | null;
 };
 
+export type AzureReposRepositoryBoundary = {
+  id: string;
+  name: string;
+  full_name: string;
+  project_id: string;
+  project_name: string;
+  default_branch: string | null;
+  remote_url: string | null;
+};
+
+export type ConnectionRepositoryBoundary = {
+  id: number | string;
+  name: string;
+  full_name: string;
+  node_id?: string;
+  owner_id?: number;
+  owner_login?: string;
+  private?: boolean;
+  archived?: boolean;
+  project_id?: string;
+  project_name?: string;
+  default_branch: string | null;
+  remote_url?: string | null;
+};
+
 export type Connection = {
   id: string;
-  provider: "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace";
+  provider: "aws" | "azure" | "azure_repos" | "entra" | "gcp" | "github" | "google_workspace";
   display_name: string;
   lifecycle_state: "active" | "disabled";
   health_state: "unknown" | "healthy" | "partial" | "unhealthy" | "disabled";
@@ -172,6 +197,7 @@ export type Connection = {
     azure_cloud_shell: boolean;
     gcp_cloud_shell: boolean;
     github_app: boolean;
+    azure_repos_oauth: boolean;
     entra_admin_consent: boolean;
     google_workspace_admin_authorization: boolean;
   };
@@ -201,6 +227,10 @@ export type Connection = {
         installation_id?: number;
       }
     | {
+        type: "azure_repos_service_principal";
+        client_id: string;
+      }
+    | {
         type: "google_workspace_domain_wide_delegation";
         service_account: string;
         oauth_client_id: string;
@@ -211,7 +241,7 @@ export type Connection = {
     account_id?: string;
     partition?: "aws" | "aws-us-gov" | "aws-cn";
     deployment_region?: string;
-    coverage_mode?: "automatic" | "selected" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "tenant-wide-admin-consent" | "domain-wide-delegation";
+    coverage_mode?: "automatic" | "selected" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "exact-azure-repositories" | "tenant-wide-admin-consent" | "domain-wide-delegation";
     regions?: string[];
     role_name?: string;
     stack_scopes?: string[];
@@ -224,10 +254,12 @@ export type Connection = {
     account_login?: string;
     account_type?: string;
     installation_repository_selection?: "all" | "selected";
-    repositories?: GitHubRepositoryBoundary[];
+    repositories?: ConnectionRepositoryBoundary[];
+    repository_candidates?: AzureReposRepositoryBoundary[];
+    organization?: string;
     installer?: { id: number; login: string };
     onboarding?: {
-      method: "cloudformation_quick_create" | "azure_cloud_shell" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation" | "google_workspace_domain_wide_delegation";
+      method: "cloudformation_quick_create" | "azure_cloud_shell" | "azure_repos_entra_oauth" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation" | "google_workspace_domain_wide_delegation";
       template_version?: string;
       template_sha256?: string;
       principal_arn?: string;
@@ -241,12 +273,14 @@ export type Connection = {
       install_expires_at?: string;
       installation_id?: number;
       oauth_expires_at?: string;
+      authorized_at?: string;
+      selection_expires_at?: string;
       completed_at?: string;
       consent_expires_at?: string;
       consent_completed_at?: string;
       consent_failed_at?: string;
       identity_mode?: "cloud_shell_service_principal";
-      status?: "completed" | "failed";
+      status?: "pending" | "authorizing" | "selection_pending" | "completed" | "failed";
       failed_at?: string;
     };
   };
@@ -257,7 +291,7 @@ export type Connection = {
 };
 
 export type GitHubSourceCollectionRepository = {
-  repository_id: number;
+  repository_id: number | string;
   repository: string;
   state: "complete" | "partial" | "failed";
   detail?: string;
@@ -410,6 +444,19 @@ export type GitHubConnectionCreate = {
 export type GitHubSetupLaunch = {
   install_url: string;
   app_slug: string;
+  expires_at: string;
+};
+
+export type AzureReposConnectionCreate = {
+  provider: "azure_repos";
+  display_name: string;
+  tenant_id: string;
+  organization: string;
+  declared_scopes: string[];
+};
+
+export type AzureReposSetupLaunch = {
+  authorize_url: string;
   expires_at: string;
 };
 
