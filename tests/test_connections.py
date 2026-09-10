@@ -17,6 +17,7 @@ from denali.connections import (
     AWS_SCOPE_CODE_TO_CLOUD,
     AwsCloudFormationLauncher,
     AwsConnectionValidator,
+    aws_connection_role_name,
     aws_coverage_plan,
     render_cloudformation,
 )
@@ -211,6 +212,35 @@ def test_aws_connection_collects_declared_evidence_scopes() -> None:
         assert logging_collection.status_code == 202
 
 
+def test_aws_connections_in_one_account_receive_distinct_server_owned_role_names() -> None:
+    repository = ConnectionRepositoryStub()
+    app = create_app(repository=repository, migrate_on_start=False)
+    payload = {
+        "provider": "aws",
+        "display_name": "AWS account",
+        "account_id": "123456789012",
+    }
+
+    with TestClient(app) as client:
+        first = client.post("/v1/connections", json=payload)
+        second = client.post("/v1/connections", json=payload)
+        client_named = client.post(
+            "/v1/connections",
+            json={**payload, "role_name": "SharedPhysicalRole"},
+        )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    first_role = first.json()["configuration"]["role_name"]
+    second_role = second.json()["configuration"]["role_name"]
+    assert first_role == aws_connection_role_name(first.json()["id"])
+    assert second_role == aws_connection_role_name(second.json()["id"])
+    assert first_role != second_role
+    assert len(first_role) <= 64
+    assert len(second_role) <= 64
+    assert client_named.status_code == 422
+
+
 def test_aws_connection_api_never_returns_external_id_and_requires_safe_delete() -> None:
     repository = ConnectionRepositoryStub()
     app = create_app(
@@ -232,9 +262,9 @@ def test_aws_connection_api_never_returns_external_id_and_requires_safe_delete()
         assert created_response.status_code == 201
         created = created_response.json()
         connection_id = created["id"]
-        assert created["credential_reference"]["role_arn"].endswith(
-            ":role/DenaliSecurityAuditRole"
-        )
+        role_name = aws_connection_role_name(connection_id)
+        assert created["credential_reference"]["role_arn"].endswith(f":role/{role_name}")
+        assert created["configuration"]["role_name"] == role_name
         assert "external_id" not in created_response.text
         assert created["configuration"]["deployment_region"] == "ap-south-1"
         assert created["configuration"]["coverage_mode"] == "automatic"
@@ -251,6 +281,7 @@ def test_aws_connection_api_never_returns_external_id_and_requires_safe_delete()
         )
         assert template_response.status_code == 200
         assert "NoEcho: true" in template_response.text
+        assert f"RoleName: '{role_name}'" in template_response.text
         assert "sts:AssumeRole" in template_response.text
         assert "ec2:DescribeRegions" in template_response.text
         assert "lambda:ListFunctions" in template_response.text

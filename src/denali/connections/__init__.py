@@ -3,6 +3,7 @@
 from denali.connections.aws import (
     AWS_COVERAGE_AUTOMATIC,
     AWS_COVERAGE_SELECTED,
+    AWS_ROLE_NAME_PREFIX,
     AWS_SCOPE_AGENTCORE,
     AWS_SCOPE_BEDROCK_ACTIVITY,
     AWS_SCOPE_BEDROCK_AGENTS,
@@ -11,6 +12,7 @@ from denali.connections.aws import (
     AWS_SCOPES,
     AwsConnectionValidator,
     aws_connection_coverage_plan,
+    aws_connection_role_name,
     aws_coverage_plan,
     render_cloudformation,
 )
@@ -96,6 +98,7 @@ __all__ = [
     "AWS_SCOPE_BEDROCK_LOGGING",
     "AWS_SCOPE_CODE_TO_CLOUD",
     "AWS_SCOPES",
+    "AWS_ROLE_NAME_PREFIX",
     "AWS_ONBOARDING_TEMPLATE_VERSION",
     "AwsCloudFormationLauncher",
     "AwsConnectionValidator",
@@ -143,6 +146,7 @@ __all__ = [
     "EntraAdminConsentClient",
     "EntraConnectionValidator",
     "aws_connection_coverage_plan",
+    "aws_connection_role_name",
     "aws_coverage_plan",
     "azure_coverage_plan",
     "azure_repos_coverage_plan",
