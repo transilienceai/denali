@@ -69,6 +69,7 @@ import type {
   AssetDetail,
   AwsConnectionCreate,
   AzureConnectionCreate,
+  AzureReposConnectionCreate,
   AzureSetupLaunch,
   EntraConnectionCreate,
   GcpConnectionCreate,
@@ -139,6 +140,7 @@ const KIND_META: Record<string, { label: string; plural: string; icon: LucideIco
 const CONNECTION_PROVIDER_LABELS: Record<ConnectionProvider, string> = {
   aws: "Amazon Web Services",
   azure: "Microsoft Azure",
+  azure_repos: "Azure Repos",
   entra: "Microsoft Entra",
   gcp: "Google Cloud",
   github: "GitHub",
@@ -148,6 +150,7 @@ const CONNECTION_PROVIDER_LABELS: Record<ConnectionProvider, string> = {
 const CONNECTION_PROVIDER_ICONS: Record<ConnectionProvider, string> = {
   aws: "/provider-icons/aws.svg",
   azure: "/provider-icons/azure.svg",
+  azure_repos: "/provider-icons/azure-repos.svg",
   entra: "/provider-icons/entra.svg",
   gcp: "/provider-icons/gcp.svg",
   github: "/provider-icons/github.svg",
@@ -205,6 +208,11 @@ type EntraSetupReturn = {
   detail?: string;
 };
 
+type AzureReposSetupReturn = {
+  connectionId: string;
+  state: "select" | "failed";
+};
+
 function readGitHubSetupReturn(): GitHubSetupReturn | null {
   const query = new URLSearchParams(window.location.search);
   const connectionId = query.get("connection_id") ?? "";
@@ -223,6 +231,15 @@ function readEntraSetupReturn(): EntraSetupReturn | null {
   return { connectionId, state, detail: microsoftConsentFailureDetail("Entra", query.get("reason")) };
 }
 
+function readAzureReposSetupReturn(): AzureReposSetupReturn | null {
+  const query = new URLSearchParams(window.location.search);
+  const connectionId = query.get("connection_id") ?? "";
+  const state = query.get("azure_repos_setup");
+  if (state !== "select" && state !== "failed") return null;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connectionId)) return null;
+  return { connectionId, state };
+}
+
 function microsoftConsentFailureDetail(provider: "Entra", reason: string | null) {
   if (!reason) return undefined;
   if (reason === "access_denied") return "Microsoft reported that administrator consent was cancelled or denied.";
@@ -235,6 +252,7 @@ function microsoftConsentFailureDetail(provider: "Entra", reason: string | null)
 function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boolean; accountControls?: ReactNode; profilePage?: ReactNode }) {
   const [entraSetupReturn] = useState(readEntraSetupReturn);
   const [githubSetupReturn] = useState(readGitHubSetupReturn);
+  const [azureReposSetupReturn] = useState(readAzureReposSetupReturn);
   const [navigation, setNavigation] = useState<NavigationLocation>(() =>
     navigationFromUrl(window.location.href),
   );
@@ -398,13 +416,13 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
   }, [hasRunningConnection]);
 
   useEffect(() => {
-    if (!entraSetupReturn && !githubSetupReturn) return;
+    if (!entraSetupReturn && !githubSetupReturn && !azureReposSetupReturn) return;
     commitNavigation(
       "connections",
-      { connection: (entraSetupReturn ?? githubSetupReturn)!.connectionId },
+      { connection: (entraSetupReturn ?? githubSetupReturn ?? azureReposSetupReturn)!.connectionId },
       "replace",
     );
-  }, [entraSetupReturn, githubSetupReturn]);
+  }, [entraSetupReturn, githubSetupReturn, azureReposSetupReturn]);
 
   const loadRuntimeActivity = useCallback(async (includeFixtures: boolean) => {
     setError(null);
@@ -561,7 +579,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
               onNavigate={navigate}
             />
             ) : page === "connections" ? (
-            <ConnectionsPage connections={connections} selectedId={navigation.query.connection} showCreate={navigation.query.new === "1" || connections.length === 0} navigation={filterNavigation} onSelect={selectConnection} onShowCreate={showConnectionCreate} onChanged={loadAll} entraSetupReturn={entraSetupReturn} githubSetupReturn={githubSetupReturn} canWrite={canWrite} />
+            <ConnectionsPage connections={connections} selectedId={navigation.query.connection} showCreate={navigation.query.new === "1" || connections.length === 0} navigation={filterNavigation} onSelect={selectConnection} onShowCreate={showConnectionCreate} onChanged={loadAll} entraSetupReturn={entraSetupReturn} githubSetupReturn={githubSetupReturn} azureReposSetupReturn={azureReposSetupReturn} canWrite={canWrite} />
           ) : page === "inventory" ? (
             <Inventory
               assets={assets}
@@ -2395,16 +2413,22 @@ const GITHUB_CONNECTION_SCOPES = [
   { id: "github.actions_workflows", label: "GitHub Actions workflows", detail: "Workflow inventory only; no workflow runs, secrets, or writes" },
 ];
 
+const AZURE_REPOS_CONNECTION_SCOPES = [
+  { id: "azure_repos.repository_metadata", label: "Repository metadata", detail: "Immutable repository and project identity" },
+  { id: "azure_repos.repository_contents", label: "Source revision access", detail: "Read the default Git revision; no source writes" },
+];
+
 const GOOGLE_WORKSPACE_CONNECTION_SCOPES = [
   { id: "google_workspace.gemini_activity", label: "Gemini in Workspace activity", detail: "Bounded Gemini feature-use metadata; no prompts, responses, or IP addresses" },
   { id: "google_workspace.oauth_activity", label: "AI OAuth application activity", detail: "Catalog-matched OAuth authorization and use events from the bounded audit window" },
 ];
 
-function connectionScopes(provider: "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace") {
+function connectionScopes(provider: ConnectionProvider) {
   return provider === "aws" ? AWS_CONNECTION_SCOPES
     : provider === "azure" ? AZURE_CONNECTION_SCOPES
       : provider === "entra" ? ENTRA_CONNECTION_SCOPES
       : provider === "gcp" ? GCP_CONNECTION_SCOPES
+        : provider === "azure_repos" ? AZURE_REPOS_CONNECTION_SCOPES
         : provider === "github" ? GITHUB_CONNECTION_SCOPES
           : GOOGLE_WORKSPACE_CONNECTION_SCOPES;
 }
@@ -2419,6 +2443,7 @@ function ConnectionsPage({
   onChanged,
   entraSetupReturn,
   githubSetupReturn,
+  azureReposSetupReturn,
   canWrite,
 }: {
   connections: Connection[];
@@ -2430,10 +2455,11 @@ function ConnectionsPage({
   onChanged: () => Promise<void>;
   entraSetupReturn: EntraSetupReturn | null;
   githubSetupReturn: GitHubSetupReturn | null;
+  azureReposSetupReturn: AzureReposSetupReturn | null;
   canWrite: boolean;
 }) {
-  const provider = (["aws", "azure", "entra", "gcp", "github", "google_workspace"] as const).includes(navigation.values.provider as "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace")
-    ? navigation.values.provider as "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace"
+  const provider = (["aws", "azure", "azure_repos", "entra", "gcp", "github", "google_workspace"] as const).includes(navigation.values.provider as ConnectionProvider)
+    ? navigation.values.provider as ConnectionProvider
     : "aws";
   const [displayName, setDisplayName] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -2443,6 +2469,8 @@ function ConnectionsPage({
   const [regions, setRegions] = useState("us-east-1");
   const [scopes, setScopes] = useState(() => connectionScopes(provider).map((scope) => scope.id));
   const [azureTenantId, setAzureTenantId] = useState("");
+  const [azureReposTenantId, setAzureReposTenantId] = useState("");
+  const [azureReposOrganization, setAzureReposOrganization] = useState("");
   const [entraTenantId, setEntraTenantId] = useState("");
   const [workspaceAdminEmail, setWorkspaceAdminEmail] = useState("");
   const [azureLaunches, setAzureLaunches] = useState<Record<string, AzureSetupLaunch>>({});
@@ -2463,7 +2491,7 @@ function ConnectionsPage({
     if (!selected && selectedId) onSelect("", "replace");
   }, [onSelect, selected, selectedId]);
 
-  function selectProvider(next: "aws" | "azure" | "entra" | "gcp" | "github" | "google_workspace") {
+  function selectProvider(next: ConnectionProvider) {
     navigation.set("provider", next, "aws");
   }
 
@@ -2472,7 +2500,7 @@ function ConnectionsPage({
     setBusy("create");
     setActionError(null);
     try {
-      const payload: AwsConnectionCreate | AzureConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate = provider === "aws" ? {
+      const payload: AwsConnectionCreate | AzureConnectionCreate | AzureReposConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate = provider === "aws" ? {
           provider: "aws",
           display_name: displayName,
           account_id: accountId,
@@ -2491,6 +2519,12 @@ function ConnectionsPage({
           provider: "entra",
           display_name: displayName,
           tenant_id: entraTenantId,
+          declared_scopes: scopes,
+        } : provider === "azure_repos" ? {
+          provider: "azure_repos",
+          display_name: displayName,
+          tenant_id: azureReposTenantId,
+          organization: azureReposOrganization,
           declared_scopes: scopes,
         } : provider === "gcp" ? {
           provider: "gcp",
@@ -2512,6 +2546,8 @@ function ConnectionsPage({
       setDisplayName("");
       setAccountId("");
       setAzureTenantId("");
+      setAzureReposTenantId("");
+      setAzureReposOrganization("");
       setEntraTenantId("");
       setWorkspaceAdminEmail("");
     } catch (cause) {
@@ -2820,6 +2856,46 @@ function ConnectionsPage({
     }
   }
 
+  async function prepareAzureReposSetup(connection: Connection) {
+    setBusy(`launch:${connection.id}`);
+    setActionError(null);
+    try {
+      const launch = await api.launchAzureReposSetup(connection.id);
+      window.location.assign(launch.authorize_url);
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Unable to authorize Azure Repos");
+      setBusy(null);
+    }
+  }
+
+  async function completeAzureReposSetup(connection: Connection, repositoryIds: string[]) {
+    setBusy(`complete:${connection.id}`);
+    setActionError(null);
+    try {
+      await api.completeAzureReposSetup(connection.id, repositoryIds);
+      await waitForValidation(connection, 150);
+      setActionNotice("Azure Repos selection verified and validation completed.");
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Unable to complete Azure Repos setup");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function collectAzureReposSource(connection: Connection) {
+    setBusy(`collect:${connection.id}`);
+    setActionError(null);
+    try {
+      await api.collectAzureReposSource(connection.id);
+      await waitForCollection(connection, "source");
+      setActionNotice("Azure Repos source collection completed.");
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "Unable to collect Azure Repos source");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function disableConnection(connection: Connection) {
     if (!window.confirm(`Disable ${connection.display_name}? Scheduled collection must stop using this connection.`)) return;
     setBusy(`disable:${connection.id}`);
@@ -2860,7 +2936,7 @@ function ConnectionsPage({
 
   return <div className="page-stack connections-page">
     <section className="page-intro connection-intro">
-      <div><span className="eyebrow">SELF-SERVICE ONBOARDING</span><h2>Connect evidence sources without handing Denali customer credentials.</h2><p>AWS uses assume-role; Azure and Google Cloud use provider-native, keyless identities; Entra and Google Workspace use disclosed directory read bundles; GitHub uses short-lived App installation tokens. Every declared plane is validated separately.</p></div>
+      <div><span className="eyebrow">SELF-SERVICE ONBOARDING</span><h2>Connect evidence sources without handing Denali customer credentials.</h2><p>AWS uses assume-role; Azure and Google Cloud use provider-native, keyless identities; Entra and Google Workspace use disclosed directory read bundles; GitHub and Azure Repos use short-lived tokens with exact repository boundaries. Every declared plane is validated separately.</p></div>
       {canWrite && <button className="primary-action" onClick={() => onShowCreate(!showCreate)}><Plus /> Add connection</button>}
     </section>
     {!canWrite && <section className="read-only-banner"><ShieldCheck /><div><strong>Read-only organization role</strong><span>An organization admin must create, validate, disable, or delete connections.</span></div></section>}
@@ -2873,14 +2949,18 @@ function ConnectionsPage({
       {githubSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{githubSetupReturn.state === "succeeded" ? "GitHub App installation verified" : "GitHub App installation could not be verified"}</strong><small>{githubSetupReturn.state === "succeeded" ? "Denali confirmed the signed-in installer could access this exact installation, recorded its current repository IDs, discarded the temporary user token, and started read-only validation." : githubSetupReturn.detail ?? "Return to the connection and try the GitHub App setup again."}</small></span>
     </div>}
+    {azureReposSetupReturn && <div className={`connection-consent-return ${azureReposSetupReturn.state === "select" ? "succeeded" : "failed"}`}>
+      {azureReposSetupReturn.state === "select" ? <CircleCheck /> : <CircleAlert />}
+      <span><strong>{azureReposSetupReturn.state === "select" ? "Azure DevOps access verified" : "Azure DevOps authorization failed"}</strong><small>{azureReposSetupReturn.state === "select" ? "Choose the exact repositories below. Denali discarded the temporary user token and will independently verify its app identity before saving your selection." : "Return to the Azure Repos connection and authorize again. No repository boundary was recorded."}</small></span>
+    </div>}
     {actionNotice && <div className="connection-notice" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{actionNotice}</span></div>}
     {actionError && <div className="connection-error" role="alert"><CircleAlert aria-hidden="true" /><span>{actionError}</span></div>}
     {selected && <ConnectionOperationStatus connection={selected} busy={busy} />}
     {canWrite && showCreate && <form className="panel connection-create" onSubmit={(event) => void createConnection(event)}>
-      <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "google_workspace" ? "active" : ""} onClick={() => selectProvider("google_workspace")}>Google Workspace</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
-      <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{provider === "aws" ? "Amazon Web Services" : provider === "azure" ? "Microsoft Azure" : provider === "entra" ? "Microsoft Entra" : provider === "gcp" ? "Google Cloud" : provider === "google_workspace" ? "Google Workspace" : "GitHub"}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "entra" ? "A tenant administrator grants Denali application-only Microsoft Graph read permissions. Denali stores the tenant boundary, not access tokens or customer credentials." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : provider === "google_workspace" ? "A Workspace super administrator authorizes Denali’s service account for one disclosed read-only audit scope. Denali stores the domain boundary and delegated admin identity, never a customer token or JSON key." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "entra" ? "ENTRA" : provider === "gcp" ? "GCP" : provider === "google_workspace" ? "WORKSPACE" : "GITHUB"}</span></div>
+      <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "azure_repos" ? "active" : ""} onClick={() => selectProvider("azure_repos")}>Azure Repos</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "google_workspace" ? "active" : ""} onClick={() => selectProvider("google_workspace")}>Google Workspace</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
+      <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{CONNECTION_PROVIDER_LABELS[provider]}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "azure_repos" ? "Microsoft sign-in proves access to one Azure DevOps organization. Denali then uses its read-only service principal for exact repositories; no PAT or user token is stored." : provider === "entra" ? "A tenant administrator grants Denali application-only Microsoft Graph read permissions. Denali stores the tenant boundary, not access tokens or customer credentials." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : provider === "google_workspace" ? "A Workspace super administrator authorizes Denali’s service account for one disclosed read-only audit scope. Denali stores the domain boundary and delegated admin identity, never a customer token or JSON key." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "azure_repos" ? "AZURE REPOS" : provider === "entra" ? "ENTRA" : provider === "gcp" ? "GCP" : provider === "google_workspace" ? "WORKSPACE" : "GITHUB"}</span></div>
       <div className="connection-form-grid">
-        <label><span>Connection name</span><input required maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={provider === "aws" ? "Production AWS" : provider === "azure" ? "Production Azure" : provider === "entra" ? "Production Entra" : provider === "gcp" ? "Production Google Cloud" : provider === "google_workspace" ? "Production Google Workspace" : "Production GitHub"} /></label>
+        <label><span>Connection name</span><input required maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={`Production ${CONNECTION_PROVIDER_LABELS[provider]}`} /></label>
         {provider === "aws" ? <>
         <label><span>AWS account ID</span><input required inputMode="numeric" pattern="[0-9]{12}" maxLength={12} value={accountId} onChange={(event) => setAccountId(event.target.value)} placeholder="123456789012" /></label>
         <label><span>Partition</span><select value={partition} onChange={(event) => setPartition(event.target.value as AwsConnectionCreate["partition"])}><option value="aws">Commercial AWS</option><option value="aws-us-gov">AWS GovCloud</option><option value="aws-cn">AWS China</option></select></label>
@@ -2888,7 +2968,9 @@ function ConnectionsPage({
         <label><span>Inventory region coverage</span><select value={coverageMode} onChange={(event) => setCoverageMode(event.target.value as AwsConnectionCreate["coverage_mode"])}><option value="automatic">All enabled regions (recommended)</option><option value="selected">Selected regions only</option></select><small>Automatic mode rediscovers enabled and opted-in regions on every validation.</small></label>
         {coverageMode === "selected" && <label><span>Selected inventory regions</span><input required value={regions} onChange={(event) => setRegions(event.target.value)} placeholder="us-east-1, us-west-2" /><small>Coverage outside this explicit allowlist will be reported as excluded.</small></label>}</> : provider === "azure" ? <>
         <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={azureTenantId} onChange={(event) => setAzureTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>Use a native or invited guest administrator account in this exact tenant. Azure setup also requires at least one enabled subscription visible to that account.</small></label>
-        <label><span>Resource location coverage</span><input value="All locations in selected subscriptions" disabled /><small>Azure Resource Graph queries are subscription-wide; no single region limits coverage.</small></label></> : provider === "entra" ? <>
+        <label><span>Resource location coverage</span><input value="All locations in selected subscriptions" disabled /><small>Azure Resource Graph queries are subscription-wide; no single region limits coverage.</small></label></> : provider === "azure_repos" ? <>
+        <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={azureReposTenantId} onChange={(event) => setAzureReposTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>The directory that owns the Azure DevOps organization.</small></label>
+        <label><span>Azure DevOps organization</span><input required pattern="[A-Za-z0-9][A-Za-z0-9-]{0,49}" maxLength={50} value={azureReposOrganization} onChange={(event) => setAzureReposOrganization(event.target.value)} placeholder="contoso" /><small>The name in dev.azure.com/contoso. Repository selection follows Microsoft sign-in.</small></label></> : provider === "entra" ? <>
         <label><span>Microsoft Entra tenant ID</span><input required pattern="[0-9a-fA-F-]{36}" maxLength={36} value={entraTenantId} onChange={(event) => setEntraTenantId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" /><small>Sign in with a Global Administrator who is a native or invited guest user in this exact directory. A personal account outside the tenant cannot grant consent.</small></label>
         <label><span>Directory boundary</span><input value="Exact tenant, all selected Graph planes" disabled /><small>Denali requests application-only read access. No delegated user session is retained.</small></label></> : provider === "gcp" ? <>
         <label><span>Project selection</span><input value="Choose in Google Cloud Shell" disabled /><small>Cloud Shell enumerates active projects visible to your signed-in Google identity and lets you choose.</small></label>
@@ -2904,9 +2986,9 @@ function ConnectionsPage({
     <div className="connections-layout">
       <section className="panel connection-list-panel">
         <PanelHeader eyebrow="SOURCES" title={`${connections.length} connection${connections.length === 1 ? "" : "s"}`} />
-        <div className="connection-list">{connections.map((connection) => <button key={connection.id} className={selected?.id === connection.id ? "active" : ""} onClick={() => onSelect(connection.id)}><ConnectionProviderIcon provider={connection.provider} /><span><strong>{connection.display_name}</strong><small>{connection.provider === "aws" ? `${connection.configuration.account_id} · ${(connection.configuration.coverage_mode ?? "automatic") === "automatic" ? "all enabled regions" : (connection.configuration.regions ?? []).join(", ")}` : connection.provider === "azure" ? `${connection.configuration.tenant_id} · ${connection.configuration.subscriptions?.length ?? 0} selected subscriptions` : connection.provider === "entra" ? `${connection.configuration.tenant_id} · tenant-wide Graph read` : connection.provider === "gcp" ? `${connection.configuration.projects?.length ?? 0} selected projects` : connection.provider === "google_workspace" ? `${connection.configuration.domain} · domain-wide audit read` : `${connection.configuration.account_login ?? "not installed"} · ${connection.configuration.repositories?.length ?? 0} exact repositories`}</small></span><ConnectionHealth connection={connection} /></button>)}{connections.length === 0 && <div className="empty-state"><CloudCog /><strong>No connections configured</strong><span>Create an AWS, Azure, Entra, Google Cloud, Google Workspace, or GitHub onboarding plan to begin.</span></div>}</div>
+        <div className="connection-list">{connections.map((connection) => <button key={connection.id} className={selected?.id === connection.id ? "active" : ""} onClick={() => onSelect(connection.id)}><ConnectionProviderIcon provider={connection.provider} /><span><strong>{connection.display_name}</strong><small>{connection.provider === "aws" ? `${connection.configuration.account_id} · ${(connection.configuration.coverage_mode ?? "automatic") === "automatic" ? "all enabled regions" : (connection.configuration.regions ?? []).join(", ")}` : connection.provider === "azure" ? `${connection.configuration.tenant_id} · ${connection.configuration.subscriptions?.length ?? 0} selected subscriptions` : connection.provider === "azure_repos" ? `${connection.configuration.organization} · ${connection.configuration.repositories?.length ?? 0} exact repositories` : connection.provider === "entra" ? `${connection.configuration.tenant_id} · tenant-wide Graph read` : connection.provider === "gcp" ? `${connection.configuration.projects?.length ?? 0} selected projects` : connection.provider === "google_workspace" ? `${connection.configuration.domain} · domain-wide audit read` : `${connection.configuration.account_login ?? "not installed"} · ${connection.configuration.repositories?.length ?? 0} exact repositories`}</small></span><ConnectionHealth connection={connection} /></button>)}{connections.length === 0 && <div className="empty-state"><CloudCog /><strong>No connections configured</strong><span>Create a cloud, directory, workspace, or source-repository connection to begin.</span></div>}</div>
       </section>
-      {selected && <div className={canWrite ? "" : "read-only-detail"}><ConnectionDetail connection={selected} busy={busy} navigation={navigation} azureLaunch={azureLaunches[selected.id]} azureCompletionCode={azureCompletionCode[selected.id] ?? ""} onAzureCompletionCode={(value) => setAzureCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareAzure={() => void prepareAzureSetup(selected)} onCompleteAzure={() => void completeAzureSetup(selected)} onCollectAzure={() => void collectAzureDeployments(selected)} onPrepareEntra={() => void prepareEntraSetup(selected)} onCollectEntra={() => void collectEntraEvidence(selected)} onCompleteGoogleWorkspace={() => void completeGoogleWorkspaceSetup(selected)} onCollectGoogleWorkspace={() => void collectGoogleWorkspaceEvidence(selected)} gcpLaunch={gcpLaunches[selected.id]} gcpCompletionCode={gcpCompletionCode[selected.id] ?? ""} onGcpCompletionCode={(value) => setGcpCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareGcp={() => void prepareGcpSetup(selected)} onCompleteGcp={() => void completeGcpSetup(selected)} onCollectGcp={() => void collectGcpDeployments(selected)} onCollectAws={() => void collectAwsDeployments(selected)} onPrepareGitHub={() => void prepareGitHubSetup(selected)} onCollectGitHub={() => void collectGitHubSource(selected)} onLaunch={() => void launchConnection(selected)} onDownload={() => void downloadCloudFormation(selected)} onValidate={() => void validateConnection(selected)} onDisable={() => void disableConnection(selected)} onDelete={() => void deleteConnection(selected)} /></div>}
+      {selected && <div className={canWrite ? "" : "read-only-detail"}><ConnectionDetail connection={selected} busy={busy} navigation={navigation} azureLaunch={azureLaunches[selected.id]} azureCompletionCode={azureCompletionCode[selected.id] ?? ""} onAzureCompletionCode={(value) => setAzureCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareAzure={() => void prepareAzureSetup(selected)} onCompleteAzure={() => void completeAzureSetup(selected)} onCollectAzure={() => void collectAzureDeployments(selected)} onPrepareAzureRepos={() => void prepareAzureReposSetup(selected)} onCompleteAzureRepos={(repositoryIds) => void completeAzureReposSetup(selected, repositoryIds)} onCollectAzureRepos={() => void collectAzureReposSource(selected)} onPrepareEntra={() => void prepareEntraSetup(selected)} onCollectEntra={() => void collectEntraEvidence(selected)} onCompleteGoogleWorkspace={() => void completeGoogleWorkspaceSetup(selected)} onCollectGoogleWorkspace={() => void collectGoogleWorkspaceEvidence(selected)} gcpLaunch={gcpLaunches[selected.id]} gcpCompletionCode={gcpCompletionCode[selected.id] ?? ""} onGcpCompletionCode={(value) => setGcpCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareGcp={() => void prepareGcpSetup(selected)} onCompleteGcp={() => void completeGcpSetup(selected)} onCollectGcp={() => void collectGcpDeployments(selected)} onCollectAws={() => void collectAwsDeployments(selected)} onPrepareGitHub={() => void prepareGitHubSetup(selected)} onCollectGitHub={() => void collectGitHubSource(selected)} onLaunch={() => void launchConnection(selected)} onDownload={() => void downloadCloudFormation(selected)} onValidate={() => void validateConnection(selected)} onDisable={() => void disableConnection(selected)} onDelete={() => void deleteConnection(selected)} /></div>}
     </div>
   </div>;
 }
@@ -2923,10 +3005,10 @@ function ConnectionHealth({ connection, state }: { connection?: Connection; stat
     const Icon = connection.health_state === "partial" || connection.health_state === "unknown" ? CircleHelp : CircleAlert;
     return <span className={`connection-health ${connection.health_state}`}><Icon />{titleCase(connection.health_state)}</span>;
   }
-  const collectionState = connection.provider === "github" ? connection.source_collection_state
+  const collectionState = connection.provider === "github" || connection.provider === "azure_repos" ? connection.source_collection_state
     : connection.provider === "entra" || connection.provider === "google_workspace" ? connection.evidence_collection_state
       : connection.deployment_collection_state;
-  const collection = connection.provider === "github" ? connection.last_source_collection
+  const collection = connection.provider === "github" || connection.provider === "azure_repos" ? connection.last_source_collection
     : connection.provider === "entra" || connection.provider === "google_workspace" ? connection.last_evidence_collection
       : connection.last_deployment_collection;
   if (collectionState === "running") return <span className="connection-health unknown"><RefreshCw className="spin" />Collecting</span>;
@@ -2962,12 +3044,13 @@ function ConnectionOperationStepIcon({ state }: { state: ConnectionProgressStepS
   return <CircleHelp aria-hidden="true" />;
 }
 
-function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareEntra, onCollectEntra, onCompleteGoogleWorkspace, onCollectGoogleWorkspace, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; onCompleteGoogleWorkspace: () => void; onCollectGoogleWorkspace: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareAzureRepos, onCompleteAzureRepos, onCollectAzureRepos, onPrepareEntra, onCollectEntra, onCompleteGoogleWorkspace, onCollectGoogleWorkspace, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareAzureRepos: () => void; onCompleteAzureRepos: (repositoryIds: string[]) => void; onCollectAzureRepos: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; onCompleteGoogleWorkspace: () => void; onCollectGoogleWorkspace: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
   if (connection.provider === "azure") return <AzureConnectionDetail connection={connection} busy={busy} launch={azureLaunch} completionCode={azureCompletionCode} onCompletionCode={onAzureCompletionCode} onPrepare={onPrepareAzure} onComplete={onCompleteAzure} onCollect={onCollectAzure} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "entra") return <EntraConnectionDetail connection={connection} busy={busy} onPrepare={onPrepareEntra} onCollect={onCollectEntra} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "google_workspace") return <GoogleWorkspaceConnectionDetail connection={connection} busy={busy} onComplete={onCompleteGoogleWorkspace} onCollect={onCollectGoogleWorkspace} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "gcp") return <GcpConnectionDetail connection={connection} busy={busy} launch={gcpLaunch} completionCode={gcpCompletionCode} onCompletionCode={onGcpCompletionCode} onPrepare={onPrepareGcp} onComplete={onCompleteGcp} onCollect={onCollectGcp} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "github") return <GitHubConnectionDetail connection={connection} busy={busy} navigation={navigation} onPrepare={onPrepareGitHub} onCollect={onCollectGitHub} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
+  if (connection.provider === "azure_repos") return <AzureReposConnectionDetail connection={connection} busy={busy} onPrepare={onPrepareAzureRepos} onComplete={onCompleteAzureRepos} onCollect={onCollectAzureRepos} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   const validation = connection.last_validation;
   const awsCredential = connection.credential_reference.type === "aws_assume_role" ? connection.credential_reference : null;
   const launching = busy === `launch:${connection.id}`;
@@ -3101,6 +3184,30 @@ function GcpConnectionDetail({ connection, busy, launch, completionCode, onCompl
   </section>;
 }
 
+function AzureReposConnectionDetail({ connection, busy, onPrepare, onComplete, onCollect, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; onPrepare: () => void; onComplete: (repositoryIds: string[]) => void; onCollect: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+  const candidates = connection.configuration.repository_candidates ?? [];
+  const repositories = connection.configuration.repositories ?? [];
+  const candidateKey = candidates.map((item) => String(item.id)).join(",");
+  const [selectedIds, setSelectedIds] = useState<string[]>(() => candidates.map((item) => String(item.id)));
+  useEffect(() => setSelectedIds(candidateKey ? candidateKey.split(",") : []), [connection.id, candidateKey]);
+  const setupComplete = repositories.length > 0;
+  const selectionPending = connection.configuration.onboarding?.status === "selection_pending" && candidates.length > 0;
+  const validating = connection.validation_state === "running" || busy === `validate:${connection.id}`;
+  return <section className="panel connection-detail">
+    <div className="connection-detail-head"><div><span>AZURE REPOS</span><h3>{connection.display_name}</h3><code>dev.azure.com/{connection.configuration.organization}</code></div><ConnectionHealth state={connection.health_state} /></div>
+    <div className="setup-progress">
+      <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>The Microsoft Entra tenant, Azure DevOps organization, and read-only vso.code boundary are recorded.</small></div></div>
+      <div className={selectionPending || setupComplete ? "complete" : "current"}><span>{selectionPending || setupComplete ? <Check /> : "2"}</span><div><strong>2. Prove Azure DevOps access</strong><small>Sign in with a user who can see this organization. Denali lists repository metadata, then immediately discards the delegated token.</small><button className="primary-action" disabled={busy === `launch:${connection.id}` || !connection.setup_capabilities.azure_repos_oauth} onClick={onPrepare}><ExternalLink />{busy === `launch:${connection.id}` ? "Opening Microsoft…" : "Authorize with Microsoft"}</button></div></div>
+      <div className={setupComplete ? "complete" : selectionPending ? "current" : "pending"}><span>{setupComplete ? <Check /> : "3"}</span><div><strong>3. Select exact repositories</strong><small>Add Denali’s enterprise application as a Basic Azure DevOps user, grant read access only to the intended projects or repositories, then choose the exact retained boundary.</small>{selectionPending && <div className="azure-subscriptions"><strong>{candidates.length} authorized repositories</strong>{candidates.map((repository) => <label key={String(repository.id)}><input type="checkbox" checked={selectedIds.includes(String(repository.id))} onChange={() => setSelectedIds((current) => current.includes(String(repository.id)) ? current.filter((id) => id !== String(repository.id)) : [...current, String(repository.id)])} /><span>{repository.full_name}</span></label>)}<button className="primary-action" disabled={selectedIds.length === 0 || busy === `complete:${connection.id}`} onClick={() => onComplete(selectedIds)}>{busy === `complete:${connection.id}` ? "Verifying app access…" : "Save and verify selection"}</button></div>}{setupComplete && <div className="azure-subscriptions"><strong>{repositories.length} exact repositor{repositories.length === 1 ? "y" : "ies"}</strong>{repositories.map((repository) => <code key={String(repository.id)}>{repository.full_name} · {repository.id}</code>)}</div>}</div></div>
+      <div className={connection.last_validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "4"}</span><div><strong>4. Validate app-only read access</strong><small>Denali rebinds repository and project UUIDs, then validates metadata and the default revision independently.</small>{setupComplete && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating…" : "Validate again"}</button>}</div></div>
+      <div className={connection.last_source_collection ? (connection.last_source_collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{connection.last_source_collection?.state === "complete" ? <Check /> : "5"}</span><div><strong>5. Collect source and correlate</strong><small>Each default branch is resolved to an immutable commit. Bounded files are analyzed transiently for inventory, posture, and exact code-to-cloud evidence.</small>{setupComplete && <button className="primary-action" disabled={connection.source_collection_state === "running" || validating} onClick={onCollect}><GitBranch />{connection.source_collection_state === "running" ? "Collecting…" : "Collect source & correlate"}</button>}</div></div>
+    </div>
+    <div className="connection-section"><h4>Validation coverage</h4>{connection.last_validation ? <><div className={`validation-summary ${connection.last_validation.health_state}`}><strong>{connection.last_validation.summary}</strong><small>Checked {formatTime(connection.last_validation.completed_at)} · observed organization {connection.last_validation.account_id_observed ?? "not established"}</small></div><div className="validation-grid">{connection.last_validation.results.map((result) => <div key={`${result.repository_id}:${result.plane}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.repository_full_name}</small><p>{result.detail}</p></div></div>)}</div></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>Authorize, select repositories, and verify Denali’s app access first.</small></span></div>}</div>
+    <details className="connection-permissions"><summary>Review Azure Repos permission boundary</summary><div><code>vso.code</code></div><p>Read source code, branches, commits, and repository metadata only. This connection cannot push code, create pull requests, administer projects, read pipeline secrets, or retain Microsoft user tokens.</p></details>
+    <div className="connection-safeguards"><div><strong>Connection lifecycle</strong><span>Disabling stops validation and collection. Deleting removes Denali’s configuration; remove the enterprise application from Azure DevOps separately. Previously collected evidence remains.</span>{connection.credential_reference.type === "azure_repos_service_principal" && <code>Application ID {connection.credential_reference.client_id}</code>}</div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disable</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete configuration</button>}</div>
+  </section>;
+}
+
 function GitHubConnectionDetail({ connection, busy, navigation, onPrepare, onCollect, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; onPrepare: () => void; onCollect: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
   const validation = connection.last_validation;
   const repositories = connection.configuration.repositories ?? [];
@@ -3117,7 +3224,7 @@ function GitHubConnectionDetail({ connection, busy, navigation, onPrepare, onCol
     if (result.repository_id === undefined) return grouped;
     grouped.set(result.repository_id, [...(grouped.get(result.repository_id) ?? []), result]);
     return grouped;
-  }, new Map<number, ConnectionValidationResult[]>());
+  }, new Map<number | string, ConnectionValidationResult[]>());
   const repositoryIds = new Set(repositories.map((repository) => repository.id));
   const repositoryGroups = repositories.map((repository) => {
     const recorded = recordedByRepository.get(repository.id) ?? [];

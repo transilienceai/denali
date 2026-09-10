@@ -58,6 +58,7 @@ from denali.connections import (
     AWS_COVERAGE_SELECTED,
     AWS_SCOPES,
     AZURE_CLOUD_PUBLIC,
+    AZURE_REPOS_SCOPES,
     AZURE_SCOPES,
     ENTRA_SCOPES,
     GCP_SCOPES,
@@ -66,6 +67,8 @@ from denali.connections import (
     AwsCloudFormationLauncher,
     AwsConnectionValidator,
     AzureConnectionValidator,
+    AzureReposClient,
+    AzureReposConnectionValidator,
     AzureSetupScriptLauncher,
     EntraAdminConsentClient,
     EntraConnectionValidator,
@@ -78,15 +81,18 @@ from denali.connections import (
     GoogleWorkspaceOperator,
     aws_connection_coverage_plan,
     azure_coverage_plan,
+    azure_repos_coverage_plan,
     entra_coverage_plan,
     gcp_coverage_plan,
     github_coverage_plan,
     google_workspace_coverage_plan,
+    valid_azure_devops_organization,
 )
 from denali.connections.aws import render_cloudformation
 from denali.connections.gcp import valid_gcp_project_id
 from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
 from denali.connectors.azure_deployments import AzureConnectionDeploymentCollector
+from denali.connectors.azure_repos_repository import AzureReposRepositoryCollector
 from denali.connectors.container_images import normalize_image_digest
 from denali.connectors.entra_connection import EntraConnectionCollector
 from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
@@ -277,6 +283,35 @@ class InventoryReader(Protocol):
         expected_oauth_state_sha256: str,
         installation: dict[str, Any],
         installer: dict[str, Any],
+        repositories: list[dict[str, Any]],
+        coverage_plan: list[dict[str, Any]],
+        completed_at: datetime,
+    ) -> dict[str, Any] | None: ...
+
+    def record_azure_repos_oauth_launch(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        oauth: dict[str, Any],
+    ) -> dict[str, Any] | None: ...
+
+    def stage_azure_repos_repository_selection(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        expected_state_sha256: str,
+        repositories: list[dict[str, Any]],
+        authorized_at: datetime,
+        expires_at: datetime,
+    ) -> dict[str, Any] | None: ...
+
+    def complete_azure_repos_connection_setup(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
         repositories: list[dict[str, Any]],
         coverage_plan: list[dict[str, Any]],
         completed_at: datetime,
@@ -545,6 +580,26 @@ class GitHubConnectionCreate(BaseModel):
     )
 
 
+class AzureReposConnectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["azure_repos"] = "azure_repos"
+    display_name: str = Field(min_length=1, max_length=120)
+    tenant_id: UUID
+    organization: str = Field(min_length=1, max_length=50)
+    declared_scopes: list[str] = Field(
+        default_factory=lambda: list(AZURE_REPOS_SCOPES),
+        min_length=1,
+        max_length=len(AZURE_REPOS_SCOPES),
+    )
+
+
+class AzureReposSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository_ids: list[UUID] = Field(min_length=1, max_length=500)
+
+
 class GoogleWorkspaceConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -584,6 +639,7 @@ ConnectionCreate = Annotated[
     | EntraConnectionCreate
     | GcpConnectionCreate
     | GitHubConnectionCreate
+    | AzureReposConnectionCreate
     | GoogleWorkspaceConnectionCreate,
     Field(discriminator="provider"),
 ]
@@ -609,6 +665,9 @@ def create_app(
     github_app_client: GitHubAppClient | None = None,
     github_connection_validator: GitHubConnectionValidator | None = None,
     github_repository_collector: GitHubRepositoryCollector | None = None,
+    azure_repos_client: AzureReposClient | None = None,
+    azure_repos_connection_validator: AzureReposConnectionValidator | None = None,
+    azure_repos_repository_collector: AzureReposRepositoryCollector | None = None,
     entra_connection_collector: EntraConnectionCollector | None = None,
     google_workspace_connection_collector: GoogleWorkspaceConnectionCollector | None = None,
     onboarding_validation_timeout_seconds: int | None = None,
@@ -650,6 +709,7 @@ def create_app(
     )
     configured_gcp_launcher = gcp_setup_launcher or _gcp_setup_launcher_from_environment()
     configured_github_app = github_app_client or _github_app_from_environment()
+    configured_azure_repos_client = azure_repos_client or _azure_repos_client_from_environment()
     configured_evidence_store = evidence_report_store or _evidence_store_from_environment()
     configured_github_actions_verifier = github_actions_token_verifier
     if (
@@ -734,6 +794,17 @@ def create_app(
         app.state.github_repository_collector = github_repository_collector or (
             GitHubRepositoryCollector(configured_github_app)
             if configured_github_app is not None
+            else None
+        )
+        app.state.azure_repos_client = configured_azure_repos_client
+        app.state.azure_repos_connection_validator = azure_repos_connection_validator or (
+            AzureReposConnectionValidator(configured_azure_repos_client)
+            if configured_azure_repos_client is not None
+            else None
+        )
+        app.state.azure_repos_repository_collector = azure_repos_repository_collector or (
+            AzureReposRepositoryCollector(configured_azure_repos_client)
+            if configured_azure_repos_client is not None
             else None
         )
         app.state.entra_connection_collector = entra_connection_collector or (
@@ -844,6 +915,7 @@ def create_app(
             "entra": request.app.state.entra_connection_validator,
             "gcp": request.app.state.gcp_connection_validator,
             "github": request.app.state.github_connection_validator,
+            "azure_repos": request.app.state.azure_repos_connection_validator,
             "google_workspace": request.app.state.google_workspace_connection_validator,
         }
         validator = validators[target["provider"]]
@@ -1068,6 +1140,28 @@ def create_app(
 
         background_tasks.add_task(run_collection)
         return {"status": "started", "connection_id": connection_id}
+
+    def queue_azure_repos_collection(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        repo: InventoryReader,
+        current_tenant: str,
+        target: dict[str, Any],
+    ) -> dict[str, str]:
+        result = queue_durable_collection(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            target,
+            collection_kind="azure_repos_source",
+            collector=request.app.state.azure_repos_repository_collector,
+            unavailable_detail="Azure Repos source collection is not configured",
+            dispatch_failure_detail="Unable to dispatch Azure Repos source collection",
+        )
+        if result is None:
+            raise HTTPException(status_code=503, detail="durable collection storage is unavailable")
+        return result
 
     def queue_gcp_deployment_collection(
         request: Request,
@@ -1567,6 +1661,52 @@ def create_app(
                     configuration={
                         "coverage_mode": "exact-installation-repositories",
                         "repositories": [],
+                    },
+                )
+                return _with_validation_state(request, current_tenant, created)
+            except ValueError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+
+        if isinstance(connection, AzureReposConnectionCreate):
+            azure_repos = request.app.state.azure_repos_client
+            if azure_repos is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Azure Repos onboarding is not configured; set the Azure client "
+                        "credentials and Azure Repos callback URL"
+                    ),
+                )
+            organization = connection.organization.strip()
+            if not valid_azure_devops_organization(organization):
+                raise HTTPException(status_code=422, detail="Azure DevOps organization is invalid")
+            scopes = list(dict.fromkeys(connection.declared_scopes))
+            unsupported_scopes = [scope for scope in scopes if scope not in AZURE_REPOS_SCOPES]
+            if unsupported_scopes:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"unsupported Azure Repos scope: {', '.join(unsupported_scopes)}",
+                )
+            connection_id = str(uuid4())
+            try:
+                created = repo.create_connection(
+                    current_tenant,
+                    connection_id=connection_id,
+                    provider="azure_repos",
+                    display_name=display_name,
+                    credential_type="azure_repos_service_principal",
+                    credential_reference={"client_id": azure_repos.client_id},
+                    declared_scopes=scopes,
+                    coverage_plan=[],
+                    configuration={
+                        "tenant_id": str(connection.tenant_id),
+                        "organization": organization,
+                        "coverage_mode": "exact-azure-repositories",
+                        "repositories": [],
+                        "onboarding": {
+                            "method": "azure_repos_entra_oauth",
+                            "status": "pending",
+                        },
                     },
                 )
                 return _with_validation_state(request, current_tenant, created)
@@ -2324,6 +2464,197 @@ def create_app(
             wait_for_credentials=False,
         )
 
+    @app.post("/v1/connections/{connection_id}/azure-repos/setup/launch", status_code=201)
+    def launch_azure_repos_setup(
+        request: Request,
+        response: Response,
+        connection_id: UUID,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None or target["provider"] != "azure_repos":
+            raise HTTPException(status_code=404, detail="Azure Repos connection not found")
+        if target["lifecycle_state"] != "active":
+            raise HTTPException(status_code=409, detail="disabled connections cannot be launched")
+        client = request.app.state.azure_repos_client
+        if client is None:
+            raise HTTPException(status_code=503, detail="Azure Repos onboarding is not configured")
+        launch = client.create_oauth_launch(
+            denali_tenant_id=current_tenant,
+            connection_id=str(connection_id),
+            entra_tenant_id=target["configuration"]["tenant_id"],
+        )
+        recorded = repo.record_azure_repos_oauth_launch(
+            current_tenant,
+            str(connection_id),
+            oauth={
+                "state_sha256": launch["state_sha256"],
+                "pkce_verifier": launch["pkce_verifier"],
+                "created_at": launch["created_at"].isoformat(),
+                "expires_at": launch["expires_at"].isoformat(),
+            },
+        )
+        if recorded is None:
+            raise HTTPException(status_code=409, detail="connection changed during launch")
+        response.headers["Cache-Control"] = "no-store"
+        return {"authorize_url": launch["authorize_url"], "expires_at": launch["expires_at"]}
+
+    @app.get("/v1/connections/azure-repos/oauth/callback", include_in_schema=False)
+    def azure_repos_oauth_callback(
+        request: Request,
+        state: str = Query(min_length=32, max_length=1024),
+        code: str | None = Query(default=None, min_length=8, max_length=4096),
+        error: str | None = Query(default=None, min_length=1, max_length=200),
+    ) -> RedirectResponse:
+        state_tenant, connection_id = _github_state_context(state)
+        repo, current_tenant = _context_for_tenant(request, state_tenant)
+        target = repo.get_connection_validation_target(current_tenant, connection_id)
+        if target is None or target["provider"] != "azure_repos":
+            raise HTTPException(status_code=404, detail="Azure Repos connection not found")
+        expected_hash = target["credential_reference"].get("oauth_state_sha256")
+        if not expected_hash or not hmac.compare_digest(expected_hash, _sha256_text(state)):
+            raise HTTPException(status_code=409, detail="Azure Repos OAuth state is invalid")
+        _require_current_setup_expiry(
+            target,
+            key="oauth_expires_at",
+            detail="Azure Repos authorization has expired",
+        )
+        client = request.app.state.azure_repos_client
+        if client is None:
+            raise HTTPException(status_code=503, detail="Azure Repos onboarding is not configured")
+        if error or code is None:
+            return RedirectResponse(
+                f"{client.web_url}/?"
+                f"{urlencode({'azure_repos_setup': 'failed', 'connection_id': connection_id})}",
+                status_code=303,
+            )
+        try:
+            user_token = client.exchange_user_code(
+                tenant_id=target["configuration"]["tenant_id"],
+                code=code,
+                pkce_verifier=target["credential_reference"]["pkce_verifier"],
+            )
+            repositories = client.list_repositories(
+                organization=target["configuration"]["organization"],
+                token=user_token,
+            )
+            authorized_at = datetime.now(UTC)
+            expires_at = authorized_at + timedelta(minutes=30)
+            updated = repo.stage_azure_repos_repository_selection(
+                current_tenant,
+                connection_id,
+                expected_state_sha256=expected_hash,
+                repositories=repositories,
+                authorized_at=authorized_at,
+                expires_at=expires_at,
+            )
+            if updated is None:
+                raise RuntimeError("connection changed during authorization")
+        except Exception:
+            return RedirectResponse(
+                f"{client.web_url}/?"
+                f"{urlencode({'azure_repos_setup': 'failed', 'connection_id': connection_id})}",
+                status_code=303,
+            )
+        return RedirectResponse(
+            f"{client.web_url}/?"
+            f"{urlencode({'azure_repos_setup': 'select', 'connection_id': connection_id})}",
+            status_code=303,
+        )
+
+    @app.post(
+        "/v1/connections/{connection_id}/azure-repos/setup/complete",
+        status_code=202,
+    )
+    def complete_azure_repos_setup(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        connection_id: UUID,
+        selection: AzureReposSelection,
+    ) -> dict[str, str]:
+        repo, current_tenant = _context(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None or target["provider"] != "azure_repos":
+            raise HTTPException(status_code=404, detail="Azure Repos connection not found")
+        _require_current_setup_expiry(
+            target,
+            key="selection_expires_at",
+            detail="Azure Repos repository selection has expired; authorize again",
+        )
+        candidates = target["configuration"].get("repository_candidates", [])
+        candidate_by_id = {str(item.get("id")): item for item in candidates}
+        selected_ids = list(dict.fromkeys(str(value) for value in selection.repository_ids))
+        if any(repository_id not in candidate_by_id for repository_id in selected_ids):
+            raise HTTPException(
+                status_code=409,
+                detail="repository selection is outside the authorized Azure DevOps boundary",
+            )
+        client = request.app.state.azure_repos_client
+        if client is None:
+            raise HTTPException(status_code=503, detail="Azure Repos onboarding is not configured")
+        try:
+            app_token = client.application_token(target["configuration"]["tenant_id"])
+            app_repositories = client.list_repositories(
+                organization=target["configuration"]["organization"], token=app_token
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Denali's service principal cannot read this Azure DevOps organization. "
+                    "Add the enterprise application as a Basic user and grant repository "
+                    "read access."
+                ),
+            ) from error
+        app_by_id = {item["id"]: item for item in app_repositories}
+        repositories = []
+        for repository_id in selected_ids:
+            candidate = candidate_by_id[repository_id]
+            app_repository = app_by_id.get(repository_id)
+            if app_repository is None or any(
+                candidate.get(key) != app_repository.get(key)
+                for key in ("id", "project_id", "name", "project_name")
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Denali's service principal cannot independently verify every selected "
+                        "repository. Review Azure DevOps project and repository permissions."
+                    ),
+                )
+            repositories.append(app_repository)
+        completed_at = datetime.now(UTC)
+        updated = repo.complete_azure_repos_connection_setup(
+            current_tenant,
+            str(connection_id),
+            repositories=repositories,
+            coverage_plan=azure_repos_coverage_plan(
+                target["declared_scopes"],
+                organization=target["configuration"]["organization"],
+                repositories=repositories,
+            ),
+            completed_at=completed_at,
+        )
+        if updated is None:
+            raise HTTPException(
+                status_code=409, detail="Azure Repos connection changed during setup"
+            )
+        validation_target = repo.get_connection_validation_target(
+            current_tenant, str(connection_id)
+        )
+        if validation_target is None:
+            raise HTTPException(
+                status_code=409, detail="Azure Repos connection changed during setup"
+            )
+        return queue_validation(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            validation_target,
+            wait_for_credentials=False,
+        )
+
     @app.post("/v1/connections/{connection_id}/validate", status_code=202)
     def validate_connection(
         request: Request,
@@ -2343,6 +2674,7 @@ def create_app(
             "entra",
             "gcp",
             "github",
+            "azure_repos",
             "google_workspace",
         }:
             raise HTTPException(status_code=422, detail="connection provider is not supported")
@@ -2360,6 +2692,11 @@ def create_app(
             raise HTTPException(
                 status_code=409,
                 detail="complete GitHub App installation before validation",
+            )
+        if target["provider"] == "azure_repos" and not target["configuration"].get("repositories"):
+            raise HTTPException(
+                status_code=409,
+                detail="complete Azure Repos repository selection before validation",
             )
         if target["provider"] == "entra" and not target["configuration"].get("onboarding", {}).get(
             "completed_at"
@@ -2442,6 +2779,25 @@ def create_app(
                 detail="complete GitHub App installation before collecting source",
             )
         return queue_github_collection(request, background_tasks, repo, current_tenant, target)
+
+    @app.post("/v1/connections/{connection_id}/azure-repos/collect", status_code=202)
+    def collect_azure_repos_source(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        connection_id: UUID,
+    ) -> dict[str, str]:
+        repo, current_tenant = _context(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None or target["provider"] != "azure_repos":
+            raise HTTPException(status_code=404, detail="Azure Repos connection not found")
+        if target["lifecycle_state"] != "active":
+            raise HTTPException(status_code=409, detail="disabled connections cannot collect")
+        if not target["configuration"].get("repositories"):
+            raise HTTPException(
+                status_code=409,
+                detail="complete Azure Repos repository selection before collecting source",
+            )
+        return queue_azure_repos_collection(request, background_tasks, repo, current_tenant, target)
 
     @app.post(
         "/v1/connections/{connection_id}/aws/collect-deployments",
@@ -2528,6 +2884,7 @@ def create_app(
             "entra": ("entra_ai", "evidence"),
             "gcp": ("gcp_deployments", "GCP deployment"),
             "github": ("github_source", "source"),
+            "azure_repos": ("azure_repos_source", "source"),
             "google_workspace": ("google_workspace_ai", "evidence"),
         }
         collection_status = getattr(repo, "connection_collection_status", None)
@@ -3282,6 +3639,7 @@ def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]
         "entra": ("entra_ai", "evidence"),
         "gcp": ("gcp_deployments", "deployment"),
         "github": ("github_source", "source"),
+        "azure_repos": ("azure_repos_source", "source"),
         "google_workspace": ("google_workspace_ai", "evidence"),
     }
     collection_status = getattr(request.app.state.repository, "connection_collection_status", None)
@@ -3348,6 +3706,9 @@ def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> 
         "github_app": (
             result["provider"] == "github" and request.app.state.github_app_client is not None
         ),
+        "azure_repos_oauth": (
+            result["provider"] == "azure_repos" and request.app.state.azure_repos_client is not None
+        ),
         "entra_admin_consent": (
             result["provider"] == "entra" and request.app.state.entra_consent_client is not None
         ),
@@ -3381,6 +3742,7 @@ def _is_public_request(request: Request) -> bool:
         "/redoc",
         "/v1/connections/github/setup/callback",
         "/v1/connections/github/oauth/callback",
+        "/v1/connections/azure-repos/oauth/callback",
         "/v1/connections/entra/setup/callback",
     }:
         return True
@@ -3590,6 +3952,31 @@ def _github_app_from_environment() -> GitHubAppClient | None:
         app_slug=str(app_slug),
         callback_url=callback_url,
         web_url=web_url,
+    )
+
+
+def _azure_repos_client_from_environment() -> AzureReposClient | None:
+    client_id = os.environ.get("DENALI_AZURE_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("DENALI_AZURE_CLIENT_SECRET", "").strip()
+    web_url = os.environ.get("DENALI_WEB_URL", "http://127.0.0.1:3080").rstrip("/")
+    callback_url = os.environ.get("DENALI_AZURE_REPOS_CALLBACK_URL", "").strip() or (
+        f"{web_url}/api/v1/connections/azure-repos/oauth/callback"
+    )
+    if not client_id and not client_secret:
+        return None
+    if not client_id or not client_secret:
+        raise ValueError("Azure Repos client credentials are incomplete")
+    return AzureReposClient(
+        client_id=client_id,
+        client_secret=client_secret,
+        callback_url=callback_url,
+        web_url=web_url,
+        setup_seconds=_bounded_environment_integer(
+            "DENALI_AZURE_REPOS_ONBOARDING_SECONDS",
+            default=1800,
+            minimum=300,
+            maximum=3600,
+        ),
     )
 
 

@@ -33,6 +33,15 @@ from denali.connections.azure_onboarding import (
     AzureSetupScriptLauncher,
     render_setup_script,
 )
+from denali.connections.azure_repos import (
+    AZURE_REPOS_SCOPE_CONTENTS,
+    AZURE_REPOS_SCOPE_METADATA,
+    AZURE_REPOS_SCOPES,
+    AzureReposClient,
+    AzureReposConnectionValidator,
+    azure_repos_coverage_plan,
+    valid_azure_devops_organization,
+)
 from denali.connections.entra import (
     ENTRA_SCOPE_APPLICATIONS,
     ENTRA_SCOPE_DIRECTORY_AUDITS,
@@ -99,6 +108,11 @@ __all__ = [
     "AZURE_SCOPES",
     "AzureConnectionValidator",
     "AzureSetupScriptLauncher",
+    "AZURE_REPOS_SCOPE_CONTENTS",
+    "AZURE_REPOS_SCOPE_METADATA",
+    "AZURE_REPOS_SCOPES",
+    "AzureReposClient",
+    "AzureReposConnectionValidator",
     "GCP_ONBOARDING_SCRIPT_VERSION",
     "GCP_SCOPE_AGENT_BUILDER",
     "GCP_SCOPE_AI_ACTIVITY",
@@ -131,6 +145,7 @@ __all__ = [
     "aws_connection_coverage_plan",
     "aws_coverage_plan",
     "azure_coverage_plan",
+    "azure_repos_coverage_plan",
     "gcp_coverage_plan",
     "github_coverage_plan",
     "google_workspace_coverage_plan",
@@ -138,4 +153,5 @@ __all__ = [
     "render_cloudformation",
     "render_setup_script",
     "render_gcp_setup_script",
+    "valid_azure_devops_organization",
 ]
