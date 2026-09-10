@@ -6,8 +6,9 @@ import base64
 import binascii
 import re
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -93,12 +94,13 @@ class GitHubSourceError(RuntimeError):
 class GitHubSnapshot:
     repository_id: int
     repository_name: str
-    default_branch: str
+    default_branch: str | None
     commit: str
     remote: str
     source_locator: str
     files: tuple[tuple[str, bytes], ...]
     warnings: tuple[str, ...] = ()
+    detail: str | None = None
 
     @property
     def total_bytes(self) -> int:
@@ -253,12 +255,21 @@ class GitHubRepositoryCollector:
             raise GitHubSourceError("repository_identity_mismatch")
         default_branch = metadata.get("default_branch")
         if not isinstance(default_branch, str) or not default_branch:
-            raise GitHubSourceError("default_branch_missing")
-        ref = self._json(
-            "GET",
-            f"/repos/{full_name}/git/ref/{quote(f'heads/{default_branch}', safe='/')}",
-            token=token,
-        )
+            return _empty_snapshot(repository_id, full_name, default_branch=None)
+        try:
+            ref = self._json(
+                "GET",
+                f"/repos/{full_name}/git/ref/{quote(f'heads/{default_branch}', safe='/')}",
+                token=token,
+            )
+        except GitHubSourceError as error:
+            if error.code == "github_conflict":
+                return _empty_snapshot(
+                    repository_id,
+                    full_name,
+                    default_branch=default_branch,
+                )
+            raise
         commit = ref.get("object", {}).get("sha")
         if not isinstance(commit, str) or not _COMMIT_SHA.fullmatch(commit):
             raise GitHubSourceError("invalid_immutable_revision")
@@ -295,11 +306,28 @@ class GitHubRepositoryCollector:
                 continue
             selected_entries.append((path, sha, size))
 
-        selected_entries.sort()
-        if len(selected_entries) > MAX_SELECTED_FILES:
-            raise GitHubSourceError("repository_file_limit_exceeded")
-        if sum(item[2] for item in selected_entries) > MAX_TOTAL_BYTES:
-            raise GitHubSourceError("repository_byte_limit_exceeded")
+        eligible_count = len(selected_entries)
+        selected_entries.sort(key=lambda item: (_analysis_priority(item[0]), item[0]))
+        budgeted_entries: list[tuple[str, str, int]] = []
+        selected_bytes = 0
+        byte_skipped = 0
+        for entry in selected_entries:
+            if len(budgeted_entries) >= MAX_SELECTED_FILES:
+                break
+            if selected_bytes + entry[2] > MAX_TOTAL_BYTES:
+                byte_skipped += 1
+                continue
+            budgeted_entries.append(entry)
+            selected_bytes += entry[2]
+        file_skipped = eligible_count - len(budgeted_entries) - byte_skipped
+        if file_skipped > 0 or byte_skipped > 0:
+            warnings.append(
+                "repository analysis budget selected "
+                f"{len(budgeted_entries)} of {eligible_count} eligible files; "
+                f"{file_skipped} exceeded the file budget and {byte_skipped} exceeded "
+                "the byte budget"
+            )
+        selected_entries = budgeted_entries
 
         def fetch_blob(entry: tuple[str, str, int]) -> tuple[str, bytes]:
             path, sha, expected_size = entry
@@ -363,11 +391,15 @@ class GitHubRepositoryCollector:
                     if snapshot.warnings
                     else CoverageState.COMPLETE
                 ),
-                detail="; ".join(snapshot.warnings)[:4_000] or None,
+                detail=(
+                    "; ".join((*snapshot.warnings, snapshot.detail or ""))[:4_000]
+                    or None
+                ),
                 commit=snapshot.commit,
                 default_branch=snapshot.default_branch,
                 file_count=len(snapshot.files),
                 total_bytes=snapshot.total_bytes,
+                source_locator=snapshot.source_locator,
             )
             inventory_batch = RepositoryConnector(root, **metadata).collect(
                 connection_id=connection_id
@@ -380,6 +412,13 @@ class GitHubRepositoryCollector:
                 targets=targets,
                 **metadata,
             ).collect(connection_id=connection_id)
+            if snapshot.warnings:
+                upstream_detail = "Source snapshot is partial: " + "; ".join(
+                    snapshot.warnings
+                )[:3_900]
+                inventory_batch = _with_partial_coverage(inventory_batch, upstream_detail)
+                posture_batch = _with_partial_coverage(posture_batch, upstream_detail)
+                correlation_batch = _with_partial_coverage(correlation_batch, upstream_detail)
             source_result = repository.ingest(tenant_id, source_batch)
             inventory_result = repository.ingest(tenant_id, inventory_batch)
             posture_result = repository.ingest_findings(tenant_id, posture_batch)
@@ -414,17 +453,104 @@ class GitHubRepositoryCollector:
         }
 
     def _json(self, method: str, path: str, *, token: str, **kwargs: Any) -> dict[str, Any]:
-        try:
-            response = self._app.installation_request(
-                method, path, token=token, timeout=20.0, **kwargs
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except Exception as error:
-            raise GitHubSourceError("github_api_request_failed") from error
+        for attempt in range(3):
+            try:
+                response = self._app.installation_request(
+                    method, path, token=token, timeout=20.0, **kwargs
+                )
+                response.raise_for_status()
+                payload = response.json()
+                break
+            except Exception as error:
+                code = _github_request_error_code(error)
+                if code in {
+                    "github_rate_limited",
+                    "github_timeout",
+                    "github_upstream_unavailable",
+                } and attempt < 2:
+                    time.sleep(0.25 * (2**attempt))
+                    continue
+                raise GitHubSourceError(code) from error
         if not isinstance(payload, dict):
             raise GitHubSourceError("invalid_github_response")
         return payload
+
+
+def _empty_snapshot(
+    repository_id: int,
+    full_name: str,
+    *,
+    default_branch: str | None,
+) -> GitHubSnapshot:
+    return GitHubSnapshot(
+        repository_id=repository_id,
+        repository_name=f"github.com/{full_name}",
+        default_branch=default_branch,
+        commit="empty",
+        remote=f"https://github.com/{full_name}.git",
+        source_locator=f"github://repositories/{repository_id}/empty",
+        files=(),
+        detail="repository_empty",
+    )
+
+
+def _analysis_priority(path: str) -> int:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in {".tf", ".bicep", ".yaml", ".yml"}:
+        return 0
+    if suffix in {
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs",
+        ".mts",
+        ".cts",
+    }:
+        return 1
+    return 2
+
+
+def _github_request_error_code(error: Exception) -> str:
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    headers = getattr(response, "headers", {})
+    if (
+        status == 429
+        or (status == 403 and str(headers.get("x-ratelimit-remaining", "")) == "0")
+        or headers.get("retry-after")
+    ):
+        return "github_rate_limited"
+    if status == 403:
+        return "github_permission_denied"
+    if status == 404:
+        return "github_resource_not_found"
+    if status == 409:
+        return "github_conflict"
+    if isinstance(status, int) and status >= 500:
+        return "github_upstream_unavailable"
+    if isinstance(error, TimeoutError) or "timeout" in type(error).__name__.lower():
+        return "github_timeout"
+    return "github_api_request_failed"
+
+
+def _with_partial_coverage(batch: Any, detail: str) -> Any:
+    coverage = tuple(
+        Coverage(
+            item.plane,
+            (
+                CoverageState.PARTIAL
+                if item.state is CoverageState.COMPLETE
+                else item.state
+            ),
+            item.scope,
+            "; ".join(part for part in (item.detail, detail) if part)[:4_000],
+        )
+        for item in batch.coverage
+    )
+    return replace(batch, coverage=coverage)
 
 
 def _source_batch(
@@ -438,6 +564,7 @@ def _source_batch(
     default_branch: str | None = None,
     file_count: int = 0,
     total_bytes: int = 0,
+    source_locator: str | None = None,
 ) -> InventoryBatch:
     observed_at = datetime.now(UTC)
     revision = commit or "unresolved"
@@ -455,9 +582,8 @@ def _source_batch(
                 confidence=1.0,
                 evidence=Evidence(
                     source_type="github_repository_snapshot",
-                    locator=(
-                        f"github://repositories/{repository_id}/commits/{revision}"
-                    ),
+                    locator=source_locator
+                    or f"github://repositories/{repository_id}/commits/{revision}",
                     observed_at=observed_at,
                     payload={
                         "repository_id": repository_id,

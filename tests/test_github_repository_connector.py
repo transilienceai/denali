@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from denali.connectors.github_repository import (
@@ -41,16 +41,24 @@ class Response:
     payload: dict[str, Any]
 
     status_code: int = 200
+    headers: dict[str, str] = field(default_factory=dict)
 
     def raise_for_status(self) -> None:
-        return None
+        if self.status_code >= 400:
+            raise ResponseError(self)
 
     def json(self) -> dict[str, Any]:
         return self.payload
 
 
+class ResponseError(RuntimeError):
+    def __init__(self, response: Response):
+        super().__init__(f"HTTP {response.status_code}")
+        self.response = response
+
+
 class AppClient:
-    def __init__(self, routes: dict[str, dict[str, Any]]):
+    def __init__(self, routes: dict[str, dict[str, Any] | Response]):
         self.routes = routes
         self.tokens: list[tuple[int, int]] = []
 
@@ -66,7 +74,22 @@ class AppClient:
     ) -> Response:
         assert method == "GET"
         assert token == "ghs_ephemeral-do-not-store"
-        return Response(self.routes[path])
+        routed = self.routes[path]
+        return routed if isinstance(routed, Response) else Response(routed)
+
+
+class SequencedAppClient(AppClient):
+    def __init__(self, responses: list[Response]):
+        super().__init__({})
+        self.responses = responses
+        self.calls = 0
+
+    def installation_request(
+        self, method: str, path: str, *, token: str, **kwargs: Any
+    ) -> Response:
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
 
 
 class Sink:
@@ -256,3 +279,101 @@ def test_oversized_analysis_blob_is_skipped_with_partial_coverage() -> None:
     assert result["failed_count"] == 0
     assert sink.batches[0].coverage[0].state is CoverageState.PARTIAL
     assert "infra/stack.ts: larger than" in (sink.batches[0].coverage[0].detail or "")
+    for batch in sink.batches[1:]:
+        assert {item.state for item in batch.coverage} == {CoverageState.PARTIAL}
+    assert not sink.batches[1].may_withdraw("repository_inventory")
+    assert not sink.batches[2].may_resolve_missing
+    assert not sink.batches[3].may_withdraw("code_to_cloud_deployments")
+
+
+def test_repository_file_budget_produces_deterministic_partial_analysis(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr("denali.connectors.github_repository.MAX_SELECTED_FILES", 1)
+    budgeted = routes()
+    budgeted[f"/repos/acme/agent/git/trees/{COMMIT}"]["tree"] = [
+        budgeted[f"/repos/acme/agent/git/trees/{COMMIT}"]["tree"][0],
+        budgeted[f"/repos/acme/agent/git/trees/{COMMIT}"]["tree"][1],
+    ]
+    sink = Sink()
+
+    result = GitHubRepositoryCollector(AppClient(budgeted)).collect(
+        tenant_id="tenant", connection=connection(), repository=sink
+    )
+
+    assert result["failed_count"] == 0
+    assert result["partial_count"] == 1
+    assert result["repositories"][0]["files"] == 1
+    assert "selected 1 of 2 eligible files" in (sink.batches[0].coverage[0].detail or "")
+
+
+def test_empty_repository_is_a_complete_zero_source_snapshot() -> None:
+    empty = routes()
+    empty["/repos/acme/agent"]["default_branch"] = None
+    sink = Sink()
+
+    result = GitHubRepositoryCollector(AppClient(empty)).collect(
+        tenant_id="tenant", connection=connection(), repository=sink
+    )
+
+    assert result["state"] == "complete"
+    assert result["repositories"][0]["revision"] == "empty"
+    assert result["repositories"][0]["files"] == 0
+    assert sink.batches[0].coverage[0].detail == "repository_empty"
+
+
+def test_git_ref_conflict_is_treated_as_an_empty_repository() -> None:
+    empty = routes()
+    empty["/repos/acme/agent/git/ref/heads/main"] = Response({}, status_code=409)
+    sink = Sink()
+
+    result = GitHubRepositoryCollector(AppClient(empty)).collect(
+        tenant_id="tenant", connection=connection(), repository=sink
+    )
+
+    assert result["state"] == "complete"
+    assert result["repositories"][0]["revision"] == "empty"
+
+
+def test_permission_failure_keeps_a_specific_safe_error_code() -> None:
+    denied = routes()
+    denied["/repos/acme/agent"] = Response({}, status_code=403)
+    sink = Sink()
+
+    result = GitHubRepositoryCollector(AppClient(denied)).collect(
+        tenant_id="tenant", connection=connection(), repository=sink
+    )
+
+    assert result["repositories"][0]["detail"] == "github_permission_denied"
+
+
+def test_transient_github_failures_are_retried_with_a_bound(monkeypatch: Any) -> None:
+    monkeypatch.setattr("denali.connectors.github_repository.time.sleep", lambda _: None)
+    app = SequencedAppClient(
+        [
+            Response({}, status_code=429),
+            Response({}, status_code=503),
+            Response({"ok": True}),
+        ]
+    )
+
+    payload = GitHubRepositoryCollector(app)._json("GET", "/fixture", token="token")
+
+    assert payload == {"ok": True}
+    assert app.calls == 3
+
+
+def test_github_rate_limit_headers_are_not_misclassified_as_permission_failure(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr("denali.connectors.github_repository.time.sleep", lambda _: None)
+    app = SequencedAppClient(
+        [Response({}, status_code=403, headers={"x-ratelimit-remaining": "0"})] * 3
+    )
+
+    sink = Sink()
+    result = GitHubRepositoryCollector(app).collect(
+        tenant_id="tenant", connection=connection(), repository=sink
+    )
+
+    assert result["repositories"][0]["detail"] == "github_rate_limited"
