@@ -19,6 +19,12 @@ connection responses expose the role ARN but not the external ID; the external I
 only as the `NoEcho` parameter default in the setup template and in the internal role
 assumption target.
 
+Every new AWS connection receives a deterministic physical IAM role name derived from its
+internally generated Denali connection UUID. The role name is not supplied by the browser
+and is never shared between connection records, including multiple connections to the same
+AWS account. This prevents CloudFormation physical-name conflicts while preserving existing
+connections and their previously stored role ARNs unchanged.
+
 The primary hosted onboarding path is CloudFormation Quick Create, not a shell installer.
 Denali renders the same connection-specific template as the download path, uploads it under
 an unguessable key in a private S3 onboarding bucket, and returns a console URL containing a
@@ -61,6 +67,11 @@ stack. Credential failures are retried for at most 15 minutes and are not persis
 intermediate access conclusion. The first credential success proceeds through every normal
 plane, while expiration persists the final credential failure. Manual **Validate again**
 remains a single deterministic attempt.
+
+The UI must keep that durable wait visible after route changes, distinguish the role-deploy
+wait from plane validation, state the 10-second retry cadence and 15-minute ceiling, and
+direct the user to CloudFormation stack Events when AWS reports a rollback. Denali cannot
+read CloudFormation status until the connection-specific role exists and can be assumed.
 
 The initial regional planes are Bedrock Agents Classic agents and guardrails; AgentCore
 runtimes, gateways, workload identities, and memories; Bedrock management activity in

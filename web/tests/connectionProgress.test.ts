@@ -75,5 +75,19 @@ test("treats AWS launch as the start of setup validation", () => {
   }), "launch:connection-1");
 
   assert.equal(progress?.phase, "validating");
-  assert.equal(progress?.title, "AWS access is being validated");
+  assert.equal(progress?.title, "Waiting for the AWS role and validating access");
+  assert.match(progress?.detail ?? "", /retries every 10 seconds for up to 15 minutes/);
+  assert.match(progress?.detail ?? "", /review the stack Events/);
+  assert.deepEqual(progress?.steps.map((step) => step.state), ["current", "pending", "pending"]);
+});
+
+test("restores the AWS onboarding wait from durable state after navigation", () => {
+  const progress = getConnectionProgress(connection({
+    provider: "aws",
+    validation_state: "running",
+    credential_reference: { type: "aws_assume_role", role_arn: "arn:aws:iam::123456789012:role/Denali" },
+  }), null);
+
+  assert.equal(progress?.title, "Waiting for the AWS role and validating access");
+  assert.deepEqual(progress?.steps.map((step) => step.label), ["Deploy IAM role", "Validate access", "Collect evidence"]);
 });
