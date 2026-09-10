@@ -45,8 +45,15 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
+import {
+  completedRunningConnectionIds,
+  markConnectionOperationRunning,
+  runningConnectionOperations,
+  type ConnectionOperationKind,
+  type RunningConnectionOperation,
+} from "./connectionMonitoring";
 import { waitForAcceptedOperation } from "./connectionPolling";
 import { getConnectionProgress, type ConnectionProgressStepState } from "./connectionProgress";
 import {
@@ -261,6 +268,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
   const [assets, setAssets] = useState<Asset[]>([]);
   const [coverage, setCoverage] = useState<Coverage[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
+  const connectionsRef = useRef<Connection[]>([]);
   const [findingSummary, setFindingSummary] = useState<FindingSummary | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [vulnerabilitySummary, setVulnerabilitySummary] = useState<VulnerabilitySummary | null>(null);
@@ -278,6 +286,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
   const [includeActivityFixtures, setIncludeActivityFixtures] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [connectionMonitorError, setConnectionMonitorError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
@@ -351,6 +360,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
         api.detectionEvaluations(),
       ]);
       setSummary(summaryResult);
+      connectionsRef.current = connectionsResult.items;
       setConnections(connectionsResult.items);
       setAssets(assetsResult.items);
       setCoverage(coverageResult.items);
@@ -397,10 +407,16 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
       requestInFlight = true;
       try {
         const result = await api.connections();
-        if (!cancelled) setConnections(result.items);
+        if (!cancelled) {
+          const completedConnectionIds = completedRunningConnectionIds(connectionsRef.current, result.items);
+          connectionsRef.current = result.items;
+          setConnections(result.items);
+          setConnectionMonitorError(null);
+          if (completedConnectionIds.length > 0) await loadAll();
+        }
       } catch (cause) {
         if (!cancelled) {
-          setError(cause instanceof Error ? cause.message : "Unable to refresh connection validation");
+          setConnectionMonitorError(cause instanceof Error ? cause.message : "Unable to refresh connection status");
         }
       } finally {
         requestInFlight = false;
@@ -409,11 +425,25 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
 
     void refreshConnections();
     const timer = window.setInterval(() => void refreshConnections(), 2000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshConnections();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [hasRunningConnection]);
+  }, [hasRunningConnection, loadAll]);
+
+  const handleConnectionOperationAccepted = useCallback((connectionId: string, kind: ConnectionOperationKind) => {
+    const updated = markConnectionOperationRunning(connectionsRef.current, connectionId, kind);
+    connectionsRef.current = updated;
+    setConnections(updated);
+    setConnectionMonitorError(null);
+  }, []);
 
   useEffect(() => {
     if (!entraSetupReturn && !githubSetupReturn && !azureReposSetupReturn) return;
@@ -538,6 +568,10 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
     navigation.drawer?.kind === "activity" ? navigation.drawer.id : null;
   const selectedDetectionId =
     navigation.drawer?.kind === "detection" ? navigation.drawer.id : null;
+  const runningOperations = runningConnectionOperations(connections);
+  const visibleRunningOperations = page === "connections"
+    ? runningOperations.filter(({ connection }) => connection.id !== (navigation.query.connection ?? connections[0]?.id))
+    : runningOperations;
 
   return (
     <div className="app-shell">
@@ -547,6 +581,11 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
       <main className="main-shell">
         <Topbar page={page} onMenu={() => setSidebarOpen(true)} onRefresh={loadAll} accountControls={accountControls} />
         <div className="workspace">
+          {(visibleRunningOperations.length > 0 || connectionMonitorError) && <ConnectionBackgroundStatus
+            operations={visibleRunningOperations}
+            pollingError={connectionMonitorError}
+            onOpen={(connectionId) => commitNavigation("connections", { connection: connectionId }, "push")}
+          />}
           {page === "profile" ? (
             profilePage ?? <ProfileUnavailable />
           ) : error ? (
@@ -579,7 +618,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
               onNavigate={navigate}
             />
             ) : page === "connections" ? (
-            <ConnectionsPage connections={connections} selectedId={navigation.query.connection} showCreate={navigation.query.new === "1" || connections.length === 0} navigation={filterNavigation} onSelect={selectConnection} onShowCreate={showConnectionCreate} onChanged={loadAll} entraSetupReturn={entraSetupReturn} githubSetupReturn={githubSetupReturn} azureReposSetupReturn={azureReposSetupReturn} canWrite={canWrite} />
+            <ConnectionsPage connections={connections} selectedId={navigation.query.connection} showCreate={navigation.query.new === "1" || connections.length === 0} navigation={filterNavigation} onSelect={selectConnection} onShowCreate={showConnectionCreate} onChanged={loadAll} onOperationAccepted={handleConnectionOperationAccepted} entraSetupReturn={entraSetupReturn} githubSetupReturn={githubSetupReturn} azureReposSetupReturn={azureReposSetupReturn} canWrite={canWrite} />
           ) : page === "inventory" ? (
             <Inventory
               assets={assets}
@@ -2441,6 +2480,7 @@ function ConnectionsPage({
   onSelect,
   onShowCreate,
   onChanged,
+  onOperationAccepted,
   entraSetupReturn,
   githubSetupReturn,
   azureReposSetupReturn,
@@ -2453,6 +2493,7 @@ function ConnectionsPage({
   onSelect: (id: string, mode?: "push" | "replace") => void;
   onShowCreate: (visible: boolean) => void;
   onChanged: () => Promise<void>;
+  onOperationAccepted: (connectionId: string, kind: ConnectionOperationKind) => void;
   entraSetupReturn: EntraSetupReturn | null;
   githubSetupReturn: GitHubSetupReturn | null;
   azureReposSetupReturn: AzureReposSetupReturn | null;
@@ -2563,6 +2604,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.validateConnection(connection.id);
+      onOperationAccepted(connection.id, "validation");
       setActionNotice(accepted.status === "already_running" ? `${connection.display_name} validation is already running.` : `${connection.display_name} validation started in the background.`);
       await waitForValidation(connection, 150);
       setActionNotice(`${connection.display_name} validation completed. Healthy results continue to first evidence collection automatically.`);
@@ -2616,6 +2658,7 @@ function ConnectionsPage({
     setActionError(null);
     try {
       const launch = await api.launchCloudFormation(connection.id);
+      onOperationAccepted(connection.id, "validation");
       launchWindow.location.replace(launch.launch_url);
       navigated = true;
       await waitForValidation(connection, 525);
@@ -2670,6 +2713,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.completeAzureSetup(connection.id, completionCode);
+      onOperationAccepted(connection.id, "validation");
       setActionNotice(accepted.status === "already_running" ? "Azure setup is recorded and validation is already running." : "Azure setup is recorded. Validation started in the background.");
       await waitForValidation(connection, 525);
       setAzureCompletionCode((current) => ({ ...current, [connection.id]: "" }));
@@ -2700,6 +2744,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectEntraEvidence(connection.id);
+      onOperationAccepted(connection.id, "evidence");
       setActionNotice(accepted.status === "already_running" ? "Microsoft Entra evidence collection is already running." : "Microsoft Entra evidence collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "evidence");
       setActionNotice("Microsoft Entra evidence collection completed.");
@@ -2716,6 +2761,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.completeGoogleWorkspaceSetup(connection.id);
+      onOperationAccepted(connection.id, "validation");
       setActionNotice(accepted.status === "already_running" ? "Google Workspace authorization is recorded and validation is already running." : "Google Workspace authorization is recorded. Validation started in the background.");
       await waitForValidation(connection, 150);
       setActionNotice("Google Workspace validation completed. Healthy results continue to first evidence collection automatically.");
@@ -2733,6 +2779,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectGoogleWorkspaceEvidence(connection.id);
+      onOperationAccepted(connection.id, "evidence");
       setActionNotice(accepted.status === "already_running" ? "Google Workspace evidence collection is already running." : "Google Workspace evidence collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "evidence");
       setActionNotice("Google Workspace evidence collection completed.");
@@ -2768,6 +2815,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.completeGcpSetup(connection.id, completionCode);
+      onOperationAccepted(connection.id, "validation");
       setActionNotice(accepted.status === "already_running" ? "Google Cloud setup is recorded and validation is already running." : "Google Cloud setup is recorded. Validation started in the background.");
       await waitForValidation(connection, 525);
       setGcpCompletionCode((current) => ({ ...current, [connection.id]: "" }));
@@ -2786,6 +2834,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectGcpDeployments(connection.id);
+      onOperationAccepted(connection.id, "deployment");
       setActionNotice(accepted.status === "already_running" ? "Google Cloud evidence collection is already running." : "Google Cloud evidence collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "deployment");
       setActionNotice("Google Cloud evidence collection completed.");
@@ -2802,6 +2851,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectAzureDeployments(connection.id);
+      onOperationAccepted(connection.id, "deployment");
       setActionNotice(accepted.status === "already_running" ? "Azure evidence collection is already running." : "Azure evidence collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "deployment");
       setActionNotice("Azure evidence collection completed.");
@@ -2818,6 +2868,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectAwsDeployments(connection.id);
+      onOperationAccepted(connection.id, "deployment");
       setActionNotice(accepted.status === "already_running" ? "AWS evidence collection is already running." : "AWS evidence collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "deployment");
       setActionNotice("AWS evidence collection completed.");
@@ -2846,6 +2897,7 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectGitHubSource(connection.id);
+      onOperationAccepted(connection.id, "source");
       setActionNotice(accepted.status === "already_running" ? "GitHub source collection is already running." : "GitHub source collection accepted. It continues safely in the background.");
       await waitForCollection(connection, "source");
       setActionNotice("GitHub source collection completed.");
@@ -2873,6 +2925,7 @@ function ConnectionsPage({
     setActionError(null);
     try {
       await api.completeAzureReposSetup(connection.id, repositoryIds);
+      onOperationAccepted(connection.id, "validation");
       await waitForValidation(connection, 150);
       setActionNotice("Azure Repos selection verified and validation completed.");
     } catch (cause) {
@@ -2887,6 +2940,7 @@ function ConnectionsPage({
     setActionError(null);
     try {
       await api.collectAzureReposSource(connection.id);
+      onOperationAccepted(connection.id, "source");
       await waitForCollection(connection, "source");
       setActionNotice("Azure Repos source collection completed.");
     } catch (cause) {
@@ -2991,6 +3045,39 @@ function ConnectionsPage({
       {selected && <div className={canWrite ? "" : "read-only-detail"}><ConnectionDetail connection={selected} busy={busy} navigation={navigation} azureLaunch={azureLaunches[selected.id]} azureCompletionCode={azureCompletionCode[selected.id] ?? ""} onAzureCompletionCode={(value) => setAzureCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareAzure={() => void prepareAzureSetup(selected)} onCompleteAzure={() => void completeAzureSetup(selected)} onCollectAzure={() => void collectAzureDeployments(selected)} onPrepareAzureRepos={() => void prepareAzureReposSetup(selected)} onCompleteAzureRepos={(repositoryIds) => void completeAzureReposSetup(selected, repositoryIds)} onCollectAzureRepos={() => void collectAzureReposSource(selected)} onPrepareEntra={() => void prepareEntraSetup(selected)} onCollectEntra={() => void collectEntraEvidence(selected)} onCompleteGoogleWorkspace={() => void completeGoogleWorkspaceSetup(selected)} onCollectGoogleWorkspace={() => void collectGoogleWorkspaceEvidence(selected)} gcpLaunch={gcpLaunches[selected.id]} gcpCompletionCode={gcpCompletionCode[selected.id] ?? ""} onGcpCompletionCode={(value) => setGcpCompletionCode((current) => ({ ...current, [selected.id]: value }))} onPrepareGcp={() => void prepareGcpSetup(selected)} onCompleteGcp={() => void completeGcpSetup(selected)} onCollectGcp={() => void collectGcpDeployments(selected)} onCollectAws={() => void collectAwsDeployments(selected)} onPrepareGitHub={() => void prepareGitHubSetup(selected)} onCollectGitHub={() => void collectGitHubSource(selected)} onLaunch={() => void launchConnection(selected)} onDownload={() => void downloadCloudFormation(selected)} onValidate={() => void validateConnection(selected)} onDisable={() => void disableConnection(selected)} onDelete={() => void deleteConnection(selected)} /></div>}
     </div>
   </div>;
+}
+
+function ConnectionBackgroundStatus({
+  operations,
+  pollingError,
+  onOpen,
+}: {
+  operations: RunningConnectionOperation[];
+  pollingError: string | null;
+  onOpen: (connectionId: string) => void;
+}) {
+  const operationCount = operations.length;
+  return <aside className={`connection-background-status${pollingError ? " delayed" : ""}`} role="status" aria-live="polite">
+    <div className="connection-background-heading">
+      <span><RefreshCw className="spin" aria-hidden="true" /></span>
+      <div>
+        <strong>{pollingError ? "Connection status refresh delayed" : `${operationCount} connection ${operationCount === 1 ? "operation" : "operations"} running`}</strong>
+        <small>{pollingError ? "Denali will retry automatically. The backend operation continues safely." : "Background work continues while you navigate. Status refreshes every 2 seconds."}</small>
+      </div>
+    </div>
+    {pollingError && <p>Last refresh failed: {pollingError}</p>}
+    {operations.length > 0 && <div className="connection-background-operations">
+      {operations.map(({ connection, progress }) => <button type="button" key={connection.id} onClick={() => onOpen(connection.id)}>
+        <ConnectionProviderIcon provider={connection.provider} />
+        <span>
+          <strong>{connection.display_name}</strong>
+          <small>{progress.title}</small>
+        </span>
+        <span className="connection-background-phase"><RefreshCw className="spin" aria-hidden="true" />{progress.phase === "collecting" ? "Collecting" : progress.phase === "validating" ? "Validating" : "Preparing"}</span>
+        <ChevronRight aria-hidden="true" />
+      </button>)}
+    </div>}
+  </aside>;
 }
 
 function ConnectionHealth({ connection, state }: { connection?: Connection; state?: Connection["health_state"] }) {
