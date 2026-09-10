@@ -1,3 +1,5 @@
+import { inventoryCategoryForKind } from "./inventory.ts";
+
 export type Page =
   | "dashboard"
   | "connections"
@@ -126,7 +128,12 @@ export function navigationUrl(
 }
 
 export function inventoryQuery(kind: unknown): Record<string, string> {
-  return typeof kind === "string" && kind !== "all" ? { kind } : {};
+  if (typeof kind !== "string" || kind === "all") return {};
+  const category = inventoryCategoryForKind(kind);
+  return {
+    kind,
+    ...(category && category !== "ai" ? { category } : {}),
+  };
 }
 
 export function queryWith(

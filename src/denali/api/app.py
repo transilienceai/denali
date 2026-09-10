@@ -100,6 +100,7 @@ from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
 from denali.connectors.github_repository import GitHubRepositoryCollector
 from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
 from denali.domain import ActivityBatch, FindingBatch, InventoryBatch
+from denali.domain.inventory import ASSET_CATEGORY_KINDS, InventoryCategory
 from denali.store.db import migrate
 from denali.store.repository import PostgresInventoryRepository
 
@@ -327,10 +328,24 @@ class InventoryReader(Protocol):
         tenant_id: str,
         *,
         kind: str | None = None,
+        kinds: tuple[str, ...] | None = None,
         lifecycle: str = "active",
+        governance: str | None = None,
+        search: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]: ...
+
+    def count_assets(
+        self,
+        tenant_id: str,
+        *,
+        kind: str | None = None,
+        kinds: tuple[str, ...] | None = None,
+        lifecycle: str = "active",
+        governance: str | None = None,
+        search: str | None = None,
+    ) -> int: ...
 
     def get_asset(self, tenant_id: str, asset_id: str) -> dict[str, Any] | None: ...
 
@@ -2963,19 +2978,47 @@ def create_app(
     def list_assets(
         request: Request,
         kind: str | None = None,
+        category: Literal["all", "ai", "supporting", "components"] = "all",
         lifecycle: str = Query(default="active", pattern="^(active|withdrawn|unknown|all)$"),
+        governance: str = Query(default="all", pattern="^(approved|unreviewed|unwanted|all)$"),
+        q: str | None = Query(default=None, max_length=200),
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
         repo, current_tenant = _context(request)
+        kinds = None
+        if category != "all":
+            kinds = tuple(
+                item.value for item in ASSET_CATEGORY_KINDS[InventoryCategory(category)]
+            )
+        lifecycle_filter = "" if lifecycle == "all" else lifecycle
+        governance_filter = None if governance == "all" else governance
+        search = q.strip() if q and q.strip() else None
         rows = repo.list_assets(
             current_tenant,
             kind=kind,
-            lifecycle="" if lifecycle == "all" else lifecycle,
+            kinds=kinds,
+            lifecycle=lifecycle_filter,
+            governance=governance_filter,
+            search=search,
             limit=limit,
             offset=offset,
         )
-        return {"items": rows, "limit": limit, "offset": offset}
+        total = repo.count_assets(
+            current_tenant,
+            kind=kind,
+            kinds=kinds,
+            lifecycle=lifecycle_filter,
+            governance=governance_filter,
+            search=search,
+        )
+        return {
+            "items": rows,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "category": category,
+        }
 
     @app.get("/v1/inventory/assets/{asset_id}")
     def asset_detail(request: Request, asset_id: str) -> dict[str, Any]:

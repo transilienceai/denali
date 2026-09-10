@@ -12,10 +12,12 @@ from denali.domain import (
     CoverageState,
     Evidence,
     InventoryBatch,
+    InventoryCategory,
     RelationshipAssertion,
     RelationshipCategory,
     RelationshipKind,
 )
+from denali.domain.inventory import ASSET_CATEGORY_KINDS
 
 
 def evidence() -> Evidence:
@@ -65,6 +67,16 @@ def test_only_complete_coverage_authorizes_withdrawal(state: CoverageState) -> N
 
 def test_complete_coverage_authorizes_withdrawal() -> None:
     assert batch(CoverageState.COMPLETE).may_withdraw("agents") is True
+
+
+def test_every_asset_kind_has_one_inventory_category() -> None:
+    categorized = [
+        kind
+        for category in InventoryCategory
+        for kind in ASSET_CATEGORY_KINDS[category]
+    ]
+    assert set(categorized) == set(AssetKind)
+    assert len(categorized) == len(set(categorized))
 
 
 def test_empty_success_is_explicit_and_can_reconcile() -> None:

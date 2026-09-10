@@ -2133,6 +2133,46 @@ def test_complete_empty_snapshot_withdraws_but_partial_does_not(repository) -> N
     assert repo.summary(tenant)["total"] == 0
 
 
+def test_asset_listing_filters_and_counts_inventory_categories(repository) -> None:
+    tenant, repo = repository
+    now = datetime.now(UTC)
+    assets = (
+        assertion("anna-agent", now),
+        AssetAssertion(
+            asset=AssetRef(AssetKind.CODE_REPOSITORY, "repo:eiger"),
+            coverage_plane="agents",
+            display_name="Eiger repository",
+            assertion_type=AssertionType.DECLARED,
+            confidence=1.0,
+            evidence=Evidence("fixture", "fixture://repo/eiger", now),
+        ),
+        AssetAssertion(
+            asset=AssetRef(AssetKind.SOFTWARE_COMPONENT, "component:boto3"),
+            coverage_plane="agents",
+            display_name="boto3 1.34.0",
+            assertion_type=AssertionType.OBSERVED,
+            confidence=1.0,
+            evidence=Evidence("fixture", "fixture://component/boto3", now),
+        ),
+    )
+    repo.ingest(
+        tenant,
+        inventory_batch(
+            run_id="categorized-assets",
+            state=CoverageState.COMPLETE,
+            assets=assets,
+            at=now,
+        ),
+    )
+
+    ai_rows = repo.list_assets(tenant, kinds=("ai_agent",))
+    assert [row["natural_key"] for row in ai_rows] == ["anna-agent"]
+    assert repo.count_assets(tenant, kinds=("ai_agent",)) == 1
+    assert repo.count_assets(tenant, kinds=("software_component",), search="BOTO3") == 1
+    assert repo.count_assets(tenant, kinds=("software_component",), search="missing") == 0
+    assert repo.count_assets(tenant, governance="unreviewed") == 3
+
+
 def test_one_source_cannot_withdraw_another_sources_asset(repository) -> None:
     tenant, repo = repository
     now = datetime.now(UTC)

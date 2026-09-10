@@ -20,18 +20,50 @@ IMAGE_DIGEST = f"sha256:{'a' * 64}"
 class RepositoryStub:
     def __init__(self):
         self.governance = "unreviewed"
+        self.asset_filters: dict[str, Any] = {}
 
     def list_assets(
         self,
         tenant_id: str,
         *,
         kind: str | None = None,
+        kinds: tuple[str, ...] | None = None,
         lifecycle: str = "active",
+        governance: str | None = None,
+        search: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         assert tenant_id == DEFAULT_LOCAL_TENANT
-        return [{"id": ASSET_ID, "kind": kind or "ai_agent", "lifecycle_state": lifecycle}]
+        self.asset_filters = {
+            "kind": kind,
+            "kinds": kinds,
+            "lifecycle": lifecycle,
+            "governance": governance,
+            "search": search,
+            "limit": limit,
+            "offset": offset,
+        }
+        return [
+            {
+                "id": ASSET_ID,
+                "kind": kind or (kinds or ("ai_agent",))[0],
+                "lifecycle_state": lifecycle,
+            }
+        ]
+
+    def count_assets(
+        self,
+        tenant_id: str,
+        *,
+        kind: str | None = None,
+        kinds: tuple[str, ...] | None = None,
+        lifecycle: str = "active",
+        governance: str | None = None,
+        search: str | None = None,
+    ) -> int:
+        assert tenant_id == DEFAULT_LOCAL_TENANT
+        return 1
 
     def get_asset(self, tenant_id: str, asset_id: str) -> dict[str, Any] | None:
         if asset_id != ASSET_ID:
@@ -271,6 +303,50 @@ def test_inventory_surface() -> None:
         assert rows[0]["kind"] == "ai_agent"
         assert test_client.get(f"/v1/inventory/assets/{ASSET_ID}").status_code == 200
         assert test_client.get("/v1/sources/coverage").json()["items"][0]["state"] == "complete"
+
+
+def test_inventory_categories_and_server_side_filters() -> None:
+    repository = RepositoryStub()
+    with TestClient(create_app(repository=repository, migrate_on_start=False)) as test_client:
+        response = test_client.get(
+            "/v1/inventory/assets",
+            params={
+                "category": "components",
+                "governance": "unreviewed",
+                "q": "  boto3  ",
+                "limit": 50,
+                "offset": 100,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "items": [
+                {
+                    "id": ASSET_ID,
+                    "kind": "software_component",
+                    "lifecycle_state": "active",
+                }
+            ],
+            "total": 1,
+            "limit": 50,
+            "offset": 100,
+            "category": "components",
+        }
+        assert repository.asset_filters == {
+            "kind": None,
+            "kinds": ("software_component",),
+            "lifecycle": "active",
+            "governance": "unreviewed",
+            "search": "boto3",
+            "limit": 50,
+            "offset": 100,
+        }
+
+
+def test_inventory_rejects_invalid_category_and_governance() -> None:
+    with client() as test_client:
+        assert test_client.get("/v1/inventory/assets?category=packages").status_code == 422
+        assert test_client.get("/v1/inventory/assets?governance=maybe").status_code == 422
 
 
 def test_missing_asset_is_404() -> None:

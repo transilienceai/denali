@@ -16,6 +16,16 @@ export type Asset = {
   connection_id: string | null;
 };
 
+export type InventoryCategory = "all" | "ai" | "supporting" | "components";
+
+export type AssetPage = {
+  items: Asset[];
+  total: number;
+  limit: number;
+  offset: number;
+  category: InventoryCategory;
+};
+
 export type Evidence = {
   source_type: string;
   locator: string;

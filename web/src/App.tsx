@@ -6,6 +6,7 @@ import {
   BrainCircuit,
   Bug,
   Check,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   CircleCheck,
@@ -57,6 +58,13 @@ import {
 import { waitForAcceptedOperation } from "./connectionPolling";
 import { getConnectionProgress, type ConnectionProgressStepState } from "./connectionProgress";
 import {
+  inventoryCategory,
+  inventoryCategoryCount,
+  inventoryCategoryForKind,
+  inventoryKinds,
+  type InventoryCategory,
+} from "./inventory";
+import {
   AI_APPLICATION_DISCOVERY_LABEL,
   closeDrawerTransition,
   drawerTabTransition,
@@ -74,6 +82,7 @@ import { applicableDetectionEvaluations } from "./presentation";
 import type {
   Asset,
   AssetDetail,
+  AssetPage,
   AwsConnectionCreate,
   AzureConnectionCreate,
   AzureReposConnectionCreate,
@@ -126,12 +135,17 @@ type FilterNavigation = {
     mode?: "push" | "replace",
   ) => void;
   clear: (keys: string[]) => void;
+  update: (
+    values: Readonly<Record<string, string | null | undefined>>,
+    mode?: "push" | "replace",
+  ) => void;
 };
 
 const KIND_META: Record<string, { label: string; plural: string; icon: LucideIcon; color: string }> = {
   ai_agent: { label: "AI agent", plural: "AI agents", icon: Bot, color: "coral" },
   ai_application: { label: "AI application", plural: "AI applications", icon: AppWindow, color: "blue" },
   ai_model: { label: "AI model", plural: "AI models", icon: BrainCircuit, color: "violet" },
+  model_artifact: { label: "Model artifact", plural: "Model artifacts", icon: PackageCheck, color: "violet" },
   mcp_server: { label: "MCP server", plural: "MCP servers", icon: ServerCog, color: "teal" },
   ai_tool: { label: "AI tool", plural: "AI tools", icon: Zap, color: "amber" },
   ai_guardrail: { label: "Guardrail", plural: "Guardrails", icon: ShieldCheck, color: "green" },
@@ -140,7 +154,9 @@ const KIND_META: Record<string, { label: string; plural: string; icon: LucideIco
   ai_datastore: { label: "AI datastore", plural: "AI datastores", icon: Database, color: "green" },
   ai_workload: { label: "AI workload", plural: "AI workloads", icon: Activity, color: "coral" },
   code_repository: { label: "Code repository", plural: "Code repositories", icon: Code2, color: "slate" },
+  cloud_resource: { label: "Cloud resource", plural: "Cloud resources", icon: CloudCog, color: "blue" },
   identity: { label: "Identity", plural: "Identities", icon: Fingerprint, color: "violet" },
+  application_endpoint: { label: "Application endpoint", plural: "Application endpoints", icon: Link2, color: "teal" },
   software_component: { label: "Software component", plural: "Software components", icon: Package, color: "amber" },
 };
 
@@ -288,6 +304,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
   const [error, setError] = useState<string | null>(null);
   const [connectionMonitorError, setConnectionMonitorError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
     const initial = navigationFromUrl(window.location.href);
@@ -342,7 +359,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
       ] = await Promise.all([
         api.summary(),
         api.connections(),
-        api.assets(),
+        api.assets({ category: "ai", limit: 500 }),
         api.coverage(),
         api.findingSummary(),
         api.findings(),
@@ -379,6 +396,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
       setDetections(detectionsResult.items);
       setDetectionEvaluations(detectionEvaluationsResult.items);
       setIncludeActivityFixtures(false);
+      setRefreshVersion((version) => version + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to reach the Denali API");
     } finally {
@@ -555,6 +573,9 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
     clear(keys) {
       updateQuery(Object.fromEntries(keys.map((key) => [key, null])), "push");
     },
+    update(values, mode = "push") {
+      updateQuery(values, mode);
+    },
   };
   const selectedAssetId =
     navigation.drawer?.kind === "asset" ? navigation.drawer.id : null;
@@ -621,9 +642,10 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
             <ConnectionsPage connections={connections} selectedId={navigation.query.connection} showCreate={navigation.query.new === "1" || connections.length === 0} navigation={filterNavigation} onSelect={selectConnection} onShowCreate={showConnectionCreate} onChanged={loadAll} onOperationAccepted={handleConnectionOperationAccepted} entraSetupReturn={entraSetupReturn} githubSetupReturn={githubSetupReturn} azureReposSetupReturn={azureReposSetupReturn} canWrite={canWrite} />
           ) : page === "inventory" ? (
             <Inventory
-              assets={assets}
+              summary={summary}
               navigation={filterNavigation}
               onOpenAsset={(id) => openDrawer("asset", id)}
+              refreshVersion={refreshVersion}
             />
           ) : page === "shadowAi" ? (
             <ShadowAiPage
@@ -907,7 +929,11 @@ function Dashboard({
   const complete = coverage.filter((item) => item.state === "complete").length;
   const allComplete = coverage.length > 0 && complete === coverage.length;
   const incompleteCoverage = coverage.length - complete;
-  const kinds = Object.entries(summary.by_kind).sort(([, left], [, right]) => right - left);
+  const aiResourceTotal = inventoryCategoryCount(summary.by_kind, "ai");
+  const aiKinds = new Set(inventoryKinds(summary.by_kind, "ai"));
+  const kinds = Object.entries(summary.by_kind)
+    .filter(([kind]) => aiKinds.has(kind))
+    .sort(([, left], [, right]) => right - left);
   const severityRank: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, informational: 1, unknown: 0 };
   const priorityIssue = [...issues]
     .filter((issue) => issue.state === "open")
@@ -1035,7 +1061,7 @@ function Dashboard({
       </section>
 
       <section className="metric-grid">
-        <MetricCard icon={Boxes} color="coral" label="Known resources" value={summary.total} detail={`${kinds.length} normalized resource types`} onClick={() => onViewInventory()} />
+        <MetricCard icon={Boxes} color="coral" label="AI resources" value={aiResourceTotal} detail={`${kinds.length} normalized AI resource types`} onClick={() => onViewInventory()} />
         <MetricCard icon={CircleHelp} color="amber" label="AI workloads to review" value={unreviewedWorkloads} detail="Governance state not yet decided" onClick={() => onViewInventory("ai_workload")} />
         <MetricCard icon={ShieldCheck} color="green" label="Proven deployments" value={provenDeployments} detail="Exact source + cloud identity" onClick={() => onNavigate("codeToCloud")} />
         <MetricCard icon={Activity} color="blue" label="Runtime observations" value={activityAssessed ? activitySummary.total : "N/A"} detail={activityAssessed ? `${activitySummary.last_24h} observed in the last 24 hours` : "No non-fixture activity coverage"} onClick={() => onNavigate("runtime")} />
@@ -1052,7 +1078,7 @@ function Dashboard({
                 <button key={kind} className="composition-row" onClick={() => onViewInventory(kind)}>
                   <span className={`asset-icon ${itemMeta.color}`}><Icon size={18} /></span>
                   <span className="composition-name"><strong>{itemMeta.plural}</strong><small>{count === 1 ? "1 discovered resource" : `${count} discovered resources`}</small></span>
-                  <span className="composition-bar"><i style={{ width: `${Math.max(10, (count / summary.total) * 100)}%` }} /></span>
+                  <span className="composition-bar"><i style={{ width: `${Math.max(10, (count / Math.max(aiResourceTotal, 1)) * 100)}%` }} /></span>
                   <b>{count}</b><ChevronRight size={16} />
                 </button>
               );
@@ -1173,35 +1199,184 @@ function AssetMiniRow({ asset, onClick }: { asset: Asset; onClick: () => void })
   return <button className="asset-mini-row" onClick={onClick}><span className={`asset-icon ${itemMeta.color}`}><Icon size={17} /></span><span><strong>{asset.display_name ?? shortKey(asset.natural_key)}</strong><small>{itemMeta.label} · {asset.assertion_type?.replaceAll("_", " ")}</small></span><ChevronRight size={16} /></button>;
 }
 
-function Inventory({ assets, navigation, onOpenAsset }: { assets: Asset[]; navigation: FilterNavigation; onOpenAsset: (id: string) => void }) {
+const INVENTORY_PAGE_SIZE = 50;
+
+const INVENTORY_CATEGORY_COPY: Record<InventoryCategory, {
+  label: string;
+  countLabel: string;
+  eyebrow: string;
+  title: string;
+  description: string;
+  icon: LucideIcon;
+}> = {
+  ai: {
+    label: "AI resources",
+    countLabel: "AI resources",
+    eyebrow: "CANONICAL AI INVENTORY",
+    title: "Every AI resource, one trustworthy record.",
+    description: "Applications, agents, models, tools, datastores, frameworks, workloads, and endpoints—normalized without dependency noise.",
+    icon: BrainCircuit,
+  },
+  supporting: {
+    label: "Supporting resources",
+    countLabel: "supporting resources",
+    eyebrow: "SUPPORTING CONTEXT",
+    title: "The infrastructure around your AI estate.",
+    description: "Repositories, cloud resources, and identities retained as evidence and deployment context.",
+    icon: CloudCog,
+  },
+  components: {
+    label: "Software composition",
+    countLabel: "software components",
+    eyebrow: "SOFTWARE COMPOSITION",
+    title: "Dependencies, connected to the workloads that contain them.",
+    description: "SBOM-derived packages remain available for vulnerability analysis without overwhelming AI inventory.",
+    icon: Package,
+  },
+};
+
+function Inventory({
+  summary,
+  navigation,
+  onOpenAsset,
+  refreshVersion,
+}: {
+  summary: Summary;
+  navigation: FilterNavigation;
+  onOpenAsset: (id: string) => void;
+  refreshVersion: number;
+}) {
   const search = navigation.values.q ?? "";
   const kind = navigation.values.kind ?? "all";
-  const governance = navigation.values.governance ?? "all";
+  const requestedCategory = inventoryCategory(navigation.values.category);
+  const category = inventoryCategoryForKind(kind) ?? requestedCategory;
+  const governanceValue = navigation.values.governance ?? "all";
+  const governance = governanceValue === "approved" || governanceValue === "unreviewed" || governanceValue === "unwanted"
+    ? governanceValue
+    : "all";
+  const requestedPage = Number.parseInt(navigation.values.page ?? "1", 10);
+  const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+  const offset = (page - 1) * INVENTORY_PAGE_SIZE;
+  const [result, setResult] = useState<AssetPage>({
+    items: [], total: 0, limit: INVENTORY_PAGE_SIZE, offset: 0, category,
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const filtered = useMemo(() => assets.filter((asset) => {
-    const haystack = `${asset.display_name ?? ""} ${asset.natural_key} ${asset.kind}`.toLowerCase();
-    return haystack.includes(search.toLowerCase()) && (kind === "all" || asset.kind === kind) && (governance === "all" || asset.governance_status === governance);
-  }), [assets, governance, kind, search]);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(null);
+    void api.assets({
+      category,
+      kind: kind === "all" ? undefined : kind,
+      governance: category === "components" ? "all" : governance,
+      q: search,
+      limit: INVENTORY_PAGE_SIZE,
+      offset,
+    }).then((response) => {
+      if (!active) return;
+      setResult(response);
+      setLoading(false);
+    }).catch((cause) => {
+      if (!active) return;
+      setError(cause instanceof Error ? cause.message : "Unable to load inventory");
+      setLoading(false);
+    });
+    return () => { active = false; };
+  }, [category, governance, kind, offset, refreshVersion, search]);
 
-  const kinds = [...new Set(assets.map((asset) => asset.kind))].sort();
+  useEffect(() => {
+    if (!loading && result.total > 0 && offset >= result.total) {
+      navigation.update({ page: null }, "replace");
+    }
+  }, [loading, navigation, offset, result.total]);
+
+  const kinds = inventoryKinds(summary.by_kind, category);
+  const copy = INVENTORY_CATEGORY_COPY[category];
+  const categoryTotal = inventoryCategoryCount(summary.by_kind, category);
+  const pageLoading = loading || result.category !== category;
+  const first = result.total === 0 ? 0 : result.offset + 1;
+  const last = Math.min(result.offset + result.items.length, result.total);
+  const categoryTabs = (Object.keys(INVENTORY_CATEGORY_COPY) as InventoryCategory[]);
+
   return (
     <div className="page-stack">
-      <section className="page-intro"><div><span className="eyebrow">CANONICAL INVENTORY</span><h2>Every AI resource, one trustworthy record.</h2><p>Search normalized inventory while preserving every source assertion and its evidence.</p></div><div className="result-count"><strong>{filtered.length}</strong><span>active resources</span></div></section>
+      <section className="page-intro"><div><span className="eyebrow">{copy.eyebrow}</span><h2>{copy.title}</h2><p>{copy.description}</p></div><div className="result-count"><strong>{pageLoading && !search && kind === "all" && governance === "all" ? categoryTotal : result.total}</strong><span>{copy.countLabel}</span></div></section>
+      <nav className="inventory-categories" aria-label="Inventory categories">
+        {categoryTabs.map((item) => {
+          const itemCopy = INVENTORY_CATEGORY_COPY[item];
+          const Icon = itemCopy.icon;
+          return <button
+            type="button"
+            key={item}
+            className={item === category ? "is-active" : ""}
+            onClick={() => navigation.update({
+              category: item === "ai" ? null : item,
+              kind: null,
+              governance: null,
+              page: null,
+            })}
+          >
+            <Icon size={17} />
+            <span>{itemCopy.label}</span>
+            <strong>{inventoryCategoryCount(summary.by_kind, item)}</strong>
+          </button>;
+        })}
+      </nav>
       <section className="panel inventory-panel">
         <div className="filterbar">
-          <label className="search-field"><Search size={18} /><input value={search} onChange={(event) => navigation.set("q", event.target.value, "", "replace")} placeholder="Search name, key, or type…" /></label>
-          <label className="select-field"><ListFilter size={16} /><select value={kind} onChange={(event) => navigation.set("kind", event.target.value, "all")}><option value="all">All resource types</option>{kinds.map((item) => <option key={item} value={item}>{meta(item).plural}</option>)}</select></label>
-          <label className="select-field"><Filter size={16} /><select value={governance} onChange={(event) => navigation.set("governance", event.target.value, "all")}><option value="all">All governance</option><option value="approved">Approved</option><option value="unreviewed">Unreviewed</option><option value="unwanted">Unwanted</option></select></label>
-          {(search || kind !== "all" || governance !== "all") && <button className="clear-button" onClick={() => navigation.clear(["q", "kind", "governance"])}>Clear filters</button>}
+          <label className="search-field"><Search size={18} /><input maxLength={200} value={search} onChange={(event) => navigation.update({ q: event.target.value || null, page: null }, "replace")} placeholder={category === "components" ? "Search package, version, or workload…" : "Search name, key, or type…"} /></label>
+          {category !== "components" && <label className="select-field"><ListFilter size={16} /><select value={kind} onChange={(event) => navigation.update({ kind: event.target.value === "all" ? null : event.target.value, page: null })}><option value="all">All resource types</option>{kinds.map((item) => <option key={item} value={item}>{meta(item).plural}</option>)}</select></label>}
+          {category !== "components" && <label className="select-field"><Filter size={16} /><select value={governance} onChange={(event) => navigation.update({ governance: event.target.value === "all" ? null : event.target.value, page: null })}><option value="all">All governance</option><option value="approved">Approved</option><option value="unreviewed">Unreviewed</option><option value="unwanted">Unwanted</option></select></label>}
+          {(search || kind !== "all" || (category !== "components" && governance !== "all")) && <button className="clear-button" onClick={() => navigation.update({ q: null, kind: null, governance: null, page: null })}>Clear filters</button>}
         </div>
-        <div className="inventory-table" role="table" aria-label="AI inventory">
-          <div className="inventory-table-head" role="row"><span>Resource</span><span>Type</span><span>Verification</span><span>Governance</span><span>Last seen</span><span /></div>
-          {filtered.map((asset) => <AssetTableRow key={asset.id} asset={asset} onClick={() => onOpenAsset(asset.id)} />)}
-          {filtered.length === 0 && <div className="empty-state"><Search /><strong>No inventory matches these filters</strong><span>Try another name or broaden the selected resource type.</span></div>}
+        <div className={category === "components" ? "component-table" : "inventory-table"} role="table" aria-label={copy.label}>
+          {category === "components"
+            ? <div className="component-table-head" role="row"><span>Component</span><span>Ecosystem</span><span>Observed workload</span><span>Verification</span><span>Last seen</span><span /></div>
+            : <div className="inventory-table-head" role="row"><span>Resource</span><span>Type</span><span>Verification</span><span>Governance</span><span>Last seen</span><span /></div>}
+          {!pageLoading && !error && result.items.map((asset) => category === "components"
+            ? <ComponentTableRow key={asset.id} asset={asset} onClick={() => onOpenAsset(asset.id)} />
+            : <AssetTableRow key={asset.id} asset={asset} onClick={() => onOpenAsset(asset.id)} />)}
+          {pageLoading && <div className="inventory-loading"><RefreshCw /><span>Loading {copy.label.toLowerCase()}…</span></div>}
+          {error && <div className="empty-state"><CircleAlert /><strong>Inventory could not be loaded</strong><span>{error}</span></div>}
+          {!pageLoading && !error && result.items.length === 0 && <div className="empty-state"><Search /><strong>No {copy.label.toLowerCase()} match these filters</strong><span>Try another name or clear the selected filters.</span></div>}
         </div>
+        {!pageLoading && !error && result.total > 0 && <div className="inventory-pagination">
+          <span>Showing {first}–{last} of {result.total}</span>
+          <div>
+            <button type="button" disabled={page === 1} onClick={() => navigation.update({ page: page > 2 ? String(page - 1) : null })}><ChevronLeft size={16} /> Previous</button>
+            <strong>Page {page}</strong>
+            <button type="button" disabled={last >= result.total} onClick={() => navigation.update({ page: String(page + 1) })}>Next <ChevronRight size={16} /></button>
+          </div>
+        </div>}
       </section>
     </div>
   );
+}
+
+function componentRecord(asset: Asset): Record<string, unknown> {
+  const component = asset.attributes?.component;
+  return component && typeof component === "object" && !Array.isArray(component)
+    ? component as Record<string, unknown>
+    : {};
+}
+
+function ComponentTableRow({ asset, onClick }: { asset: Asset; onClick: () => void }) {
+  const component = componentRecord(asset);
+  const ecosystem = typeof component.ecosystem === "string" ? component.ecosystem : "Unknown";
+  const purl = typeof component.purl === "string" ? component.purl : asset.natural_key;
+  const target = component.target && typeof component.target === "object" && !Array.isArray(component.target)
+    ? component.target as Record<string, unknown>
+    : {};
+  const workload = typeof target.natural_key === "string" ? target.natural_key : "Workload unavailable";
+  return <button className="component-table-row" role="row" onClick={onClick}>
+    <span className="resource-cell"><span className="asset-icon amber"><Package size={18} /></span><span><strong>{asset.display_name ?? shortKey(asset.natural_key)}</strong><small>{purl}</small></span></span>
+    <span>{titleCase(ecosystem)}</span>
+    <span className="component-workload" title={workload}>{workload}</span>
+    <span><span className="verification"><Check size={13} />{titleCase(asset.assertion_type ?? "unknown")}</span><small className="confidence">{Math.round((asset.confidence ?? 0) * 100)}% confidence</small></span>
+    <span>{formatTime(asset.last_seen_at)}</span><span><ChevronRight size={17} /></span>
+  </button>;
 }
 
 function AssetTableRow({ asset, onClick }: { asset: Asset; onClick: () => void }) {

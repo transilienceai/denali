@@ -38,6 +38,38 @@ class AssetKind(StrEnum):
     SOFTWARE_COMPONENT = "software_component"
 
 
+class InventoryCategory(StrEnum):
+    AI = "ai"
+    SUPPORTING = "supporting"
+    COMPONENTS = "components"
+
+
+ASSET_CATEGORY_KINDS: Mapping[InventoryCategory, tuple[AssetKind, ...]] = MappingProxyType(
+    {
+        InventoryCategory.AI: (
+            AssetKind.AI_APPLICATION,
+            AssetKind.AI_AGENT,
+            AssetKind.AI_MODEL,
+            AssetKind.MODEL_ARTIFACT,
+            AssetKind.MCP_SERVER,
+            AssetKind.AI_TOOL,
+            AssetKind.AI_GUARDRAIL,
+            AssetKind.AI_PIPELINE,
+            AssetKind.AI_DATASTORE,
+            AssetKind.AI_WORKLOAD,
+            AssetKind.AI_FRAMEWORK,
+            AssetKind.APPLICATION_ENDPOINT,
+        ),
+        InventoryCategory.SUPPORTING: (
+            AssetKind.CODE_REPOSITORY,
+            AssetKind.CLOUD_RESOURCE,
+            AssetKind.IDENTITY,
+        ),
+        InventoryCategory.COMPONENTS: (AssetKind.SOFTWARE_COMPONENT,),
+    }
+)
+
+
 class AssertionType(StrEnum):
     DECLARED = "declared"
     INFERRED = "inferred"
