@@ -14,6 +14,7 @@ import {
   Clock3,
   CloudCog,
   Code2,
+  Copy,
   Database,
   Download,
   ExternalLink,
@@ -3422,6 +3423,7 @@ function AzureConnectionDetail({ connection, busy, launch, completionCode, onCom
 }
 
 function GcpConnectionDetail({ connection, busy, launch, completionCode, onCompletionCode, onPrepare, onComplete, onCollect, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; launch?: GcpSetupLaunch; completionCode: string; onCompletionCode: (value: string) => void; onPrepare: () => void; onComplete: () => void; onCollect: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const validation = connection.last_validation;
   const projects = connection.configuration.projects ?? [];
   const setupComplete = projects.length > 0;
@@ -3432,11 +3434,56 @@ function GcpConnectionDetail({ connection, busy, launch, completionCode, onCompl
   const collection = connection.last_deployment_collection && "project_count" in connection.last_deployment_collection ? connection.last_deployment_collection : null;
   const credential = connection.credential_reference.type === "gcp_service_account" ? connection.credential_reference : null;
   const permissions = [...new Set(connection.coverage_plan.flatMap((item) => item.permissions))].sort();
+  useEffect(() => setCopyState("idle"), [connection.id, launch?.setup_command]);
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const timeout = window.setTimeout(() => setCopyState("idle"), 3000);
+    return () => window.clearTimeout(timeout);
+  }, [copyState]);
+  async function copySetupCommand() {
+    if (!launch?.setup_command) return;
+    try {
+      await navigator.clipboard.writeText(launch.setup_command);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+  }
   return <section className="panel connection-detail">
     <div className="connection-detail-head"><div><span>GOOGLE CLOUD</span><h3>{connection.display_name}</h3><code>{credential?.principal_email}</code></div><ConnectionHealth state={connection.health_state} /></div>
     <div className="setup-progress">
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>A unique keyless Denali service account, declared scopes, and customer-controlled project-selection boundary are recorded. No customer key or user token is requested.</small></div></div>
-      <div className={setupComplete ? "complete" : "current"}><span>{setupComplete ? <Check /> : "2"}</span><div><strong>2. Select projects and grant bounded read access</strong><small>Google Cloud Shell enumerates active projects visible to your signed-in identity. Cloud Asset Viewer and Logs Viewer are granted only to projects you select; every resource location inside them remains in scope.</small>{!launch && <button className="primary-action" disabled={preparing || !connection.setup_capabilities.gcp_cloud_shell} onClick={onPrepare}><ExternalLink />{preparing ? "Preparing Google Cloud setup…" : setupComplete ? "Prepare Google Cloud setup again" : "Prepare Google Cloud setup"}</button>}{launch && <div className="azure-setup-actions"><div className="connection-launch-actions"><a className="primary-action" href={launch.cloud_shell_url} target="_blank" rel="noreferrer"><ExternalLink />1. Open Cloud Shell</a><a className="secondary-action" href={launch.script_url} download><Download />Download script</a></div><small className="azure-consent-guidance">Cloud Shell uses your existing Google session only to enumerate projects and update IAM policies. Denali never receives that session or a customer service-account key.</small><label className="azure-command"><span>2. Run in Cloud Shell</span><textarea readOnly value={launch.setup_command} /><button type="button" onClick={() => void navigator.clipboard.writeText(launch.setup_command)}>Copy command</button><small>The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small></label><label className="azure-completion"><span>3. Paste the completion code printed by the script</span><textarea value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_GCP_SETUP_COMPLETE=…" /><button className="primary-action" type="button" disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing ? "Waiting for Google Cloud IAM propagation…" : "Complete setup and validate"}</button><small>New Google Cloud IAM bindings can take several minutes to propagate. Denali retries the declared checks before recording a partial result.</small></label></div>}{!connection.setup_capabilities.gcp_cloud_shell && <small className="launch-unavailable">Cloud Shell setup requires Denali’s Google Cloud service account and private onboarding-script publisher.</small>}{setupComplete && <div className="azure-subscriptions"><strong>{projects.length} selected project{projects.length === 1 ? "" : "s"}</strong>{projects.map((project) => <code key={project.id}>{project.name} · {project.id} · {project.number}</code>)}</div>}</div></div>
+      <div className={setupComplete ? "complete" : "current"}>
+        <span>{setupComplete ? <Check /> : "2"}</span>
+        <div>
+          <strong>2. Select projects and grant bounded read access</strong>
+          <small>Google Cloud Shell enumerates active projects visible to your signed-in identity. Cloud Asset Viewer and Logs Viewer are granted only to projects you select; every resource location inside them remains in scope.</small>
+          {!launch && <button className="primary-action" disabled={preparing || !connection.setup_capabilities.gcp_cloud_shell} onClick={onPrepare}><ExternalLink />{preparing ? "Preparing Google Cloud setup…" : setupComplete ? "Prepare Google Cloud setup again" : "Prepare Google Cloud setup"}</button>}
+          {launch && <div className="gcp-setup-actions">
+            <div className="connection-launch-actions"><a className="primary-action" href={launch.cloud_shell_url} target="_blank" rel="noreferrer"><ExternalLink />1. Open Cloud Shell</a><a className="secondary-action" href={launch.script_url} download><Download />Download script</a></div>
+            <small className="gcp-consent-guidance">Cloud Shell uses your existing Google session only to enumerate projects and update IAM policies. Denali never receives that session or a customer service-account key.</small>
+            <div className="gcp-setup-card">
+              <div className="gcp-setup-card-head"><span>Step 2</span><div><strong>Run the setup command in Cloud Shell</strong><small>Copy the complete command below, then paste and run it in the Cloud Shell tab.</small></div></div>
+              <div className="gcp-command-field">
+                <textarea aria-label="Google Cloud Shell setup command" readOnly spellCheck={false} value={launch.setup_command} onFocus={(event) => event.currentTarget.select()} />
+                <button className={`gcp-copy-button ${copyState}`} type="button" onClick={copySetupCommand}>{copyState === "copied" ? <Check /> : <Copy />}{copyState === "copied" ? "Copied" : "Copy command"}</button>
+              </div>
+              <div className={`gcp-copy-feedback ${copyState}`} role="status" aria-live="polite">
+                {copyState === "copied" && <><CircleCheck />Command copied to your clipboard.</>}
+                {copyState === "error" && <><CircleAlert />Copy failed. Select the command and copy it manually.</>}
+              </div>
+              <small className="gcp-setup-note">The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small>
+            </div>
+            <div className="gcp-setup-card">
+              <div className="gcp-setup-card-head"><span>Step 3</span><div><strong>Paste the completion code</strong><small>Cloud Shell prints this code after you select projects and approve their read-only access.</small></div></div>
+              <textarea className="gcp-completion-code" aria-label="Google Cloud setup completion code" value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_GCP_SETUP_COMPLETE=…" spellCheck={false} />
+              <div className="gcp-completion-actions"><small>New Google Cloud IAM bindings can take several minutes to propagate. Denali retries before recording a partial result.</small><button className={`primary-action ${completing ? "is-loading" : ""}`} type="button" disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing && <RefreshCw className="spin" />}{completing ? "Waiting for IAM propagation…" : "Complete setup and validate"}</button></div>
+            </div>
+          </div>}
+          {!connection.setup_capabilities.gcp_cloud_shell && <small className="launch-unavailable">Cloud Shell setup requires Denali’s Google Cloud service account and private onboarding-script publisher.</small>}
+          {setupComplete && <div className="azure-subscriptions"><strong>{projects.length} selected project{projects.length === 1 ? "" : "s"}</strong>{projects.map((project) => <code key={project.id}>{project.name} · {project.id} · {project.number}</code>)}</div>}
+        </div>
+      </div>
       <div className={validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Validate every selected project</strong><small>Denali binds each exact project ID and immutable project number first, then validates every declared project-wide plane independently.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating Google Cloud…" : validation ? "Validate again" : "Validate connection"}</button>}</div></div>
       <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect declared Google Cloud evidence</strong><small>Read selected Vertex AI, Agent Builder, Dialogflow, audit activity, and deployment planes through bounded Google Cloud APIs without storing environment values, prompts, or responses.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={collecting || validating} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting Google Cloud evidence…" : collection ? "Collect evidence again" : "Collect Google Cloud evidence"}</button>}{collection && <small className="validation-progress-note">{collection.project_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
     </div>
