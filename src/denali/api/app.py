@@ -80,7 +80,6 @@ from denali.connections import (
     GoogleWorkspaceConnectionValidator,
     GoogleWorkspaceOperator,
     aws_connection_coverage_plan,
-    aws_connection_role_name,
     azure_coverage_plan,
     azure_repos_coverage_plan,
     entra_coverage_plan,
@@ -530,6 +529,12 @@ class AwsConnectionCreate(BaseModel):
     regions: list[str] = Field(default_factory=list, max_length=40)
     declared_scopes: list[str] = Field(
         default_factory=lambda: list(AWS_SCOPES), min_length=1, max_length=len(AWS_SCOPES)
+    )
+    role_name: str = Field(
+        default="DenaliSecurityAuditRole",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9+=,.@_-]+$",
     )
 
 
@@ -1753,8 +1758,9 @@ def create_app(
             )
         connection_id = str(uuid4())
         external_id = f"denali-{current_tenant}-{connection_id}"
-        role_name = aws_connection_role_name(connection_id)
-        role_arn = f"arn:{connection.partition}:iam::{connection.account_id}:role/{role_name}"
+        role_arn = (
+            f"arn:{connection.partition}:iam::{connection.account_id}:role/{connection.role_name}"
+        )
         try:
             created = repo.create_connection(
                 current_tenant,
@@ -1780,7 +1786,7 @@ def create_app(
                     "deployment_region": connection.deployment_region,
                     "coverage_mode": connection.coverage_mode,
                     "regions": regions if connection.coverage_mode == AWS_COVERAGE_SELECTED else [],
-                    "role_name": role_name,
+                    "role_name": connection.role_name,
                     "stack_scopes": [],
                 },
             )
