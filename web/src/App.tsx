@@ -2697,6 +2697,7 @@ function ConnectionsPage({
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const creating = busy === "create";
   const selected = connections.find((connection) => connection.id === selectedId) ?? connections[0];
 
   useEffect(() => {
@@ -2714,8 +2715,10 @@ function ConnectionsPage({
 
   async function createConnection(event: React.FormEvent) {
     event.preventDefault();
+    if (busy !== null) return;
     setBusy("create");
     setActionError(null);
+    setActionNotice(null);
     try {
       const payload: AwsConnectionCreate | AzureConnectionCreate | AzureReposConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate = provider === "aws" ? {
           provider: "aws",
@@ -2760,6 +2763,8 @@ function ConnectionsPage({
       const created = await api.createConnection(payload);
       await onChanged();
       onSelect(created.id);
+      onShowCreate(false);
+      setActionNotice(`${created.display_name} onboarding plan created. Continue with the provider setup steps below.`);
       setDisplayName("");
       setAccountId("");
       setAzureTenantId("");
@@ -3186,7 +3191,8 @@ function ConnectionsPage({
     {actionNotice && <div className="connection-notice" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{actionNotice}</span></div>}
     {actionError && <div className="connection-error" role="alert"><CircleAlert aria-hidden="true" /><span>{actionError}</span></div>}
     {selected && <ConnectionOperationStatus connection={selected} busy={busy} />}
-    {canWrite && showCreate && <form className="panel connection-create" onSubmit={(event) => void createConnection(event)}>
+    {canWrite && showCreate && <form className={`panel connection-create${creating ? " submitting" : ""}`} aria-busy={creating} onSubmit={(event) => void createConnection(event)}>
+      <fieldset className="connection-create-lock" disabled={creating}>
       <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "azure_repos" ? "active" : ""} onClick={() => selectProvider("azure_repos")}>Azure Repos</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "google_workspace" ? "active" : ""} onClick={() => selectProvider("google_workspace")}>Google Workspace</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
       <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{CONNECTION_PROVIDER_LABELS[provider]}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "azure_repos" ? "Microsoft sign-in proves access to one Azure DevOps organization. Denali then uses its read-only service principal for exact repositories; no PAT or user token is stored." : provider === "entra" ? "A tenant administrator grants Denali application-only Microsoft Graph read permissions. Denali stores the tenant boundary, not access tokens or customer credentials." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : provider === "google_workspace" ? "A Workspace super administrator authorizes Denali’s service account for one disclosed read-only audit scope. Denali stores the domain boundary and delegated admin identity, never a customer token or JSON key." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "azure_repos" ? "AZURE REPOS" : provider === "entra" ? "ENTRA" : provider === "gcp" ? "GCP" : provider === "google_workspace" ? "WORKSPACE" : "GITHUB"}</span></div>
       <div className="connection-form-grid">
@@ -3210,8 +3216,10 @@ function ConnectionsPage({
         <label><span>Repository selection</span><input value="Choose in GitHub" disabled /><small>GitHub’s installation page lets you select repositories in one user or organization account.</small></label>
         <label><span>Token boundary</span><input value="One exact repository per short-lived token" disabled /><small>Denali records immutable repository IDs and does not silently include repositories added later.</small></label></>}
       </div>
-      <fieldset className="connection-scope-picker"><legend>{provider === "entra" ? "Required Entra evidence bundle" : provider === "google_workspace" ? "Required Workspace evidence bundle" : "Declared collection planes"}</legend>{connectionScopes(provider).map((scope) => <label key={scope.id}><input type="checkbox" checked={scopes.includes(scope.id)} disabled={provider === "entra" || provider === "google_workspace"} onChange={() => toggleScope(scope.id)} /><span><strong>{scope.label}</strong><small>{scope.detail}</small></span></label>)}</fieldset>
-      <div className="connection-form-actions"><button type="button" onClick={() => onShowCreate(false)}>Cancel</button><button className="primary-action" type="submit" disabled={busy === "create" || scopes.length === 0}>{busy === "create" ? "Creating…" : "Create onboarding plan"}</button></div>
+      </fieldset>
+      <fieldset className="connection-scope-picker" disabled={creating}><legend>{provider === "entra" ? "Required Entra evidence bundle" : provider === "google_workspace" ? "Required Workspace evidence bundle" : "Declared collection planes"}</legend>{connectionScopes(provider).map((scope) => <label key={scope.id}><input type="checkbox" checked={scopes.includes(scope.id)} disabled={provider === "entra" || provider === "google_workspace"} onChange={() => toggleScope(scope.id)} /><span><strong>{scope.label}</strong><small>{scope.detail}</small></span></label>)}</fieldset>
+      {creating && <div className="connection-submit-status" id="connection-submit-status" role="status" aria-live="polite"><RefreshCw className="spin" aria-hidden="true" /><span><strong>Creating the {CONNECTION_PROVIDER_LABELS[provider]} onboarding plan…</strong><small>Your entries are locked while Denali creates the tenant-scoped connection.</small></span></div>}
+      <div className="connection-form-actions"><button type="button" disabled={creating} onClick={() => onShowCreate(false)}>Cancel</button><button className="primary-action" type="submit" aria-describedby={creating ? "connection-submit-status" : undefined} disabled={creating || busy !== null || scopes.length === 0}>{creating && <RefreshCw className="spin" aria-hidden="true" />}{creating ? "Creating onboarding plan…" : "Create onboarding plan"}</button></div>
     </form>}
     <div className="connections-layout">
       <section className="panel connection-list-panel">
@@ -3307,7 +3315,7 @@ function ConnectionOperationStepIcon({ state }: { state: ConnectionProgressStepS
   return <CircleHelp aria-hidden="true" />;
 }
 
-function CopyableSetupValue({ value, ariaLabel, copyLabel, copiedMessage, placeholder }: { value: string; ariaLabel: string; copyLabel: string; copiedMessage: string; placeholder?: string }) {
+function CopyableSetupValue({ value, ariaLabel, copyLabel, copiedMessage, placeholder, disabled = false }: { value: string; ariaLabel: string; copyLabel: string; copiedMessage: string; placeholder?: string; disabled?: boolean }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   useEffect(() => setCopyState("idle"), [value]);
   useEffect(() => {
@@ -3325,8 +3333,8 @@ function CopyableSetupValue({ value, ariaLabel, copyLabel, copiedMessage, placeh
   }
   return <div className="connection-copy-control">
     <div className="connection-command-field">
-      <textarea aria-label={ariaLabel} readOnly spellCheck={false} value={value} placeholder={placeholder} onFocus={(event) => event.currentTarget.select()} />
-      <button className={`connection-copy-button ${copyState}`} type="button" disabled={!value} onClick={copyValue}>{copyState === "copied" ? <Check /> : <Copy />}{copyState === "copied" ? "Copied" : copyLabel}</button>
+      <textarea aria-label={ariaLabel} readOnly disabled={disabled} spellCheck={false} value={value} placeholder={placeholder} onFocus={(event) => event.currentTarget.select()} />
+      <button className={`connection-copy-button ${copyState}`} type="button" disabled={disabled || !value} onClick={copyValue}>{copyState === "copied" ? <Check /> : <Copy />}{copyState === "copied" ? "Copied" : copyLabel}</button>
     </div>
     <div className={`connection-copy-feedback ${copyState}`} role="status" aria-live="polite">
       {copyState === "copied" && <><CircleCheck />{copiedMessage}</>}
@@ -3424,8 +3432,8 @@ function GoogleWorkspaceConnectionDetail({ connection, busy, onComplete, onColle
             <div className="connection-launch-actions"><a className="primary-action" href="https://admin.google.com/ac/owl/domainwidedelegation" target="_blank" rel="noreferrer"><ExternalLink />Open Google Admin Console</a></div>
             <div className="connection-setup-card workspace-authorization-card">
               <div className="connection-setup-card-head"><span>Values</span><div><strong>Add these exact authorization values</strong><small>Copy each value into the matching Google Admin Console field.</small></div></div>
-              <div className="workspace-copy-item"><strong>OAuth client ID</strong><CopyableSetupValue value={credential?.oauth_client_id ?? ""} placeholder="Operator client ID unavailable" ariaLabel="Google Workspace OAuth client ID" copyLabel="Copy client ID" copiedMessage="Client ID copied to your clipboard." /></div>
-              <div className="workspace-copy-item"><strong>OAuth scope</strong><CopyableSetupValue value={auditScope} ariaLabel="Google Workspace OAuth scope" copyLabel="Copy scope" copiedMessage="OAuth scope copied to your clipboard." /></div>
+              <div className="workspace-copy-item"><strong>OAuth client ID</strong><CopyableSetupValue value={credential?.oauth_client_id ?? ""} placeholder="Operator client ID unavailable" ariaLabel="Google Workspace OAuth client ID" copyLabel="Copy client ID" copiedMessage="Client ID copied to your clipboard." disabled={validating} /></div>
+              <div className="workspace-copy-item"><strong>OAuth scope</strong><CopyableSetupValue value={auditScope} ariaLabel="Google Workspace OAuth scope" copyLabel="Copy scope" copiedMessage="OAuth scope copied to your clipboard." disabled={validating} /></div>
               <div className="connection-completion-actions"><small>Authorization can take several minutes to propagate. Denali marks this connection healthy only after both report planes respond.</small><button className={`primary-action ${validating ? "is-loading" : ""}`} type="button" aria-busy={validating} disabled={validating || !connection.setup_capabilities.google_workspace_admin_authorization} onClick={onComplete}>{validating && <RefreshCw className="spin" />}{validating ? "Verifying Workspace access…" : setupComplete ? "Verify authorization again" : "I authorized it — verify access"}</button></div>
             </div>
           </div>
@@ -3467,12 +3475,12 @@ function AzureConnectionDetail({ connection, busy, launch, completionCode, onCom
             <small className="connection-setup-guidance">Run the command as a tenant administrator who can create enterprise applications and assign Reader on the selected subscriptions. The script is idempotent if Denali already exists in the tenant.</small>
             <div className="connection-setup-card">
               <div className="connection-setup-card-head"><span>Step 2</span><div><strong>Run the setup command in Cloud Shell</strong><small>Copy the complete command below, then paste and run it in the Cloud Shell tab.</small></div></div>
-              <CopyableSetupValue value={launch.setup_command} ariaLabel="Azure Cloud Shell setup command" copyLabel="Copy command" copiedMessage="Command copied to your clipboard." />
+              <CopyableSetupValue value={launch.setup_command} ariaLabel="Azure Cloud Shell setup command" copyLabel="Copy command" copiedMessage="Command copied to your clipboard." disabled={completing} />
               <small className="connection-setup-note">The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small>
             </div>
             <div className="connection-setup-card">
               <div className="connection-setup-card-head"><span>Step 3</span><div><strong>Paste the completion code</strong><small>Cloud Shell prints this code after creating the tenant identity and assigning Reader.</small></div></div>
-              <textarea className="connection-completion-code" aria-label="Azure setup completion code" value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_SETUP_COMPLETE=…" spellCheck={false} />
+              <textarea className="connection-completion-code" aria-label="Azure setup completion code" disabled={completing} value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_SETUP_COMPLETE=…" spellCheck={false} />
               <div className="connection-completion-actions"><small>Denali verifies its tenant-local identity before accepting the selected subscriptions. New Reader assignments can take several minutes to propagate.</small><button className={`primary-action ${completing ? "is-loading" : ""}`} type="button" aria-busy={completing} disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing && <RefreshCw className="spin" />}{completing ? "Verifying Azure access…" : "Complete setup and validate"}</button></div>
             </div>
           </div>}
@@ -3515,12 +3523,12 @@ function GcpConnectionDetail({ connection, busy, launch, completionCode, onCompl
             <small className="connection-setup-guidance">Cloud Shell uses your existing Google session only to enumerate projects and update IAM policies. Denali never receives that session or a customer service-account key.</small>
             <div className="connection-setup-card">
               <div className="connection-setup-card-head"><span>Step 2</span><div><strong>Run the setup command in Cloud Shell</strong><small>Copy the complete command below, then paste and run it in the Cloud Shell tab.</small></div></div>
-              <CopyableSetupValue value={launch.setup_command} ariaLabel="Google Cloud Shell setup command" copyLabel="Copy command" copiedMessage="Command copied to your clipboard." />
+              <CopyableSetupValue value={launch.setup_command} ariaLabel="Google Cloud Shell setup command" copyLabel="Copy command" copiedMessage="Command copied to your clipboard." disabled={completing} />
               <small className="connection-setup-note">The command downloads the same reviewable script shown by Download script. Its URL expires at {formatTime(launch.expires_at)}.</small>
             </div>
             <div className="connection-setup-card">
               <div className="connection-setup-card-head"><span>Step 3</span><div><strong>Paste the completion code</strong><small>Cloud Shell prints this code after you select projects and approve their read-only access.</small></div></div>
-              <textarea className="connection-completion-code" aria-label="Google Cloud setup completion code" value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_GCP_SETUP_COMPLETE=…" spellCheck={false} />
+              <textarea className="connection-completion-code" aria-label="Google Cloud setup completion code" disabled={completing} value={completionCode} onChange={(event) => onCompletionCode(event.target.value)} placeholder="DENALI_GCP_SETUP_COMPLETE=…" spellCheck={false} />
               <div className="connection-completion-actions"><small>New Google Cloud IAM bindings can take several minutes to propagate. Denali retries before recording a partial result.</small><button className={`primary-action ${completing ? "is-loading" : ""}`} type="button" aria-busy={completing} disabled={completing || !completionCode.trim()} onClick={onComplete}>{completing && <RefreshCw className="spin" />}{completing ? "Waiting for IAM propagation…" : "Complete setup and validate"}</button></div>
             </div>
           </div>}
@@ -3545,13 +3553,14 @@ function AzureReposConnectionDetail({ connection, busy, onPrepare, onComplete, o
   useEffect(() => setSelectedIds(candidateKey ? candidateKey.split(",") : []), [connection.id, candidateKey]);
   const setupComplete = repositories.length > 0;
   const selectionPending = connection.configuration.onboarding?.status === "selection_pending" && candidates.length > 0;
+  const completing = busy === `complete:${connection.id}`;
   const validating = connection.validation_state === "running" || busy === `validate:${connection.id}`;
   return <section className="panel connection-detail">
     <div className="connection-detail-head"><div><span>AZURE REPOS</span><h3>{connection.display_name}</h3><code>dev.azure.com/{connection.configuration.organization}</code></div><ConnectionHealth state={connection.health_state} /></div>
     <div className="setup-progress">
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>The Microsoft Entra tenant, Azure DevOps organization, and read-only vso.code boundary are recorded.</small></div></div>
       <div className={selectionPending || setupComplete ? "complete" : "current"}><span>{selectionPending || setupComplete ? <Check /> : "2"}</span><div><strong>2. Prove Azure DevOps access</strong><small>Sign in with a user who can see this organization. Denali lists repository metadata, then immediately discards the delegated token.</small><button className="primary-action" aria-busy={busy === `launch:${connection.id}`} disabled={busy === `launch:${connection.id}` || !connection.setup_capabilities.azure_repos_oauth} onClick={onPrepare}>{busy === `launch:${connection.id}` ? <RefreshCw className="spin" /> : <ExternalLink />}{busy === `launch:${connection.id}` ? "Opening Microsoft…" : "Authorize with Microsoft"}</button></div></div>
-      <div className={setupComplete ? "complete" : selectionPending ? "current" : "pending"}><span>{setupComplete ? <Check /> : "3"}</span><div><strong>3. Select exact repositories</strong><small>Add Denali’s enterprise application as a Basic Azure DevOps user, grant read access only to the intended projects or repositories, then choose the exact retained boundary.</small>{selectionPending && <div className="azure-subscriptions"><strong>{candidates.length} authorized repositories</strong>{candidates.map((repository) => <label key={String(repository.id)}><input type="checkbox" checked={selectedIds.includes(String(repository.id))} onChange={() => setSelectedIds((current) => current.includes(String(repository.id)) ? current.filter((id) => id !== String(repository.id)) : [...current, String(repository.id)])} /><span>{repository.full_name}</span></label>)}<button className="primary-action" aria-busy={busy === `complete:${connection.id}`} disabled={selectedIds.length === 0 || busy === `complete:${connection.id}`} onClick={() => onComplete(selectedIds)}>{busy === `complete:${connection.id}` && <RefreshCw className="spin" />}{busy === `complete:${connection.id}` ? "Verifying app access…" : "Save and verify selection"}</button></div>}{setupComplete && <div className="azure-subscriptions"><strong>{repositories.length} exact repositor{repositories.length === 1 ? "y" : "ies"}</strong>{repositories.map((repository) => <code key={String(repository.id)}>{repository.full_name} · {repository.id}</code>)}</div>}</div></div>
+      <div className={setupComplete ? "complete" : selectionPending ? "current" : "pending"}><span>{setupComplete ? <Check /> : "3"}</span><div><strong>3. Select exact repositories</strong><small>Add Denali’s enterprise application as a Basic Azure DevOps user, grant read access only to the intended projects or repositories, then choose the exact retained boundary.</small>{selectionPending && <fieldset className="azure-subscriptions connection-selection-fieldset" disabled={completing}><legend className="sr-only">Select exact Azure Repos repositories</legend><strong>{candidates.length} authorized repositories</strong>{candidates.map((repository) => <label key={String(repository.id)}><input type="checkbox" checked={selectedIds.includes(String(repository.id))} onChange={() => setSelectedIds((current) => current.includes(String(repository.id)) ? current.filter((id) => id !== String(repository.id)) : [...current, String(repository.id)])} /><span>{repository.full_name}</span></label>)}<button className="primary-action" type="button" aria-busy={completing} disabled={selectedIds.length === 0 || completing} onClick={() => onComplete(selectedIds)}>{completing && <RefreshCw className="spin" />}{completing ? "Verifying app access…" : "Save and verify selection"}</button>{completing && <small className="connection-field-lock-note">Repository selection is locked while Denali verifies the app identity.</small>}</fieldset>}{setupComplete && <div className="azure-subscriptions"><strong>{repositories.length} exact repositor{repositories.length === 1 ? "y" : "ies"}</strong>{repositories.map((repository) => <code key={String(repository.id)}>{repository.full_name} · {repository.id}</code>)}</div>}</div></div>
       <div className={connection.last_validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "4"}</span><div><strong>4. Validate app-only read access</strong><small>Denali rebinds repository and project UUIDs, then validates metadata and the default revision independently.</small>{setupComplete && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating…" : "Validate again"}</button>}</div></div>
       <div className={connection.last_source_collection ? (connection.last_source_collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{connection.last_source_collection?.state === "complete" ? <Check /> : "5"}</span><div><strong>5. Collect source and correlate</strong><small>Each default branch is resolved to an immutable commit. Bounded files are analyzed transiently for inventory, posture, and exact code-to-cloud evidence.</small>{setupComplete && <button className="primary-action" disabled={connection.source_collection_state === "running" || validating} onClick={onCollect}><GitBranch />{connection.source_collection_state === "running" ? "Collecting…" : "Collect source & correlate"}</button>}</div></div>
     </div>
