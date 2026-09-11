@@ -7,10 +7,12 @@ import binascii
 import re
 import tempfile
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -37,6 +39,11 @@ MAX_SELECTED_FILES = 2_000
 MAX_BLOB_BYTES = 2_000_000
 MAX_TOTAL_BYTES = 25_000_000
 MAX_BLOB_FETCH_WORKERS = 8
+MAX_CONNECTION_REQUESTS = 4_000
+GITHUB_RATE_LIMIT_RESERVE = 500
+COLLECTION_DEADLINE_SECONDS = 2_100
+_SNAPSHOT_METADATA_REQUESTS = 4
+_MIN_USEFUL_REPOSITORY_REQUESTS = _SNAPSHOT_METADATA_REQUESTS + 1
 
 _COMMIT_SHA = re.compile(r"^[0-9a-f]{40,64}$")
 _BLOB_SHA = re.compile(r"^[0-9a-f]{40,64}$")
@@ -90,6 +97,85 @@ class GitHubSourceError(RuntimeError):
         self.code = code
 
 
+class _GitHubRequestBudgetReached(GitHubSourceError):
+    """The connection must stop issuing GitHub requests and retain partial evidence."""
+
+
+@dataclass(slots=True)
+class _GitHubRequestBudget:
+    limit: int
+    rate_limit_reserve: int
+    deadline: float
+    monotonic: Callable[[], float]
+    requests: int = 0
+    provider_remaining: int | None = None
+    reached: bool = False
+    _lock: Lock = field(default_factory=Lock, repr=False)
+
+    def acquire(self) -> None:
+        with self._lock:
+            if self.monotonic() >= self.deadline:
+                self.reached = True
+                raise _GitHubRequestBudgetReached("github_collection_deadline_reached")
+            if self.requests >= self.limit:
+                self.reached = True
+                raise _GitHubRequestBudgetReached("github_request_budget_reached")
+            if (
+                self.provider_remaining is not None
+                and self.provider_remaining <= self.rate_limit_reserve
+            ):
+                self.reached = True
+                raise _GitHubRequestBudgetReached("github_rate_limit_reserve_reached")
+            self.requests += 1
+            if self.requests >= self.limit:
+                self.reached = True
+
+    def observe(self, response: Any) -> None:
+        headers = {
+            str(key).lower(): str(value) for key, value in getattr(response, "headers", {}).items()
+        }
+        remaining = _optional_nonnegative_int(headers.get("x-ratelimit-remaining"))
+        with self._lock:
+            if remaining is not None:
+                self.provider_remaining = (
+                    remaining
+                    if self.provider_remaining is None
+                    else min(self.provider_remaining, remaining)
+                )
+                if self.provider_remaining <= self.rate_limit_reserve:
+                    self.reached = True
+
+    def capacity(self) -> int:
+        with self._lock:
+            local = max(0, self.limit - self.requests)
+            if self.provider_remaining is None:
+                return local
+            provider = max(0, self.provider_remaining - self.rate_limit_reserve)
+            return min(local, provider)
+
+    def blob_allowance(self, repositories_remaining: int) -> int:
+        """Share remaining requests while reserving one useful snapshot per later repo."""
+
+        capacity = self.capacity()
+        later_reserve = max(0, repositories_remaining - 1) * (_MIN_USEFUL_REPOSITORY_REQUESTS)
+        if capacity <= later_reserve:
+            return 0
+        return 1 + (capacity - later_reserve - 1) // max(1, repositories_remaining)
+
+    def reopen_after_reset(self) -> None:
+        with self._lock:
+            if (
+                self.provider_remaining is not None
+                and self.provider_remaining <= self.rate_limit_reserve
+            ):
+                self.provider_remaining = None
+            self.reached = self.requests >= self.limit
+
+    def mark_reached(self) -> None:
+        with self._lock:
+            self.reached = True
+
+
 @dataclass(frozen=True, slots=True)
 class GitHubSnapshot:
     repository_id: int
@@ -110,8 +196,32 @@ class GitHubSnapshot:
 class GitHubRepositoryCollector:
     """Collect exact selected repositories without retaining tokens or source blobs."""
 
-    def __init__(self, app_client: GitHubAppClient):
+    def __init__(
+        self,
+        app_client: GitHubAppClient,
+        *,
+        max_requests: int | None = None,
+        rate_limit_reserve: int | None = None,
+        deadline_seconds: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
         self._app = app_client
+        self._max_requests = MAX_CONNECTION_REQUESTS if max_requests is None else max_requests
+        self._rate_limit_reserve = (
+            GITHUB_RATE_LIMIT_RESERVE if rate_limit_reserve is None else rate_limit_reserve
+        )
+        self._deadline_seconds = (
+            COLLECTION_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
+        )
+        if self._max_requests < 1 or self._rate_limit_reserve < 0:
+            raise ValueError("GitHub request budget values must be non-negative")
+        if self._deadline_seconds <= 0:
+            raise ValueError("GitHub collection deadline must be positive")
+        self._monotonic = monotonic
+        self._wall_clock = wall_clock
+        self._sleep = sleep
 
     def collect(
         self,
@@ -129,11 +239,37 @@ class GitHubRepositoryCollector:
         if not isinstance(installation_id, int) or not isinstance(selected, list) or not selected:
             raise ValueError("complete GitHub App installation before collecting source")
 
+        budget = self._new_request_budget()
         try:
-            installation = self._app.get_installation(installation_id)
+            installation = self._budgeted_call(
+                lambda: self._app.get_installation(installation_id), budget=budget
+            )
             expected_account = connection.get("configuration", {}).get("account_id")
             if installation.get("account_id") != expected_account:
                 raise GitHubSourceError("installation_account_mismatch")
+        except _GitHubRequestBudgetReached as error:
+            results = [
+                self._record_partial_repository(
+                    tenant_id=tenant_id,
+                    connection_id=str(connection["id"]),
+                    selected_repository=selected_repository,
+                    repository=repository,
+                    detail=error.code,
+                )
+                for selected_repository in selected
+            ]
+            return {
+                "connection_id": str(connection["id"]),
+                "state": "partial",
+                "completed_at": datetime.now(UTC).isoformat(),
+                "repositories": results,
+                "repository_count": len(results),
+                "failed_count": 0,
+                "partial_count": len(results),
+                "github_requests": budget.requests,
+                "github_request_limit": budget.limit,
+                "request_budget_reached": True,
+            }
         except Exception as error:
             code = (
                 error.code
@@ -172,15 +308,16 @@ class GitHubRepositoryCollector:
             }
 
         targets = tuple(
-            DeploymentTarget.from_record(item)
-            for item in repository.deployment_targets(tenant_id)
+            DeploymentTarget.from_record(item) for item in repository.deployment_targets(tenant_id)
         )
         results: list[dict[str, Any]] = []
-        for selected_repository in selected:
+        for index, selected_repository in enumerate(selected):
             try:
                 snapshot = self._snapshot(
                     installation_id=installation_id,
                     repository=selected_repository,
+                    budget=budget,
+                    repositories_remaining=len(selected) - index,
                 )
                 result = self._analyze_snapshot(
                     tenant_id=tenant_id,
@@ -188,6 +325,14 @@ class GitHubRepositoryCollector:
                     snapshot=snapshot,
                     targets=targets,
                     repository=repository,
+                )
+            except _GitHubRequestBudgetReached as error:
+                result = self._record_partial_repository(
+                    tenant_id=tenant_id,
+                    connection_id=str(connection["id"]),
+                    selected_repository=selected_repository,
+                    repository=repository,
+                    detail=error.code,
                 )
             except Exception as error:
                 code = (
@@ -225,23 +370,39 @@ class GitHubRepositoryCollector:
             "repository_count": len(results),
             "failed_count": failed,
             "partial_count": partial,
+            "github_requests": budget.requests,
+            "github_request_limit": budget.limit,
+            "request_budget_reached": budget.reached,
         }
+
+    def _new_request_budget(self) -> _GitHubRequestBudget:
+        return _GitHubRequestBudget(
+            limit=self._max_requests,
+            rate_limit_reserve=self._rate_limit_reserve,
+            deadline=self._monotonic() + self._deadline_seconds,
+            monotonic=self._monotonic,
+        )
 
     def _snapshot(
         self,
         *,
         installation_id: int,
         repository: dict[str, Any],
+        budget: _GitHubRequestBudget,
+        repositories_remaining: int,
     ) -> GitHubSnapshot:
         repository_id = repository.get("id")
         full_name = repository.get("full_name")
         if not isinstance(repository_id, int) or not isinstance(full_name, str):
             raise GitHubSourceError("invalid_repository_boundary")
-        token = self._app.create_installation_token(
-            installation_id=installation_id,
-            repository_id=repository_id,
+        token = self._budgeted_call(
+            lambda: self._app.create_installation_token(
+                installation_id=installation_id,
+                repository_id=repository_id,
+            ),
+            budget=budget,
         )
-        metadata = self._json("GET", f"/repos/{full_name}", token=token)
+        metadata = self._json("GET", f"/repos/{full_name}", token=token, budget=budget)
         owner = metadata.get("owner")
         if (
             metadata.get("id") != repository_id
@@ -249,8 +410,7 @@ class GitHubRepositoryCollector:
             or str(metadata.get("full_name", "")).lower() != full_name.lower()
             or not isinstance(owner, dict)
             or owner.get("id") != repository.get("owner_id")
-            or str(owner.get("login", "")).lower()
-            != str(repository.get("owner_login", "")).lower()
+            or str(owner.get("login", "")).lower() != str(repository.get("owner_login", "")).lower()
         ):
             raise GitHubSourceError("repository_identity_mismatch")
         default_branch = metadata.get("default_branch")
@@ -261,6 +421,7 @@ class GitHubRepositoryCollector:
                 "GET",
                 f"/repos/{full_name}/git/ref/{quote(f'heads/{default_branch}', safe='/')}",
                 token=token,
+                budget=budget,
             )
         except GitHubSourceError as error:
             if error.code == "github_conflict":
@@ -277,6 +438,7 @@ class GitHubRepositoryCollector:
             "GET",
             f"/repos/{full_name}/git/trees/{commit}",
             token=token,
+            budget=budget,
             params={"recursive": "1"},
         )
         entries = tree.get("tree")
@@ -329,9 +491,26 @@ class GitHubRepositoryCollector:
             )
         selected_entries = budgeted_entries
 
-        def fetch_blob(entry: tuple[str, str, int]) -> tuple[str, bytes]:
+        blob_allowance = budget.blob_allowance(repositories_remaining)
+        fetch_entries = selected_entries[:blob_allowance]
+        request_skipped = len(selected_entries) - len(fetch_entries)
+        if request_skipped > 0:
+            warnings.append(
+                "connection GitHub request budget selected "
+                f"{len(fetch_entries)} of {len(selected_entries)} repository-budgeted files"
+            )
+
+        def fetch_blob(entry: tuple[str, str, int]) -> tuple[str, bytes] | None:
             path, sha, expected_size = entry
-            blob = self._json("GET", f"/repos/{full_name}/git/blobs/{sha}", token=token)
+            try:
+                blob = self._json(
+                    "GET",
+                    f"/repos/{full_name}/git/blobs/{sha}",
+                    token=token,
+                    budget=budget,
+                )
+            except _GitHubRequestBudgetReached:
+                return None
             if blob.get("sha") != sha or blob.get("encoding") != "base64":
                 raise GitHubSourceError("invalid_blob_response")
             try:
@@ -344,7 +523,13 @@ class GitHubRepositoryCollector:
             return path, content
 
         with ThreadPoolExecutor(max_workers=MAX_BLOB_FETCH_WORKERS) as executor:
-            files = list(executor.map(fetch_blob, selected_entries))
+            fetched = list(executor.map(fetch_blob, fetch_entries))
+        files = [item for item in fetched if item is not None]
+        if len(files) < len(fetch_entries):
+            warnings.append(
+                "GitHub rate-limit reserve or collection deadline stopped source retrieval; "
+                f"collected {len(files)} of {len(fetch_entries)} allocated files"
+            )
         if sum(len(content) for _, content in files) > MAX_TOTAL_BYTES:
             raise GitHubSourceError("repository_byte_limit_exceeded")
 
@@ -358,6 +543,35 @@ class GitHubRepositoryCollector:
             files=tuple(files),
             warnings=tuple(warnings),
         )
+
+    def _record_partial_repository(
+        self,
+        *,
+        tenant_id: str,
+        connection_id: str,
+        selected_repository: dict[str, Any],
+        repository: InventorySink,
+        detail: str,
+    ) -> dict[str, Any]:
+        full_name = str(selected_repository.get("full_name", "unknown/unknown"))
+        repository.ingest(
+            tenant_id,
+            _source_batch(
+                connection_id=connection_id,
+                repository_name=f"github.com/{full_name}",
+                repository_id=selected_repository.get("id"),
+                state=CoverageState.PARTIAL,
+                detail=detail,
+            ),
+        )
+        return {
+            "repository_id": selected_repository.get("id"),
+            "repository": full_name,
+            "state": "partial",
+            "detail": detail,
+            "files": 0,
+            "bytes": 0,
+        }
 
     def _analyze_snapshot(
         self,
@@ -386,15 +600,8 @@ class GitHubRepositoryCollector:
                 connection_id=connection_id,
                 repository_name=snapshot.repository_name,
                 repository_id=snapshot.repository_id,
-                state=(
-                    CoverageState.PARTIAL
-                    if snapshot.warnings
-                    else CoverageState.COMPLETE
-                ),
-                detail=(
-                    "; ".join((*snapshot.warnings, snapshot.detail or ""))[:4_000]
-                    or None
-                ),
+                state=(CoverageState.PARTIAL if snapshot.warnings else CoverageState.COMPLETE),
+                detail=("; ".join((*snapshot.warnings, snapshot.detail or ""))[:4_000] or None),
                 commit=snapshot.commit,
                 default_branch=snapshot.default_branch,
                 file_count=len(snapshot.files),
@@ -413,9 +620,9 @@ class GitHubRepositoryCollector:
                 **metadata,
             ).collect(connection_id=connection_id)
             if snapshot.warnings:
-                upstream_detail = "Source snapshot is partial: " + "; ".join(
-                    snapshot.warnings
-                )[:3_900]
+                upstream_detail = (
+                    "Source snapshot is partial: " + "; ".join(snapshot.warnings)[:3_900]
+                )
                 inventory_batch = _with_partial_coverage(inventory_batch, upstream_detail)
                 posture_batch = _with_partial_coverage(posture_batch, upstream_detail)
                 correlation_batch = _with_partial_coverage(correlation_batch, upstream_detail)
@@ -452,28 +659,134 @@ class GitHubRepositoryCollector:
             "coverage": coverage_states,
         }
 
-    def _json(self, method: str, path: str, *, token: str, **kwargs: Any) -> dict[str, Any]:
+    def _json(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str,
+        budget: _GitHubRequestBudget | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         for attempt in range(3):
             try:
+                if budget is not None:
+                    budget.acquire()
                 response = self._app.installation_request(
                     method, path, token=token, timeout=20.0, **kwargs
                 )
+                if budget is not None:
+                    budget.observe(response)
                 response.raise_for_status()
                 payload = response.json()
                 break
             except Exception as error:
+                if isinstance(error, _GitHubRequestBudgetReached):
+                    raise
                 code = _github_request_error_code(error)
-                if code in {
-                    "github_rate_limited",
-                    "github_timeout",
-                    "github_upstream_unavailable",
-                } and attempt < 2:
-                    time.sleep(0.25 * (2**attempt))
+                if self._retry_github_error(
+                    error=error,
+                    code=code,
+                    attempt=attempt,
+                    budget=budget,
+                ):
                     continue
                 raise GitHubSourceError(code) from error
         if not isinstance(payload, dict):
             raise GitHubSourceError("invalid_github_response")
         return payload
+
+    def _budgeted_call(
+        self,
+        action: Callable[[], Any],
+        *,
+        budget: _GitHubRequestBudget,
+    ) -> Any:
+        """Bound and retry GitHub client methods that return parsed domain payloads."""
+
+        for attempt in range(3):
+            budget.acquire()
+            try:
+                return action()
+            except Exception as error:
+                response = getattr(error, "response", None)
+                if response is not None:
+                    budget.observe(response)
+                code = _github_request_error_code(error)
+                if self._retry_github_error(
+                    error=error,
+                    code=code,
+                    attempt=attempt,
+                    budget=budget,
+                ):
+                    continue
+                raise
+        raise AssertionError("bounded GitHub retry loop did not return")
+
+    def _retry_github_error(
+        self,
+        *,
+        error: Exception,
+        code: str,
+        attempt: int,
+        budget: _GitHubRequestBudget | None,
+    ) -> bool:
+        if code == "github_rate_limited" and budget is not None:
+            delay = _rate_limit_delay(error, wall_clock=self._wall_clock)
+            if attempt >= 2:
+                budget.mark_reached()
+                raise _GitHubRequestBudgetReached("github_rate_limit_reserve_reached") from error
+            if delay is not None:
+                if self._monotonic() + delay >= budget.deadline:
+                    budget.mark_reached()
+                    raise _GitHubRequestBudgetReached(
+                        "github_rate_limit_wait_exceeds_deadline"
+                    ) from error
+                self._sleep(delay)
+                budget.reopen_after_reset()
+                return True
+        if (
+            code
+            in {
+                "github_rate_limited",
+                "github_timeout",
+                "github_upstream_unavailable",
+            }
+            and attempt < 2
+        ):
+            self._sleep(0.25 * (2**attempt))
+            return True
+        return False
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _optional_nonnegative_float(value: Any) -> float | None:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _rate_limit_delay(error: Exception, *, wall_clock: Callable[[], float]) -> float | None:
+    response = getattr(error, "response", None)
+    headers = {
+        str(key).lower(): str(value) for key, value in getattr(response, "headers", {}).items()
+    }
+    retry_after = _optional_nonnegative_float(headers.get("retry-after"))
+    if retry_after is not None:
+        return retry_after
+    reset_at = _optional_nonnegative_float(headers.get("x-ratelimit-reset"))
+    if reset_at is not None:
+        return max(0.0, reset_at - float(wall_clock()) + 1.0)
+    return None
 
 
 def _empty_snapshot(
@@ -516,7 +829,9 @@ def _analysis_priority(path: str) -> int:
 def _github_request_error_code(error: Exception) -> str:
     response = getattr(error, "response", None)
     status = getattr(response, "status_code", None)
-    headers = getattr(response, "headers", {})
+    headers = {
+        str(key).lower(): str(value) for key, value in getattr(response, "headers", {}).items()
+    }
     if (
         status == 429
         or (status == 403 and str(headers.get("x-ratelimit-remaining", "")) == "0")
@@ -540,11 +855,7 @@ def _with_partial_coverage(batch: Any, detail: str) -> Any:
     coverage = tuple(
         Coverage(
             item.plane,
-            (
-                CoverageState.PARTIAL
-                if item.state is CoverageState.COMPLETE
-                else item.state
-            ),
+            (CoverageState.PARTIAL if item.state is CoverageState.COMPLETE else item.state),
             item.scope,
             "; ".join(part for part in (item.detail, detail) if part)[:4_000],
         )
