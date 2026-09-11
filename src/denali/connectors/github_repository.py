@@ -110,10 +110,13 @@ class _GitHubRequestBudget:
     requests: int = 0
     provider_remaining: int | None = None
     reached: bool = False
+    blocked_code: str | None = None
     _lock: Lock = field(default_factory=Lock, repr=False)
 
     def acquire(self) -> None:
         with self._lock:
+            if self.blocked_code is not None:
+                raise _GitHubRequestBudgetReached(self.blocked_code)
             if self.monotonic() >= self.deadline:
                 self.reached = True
                 raise _GitHubRequestBudgetReached("github_collection_deadline_reached")
@@ -144,6 +147,7 @@ class _GitHubRequestBudget:
                 )
                 if self.provider_remaining <= self.rate_limit_reserve:
                     self.reached = True
+                    self.blocked_code = "github_rate_limit_reserve_reached"
 
     def capacity(self) -> int:
         with self._lock:
@@ -162,18 +166,10 @@ class _GitHubRequestBudget:
             return 0
         return 1 + (capacity - later_reserve - 1) // max(1, repositories_remaining)
 
-    def reopen_after_reset(self) -> None:
-        with self._lock:
-            if (
-                self.provider_remaining is not None
-                and self.provider_remaining <= self.rate_limit_reserve
-            ):
-                self.provider_remaining = None
-            self.reached = self.requests >= self.limit
-
-    def mark_reached(self) -> None:
+    def block(self, code: str) -> None:
         with self._lock:
             self.reached = True
+            self.blocked_code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,8 +200,6 @@ class GitHubRepositoryCollector:
         rate_limit_reserve: int | None = None,
         deadline_seconds: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
-        wall_clock: Callable[[], float] = time.time,
-        sleep: Callable[[float], None] = time.sleep,
     ):
         self._app = app_client
         self._max_requests = MAX_CONNECTION_REQUESTS if max_requests is None else max_requests
@@ -220,8 +214,6 @@ class GitHubRepositoryCollector:
         if self._deadline_seconds <= 0:
             raise ValueError("GitHub collection deadline must be positive")
         self._monotonic = monotonic
-        self._wall_clock = wall_clock
-        self._sleep = sleep
 
     def collect(
         self,
@@ -500,7 +492,9 @@ class GitHubRepositoryCollector:
                 f"{len(fetch_entries)} of {len(selected_entries)} repository-budgeted files"
             )
 
-        def fetch_blob(entry: tuple[str, str, int]) -> tuple[str, bytes] | None:
+        def fetch_blob(
+            entry: tuple[str, str, int],
+        ) -> tuple[str, bytes] | _GitHubRequestBudgetReached:
             path, sha, expected_size = entry
             try:
                 blob = self._json(
@@ -509,8 +503,8 @@ class GitHubRepositoryCollector:
                     token=token,
                     budget=budget,
                 )
-            except _GitHubRequestBudgetReached:
-                return None
+            except _GitHubRequestBudgetReached as error:
+                return error
             if blob.get("sha") != sha or blob.get("encoding") != "base64":
                 raise GitHubSourceError("invalid_blob_response")
             try:
@@ -524,10 +518,14 @@ class GitHubRepositoryCollector:
 
         with ThreadPoolExecutor(max_workers=MAX_BLOB_FETCH_WORKERS) as executor:
             fetched = list(executor.map(fetch_blob, fetch_entries))
-        files = [item for item in fetched if item is not None]
+        files = [item for item in fetched if isinstance(item, tuple)]
+        stop_codes = sorted(
+            {item.code for item in fetched if isinstance(item, _GitHubRequestBudgetReached)}
+        )
         if len(files) < len(fetch_entries):
             warnings.append(
-                "GitHub rate-limit reserve or collection deadline stopped source retrieval; "
+                "GitHub source retrieval stopped"
+                f" ({', '.join(stop_codes) or 'github_request_budget_reached'}); "
                 f"collected {len(files)} of {len(fetch_entries)} allocated files"
             )
         if sum(len(content) for _, content in files) > MAX_TOTAL_BYTES:
@@ -685,7 +683,6 @@ class GitHubRepositoryCollector:
                     raise
                 code = _github_request_error_code(error)
                 if self._retry_github_error(
-                    error=error,
                     code=code,
                     attempt=attempt,
                     budget=budget,
@@ -714,7 +711,6 @@ class GitHubRepositoryCollector:
                     budget.observe(response)
                 code = _github_request_error_code(error)
                 if self._retry_github_error(
-                    error=error,
                     code=code,
                     attempt=attempt,
                     budget=budget,
@@ -726,35 +722,21 @@ class GitHubRepositoryCollector:
     def _retry_github_error(
         self,
         *,
-        error: Exception,
         code: str,
         attempt: int,
         budget: _GitHubRequestBudget | None,
     ) -> bool:
         if code == "github_rate_limited" and budget is not None:
-            delay = _rate_limit_delay(error, wall_clock=self._wall_clock)
-            if attempt >= 2:
-                budget.mark_reached()
-                raise _GitHubRequestBudgetReached("github_rate_limit_reserve_reached") from error
-            if delay is not None:
-                if self._monotonic() + delay >= budget.deadline:
-                    budget.mark_reached()
-                    raise _GitHubRequestBudgetReached(
-                        "github_rate_limit_wait_exceeds_deadline"
-                    ) from error
-                self._sleep(delay)
-                budget.reopen_after_reset()
-                return True
+            budget.block("github_rate_limited")
+            raise _GitHubRequestBudgetReached("github_rate_limited")
         if (
             code
             in {
-                "github_rate_limited",
                 "github_timeout",
                 "github_upstream_unavailable",
             }
             and attempt < 2
         ):
-            self._sleep(0.25 * (2**attempt))
             return True
         return False
 
@@ -765,28 +747,6 @@ def _optional_nonnegative_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
-
-
-def _optional_nonnegative_float(value: Any) -> float | None:
-    try:
-        parsed = float(str(value))
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed >= 0 else None
-
-
-def _rate_limit_delay(error: Exception, *, wall_clock: Callable[[], float]) -> float | None:
-    response = getattr(error, "response", None)
-    headers = {
-        str(key).lower(): str(value) for key, value in getattr(response, "headers", {}).items()
-    }
-    retry_after = _optional_nonnegative_float(headers.get("retry-after"))
-    if retry_after is not None:
-        return retry_after
-    reset_at = _optional_nonnegative_float(headers.get("x-ratelimit-reset"))
-    if reset_at is not None:
-        return max(0.0, reset_at - float(wall_clock()) + 1.0)
-    return None
 
 
 def _empty_snapshot(

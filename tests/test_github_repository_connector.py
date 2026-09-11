@@ -4,6 +4,8 @@ import base64
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from denali.connectors.github_repository import (
     MAX_BLOB_BYTES,
     SOURCE_PLANE,
@@ -147,6 +149,20 @@ def connection() -> dict[str, Any]:
             ],
         },
     }
+
+
+def two_repository_connection() -> dict[str, Any]:
+    selected = connection()
+    selected["configuration"]["repositories"].append(
+        {
+            "id": 43,
+            "node_id": "R_platform",
+            "full_name": "acme/platform",
+            "owner_id": 7,
+            "owner_login": "acme",
+        }
+    )
+    return selected
 
 
 def routes(*, truncated: bool = False, metadata_id: int = 42) -> dict[str, dict[str, Any]]:
@@ -323,16 +339,7 @@ def test_repository_file_budget_produces_deterministic_partial_analysis(
 
 
 def test_connection_request_budget_is_shared_across_multiple_repositories() -> None:
-    selected = connection()
-    selected["configuration"]["repositories"].append(
-        {
-            "id": 43,
-            "node_id": "R_platform",
-            "full_name": "acme/platform",
-            "owner_id": 7,
-            "owner_login": "acme",
-        }
-    )
+    selected = two_repository_connection()
     app = AppClient({**routes(), **second_repository_routes()})
     sink = Sink()
 
@@ -356,16 +363,7 @@ def test_connection_request_budget_is_shared_across_multiple_repositories() -> N
 
 
 def test_provider_rate_limit_reserve_stops_all_later_repositories_as_partial() -> None:
-    selected = connection()
-    selected["configuration"]["repositories"].append(
-        {
-            "id": 43,
-            "node_id": "R_platform",
-            "full_name": "acme/platform",
-            "owner_id": 7,
-            "owner_login": "acme",
-        }
-    )
+    selected = two_repository_connection()
     limited = routes()
     limited["/repos/acme/agent"] = Response(
         limited["/repos/acme/agent"],
@@ -433,66 +431,63 @@ def test_permission_failure_keeps_a_specific_safe_error_code() -> None:
 def test_transient_github_failures_are_retried_with_a_bound() -> None:
     app = SequencedAppClient(
         [
-            Response({}, status_code=429),
+            Response({}, status_code=503),
             Response({}, status_code=503),
             Response({"ok": True}),
         ]
     )
 
-    payload = GitHubRepositoryCollector(app, sleep=lambda _: None)._json(
-        "GET", "/fixture", token="token"
-    )
+    payload = GitHubRepositoryCollector(app)._json("GET", "/fixture", token="token")
 
     assert payload == {"ok": True}
     assert app.calls == 3
 
 
-def test_github_rate_limit_headers_are_not_misclassified_as_permission_failure() -> None:
-    app = SequencedAppClient(
-        [
-            Response(
-                {},
-                status_code=403,
-                headers={
-                    "x-ratelimit-remaining": "0",
-                    "x-ratelimit-reset": "4600",
-                },
-            )
-        ]
-    )
-
+@pytest.mark.parametrize(
+    ("status_code", "headers"),
+    [
+        (429, {"Retry-After": "2100"}),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "9999999999"}),
+    ],
+)
+def test_rate_limit_wait_headers_stop_partial_without_later_repository_calls(
+    status_code: int,
+    headers: dict[str, str],
+) -> None:
+    limited = routes()
+    limited["/repos/acme/agent"] = Response({}, status_code=status_code, headers=headers)
+    app = AppClient({**limited, **second_repository_routes()})
     sink = Sink()
-    result = GitHubRepositoryCollector(
-        app,
-        deadline_seconds=10,
-        monotonic=lambda: 100.0,
-        wall_clock=lambda: 1_000.0,
-    ).collect(tenant_id="tenant", connection=connection(), repository=sink)
 
-    assert result["repositories"][0]["detail"] == ("github_rate_limit_wait_exceeds_deadline")
-    assert result["repositories"][0]["state"] == "partial"
+    result = GitHubRepositoryCollector(app).collect(
+        tenant_id="tenant",
+        connection=two_repository_connection(),
+        repository=sink,
+    )
+
+    assert result["state"] == "partial"
     assert result["failed_count"] == 0
-    assert sink.batches[0].coverage[0].state is CoverageState.PARTIAL
+    assert result["partial_count"] == 2
+    assert result["request_budget_reached"] is True
+    assert app.tokens == [(9, 42)]
+    assert app.requests == ["/repos/acme/agent"]
+    assert {item["detail"] for item in result["repositories"]} == {"github_rate_limited"}
+    assert all(batch.coverage[0].state is CoverageState.PARTIAL for batch in sink.batches)
 
 
-def test_rate_limit_retry_after_is_honored_within_collection_deadline() -> None:
-    sleeps: list[float] = []
-    app = SequencedAppClient(
-        [
-            Response({}, status_code=429, headers={"Retry-After": "2"}),
-            Response({"ok": True}, headers={"x-ratelimit-remaining": "900"}),
-        ]
+def test_rate_limit_during_blob_fetch_marks_current_snapshot_partial() -> None:
+    limited = routes()
+    limited[f"/repos/acme/agent/git/blobs/{BLOB}"] = Response(
+        {}, status_code=429, headers={"Retry-After": "2100"}
     )
-    collector = GitHubRepositoryCollector(
-        app,
-        deadline_seconds=10,
-        monotonic=lambda: 100.0,
-        sleep=sleeps.append,
+    sink = Sink()
+
+    result = GitHubRepositoryCollector(AppClient(limited)).collect(
+        tenant_id="tenant", connection=connection(), repository=sink
     )
 
-    budget = collector._new_request_budget()
-    payload = collector._json("GET", "/fixture", token="token", budget=budget)
-
-    assert payload == {"ok": True}
-    assert sleeps == [2.0]
-    assert budget.requests == 2
+    assert result["state"] == "partial"
+    assert result["failed_count"] == 0
+    assert result["partial_count"] == 1
+    assert "github_rate_limited" in (sink.batches[0].coverage[0].detail or "")
+    assert all(batch.coverage[0].state is CoverageState.PARTIAL for batch in sink.batches)
