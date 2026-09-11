@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import local
 from typing import Any, Protocol
-from uuid import UUID
 
 AWS_SCOPE_BEDROCK_AGENTS = "aws.bedrock_agents"
 AWS_SCOPE_AGENTCORE = "aws.agentcore"
@@ -19,7 +18,6 @@ AWS_COVERAGE_AUTOMATIC = "automatic"
 AWS_COVERAGE_SELECTED = "selected"
 AWS_REGION_DISCOVERY_PLANE = "aws_region_discovery"
 AWS_REGION_DISCOVERY_PERMISSION = "ec2:DescribeRegions"
-AWS_ROLE_NAME_PREFIX = "DenaliSecurityAuditRole"
 _NOT_APPLICABLE_CODES = {
     "InvalidAction",
     "NotImplementedException",
@@ -28,13 +26,6 @@ _NOT_APPLICABLE_CODES = {
     "UnsupportedOperationException",
     "UnsupportedRegionException",
 }
-
-
-def aws_connection_role_name(connection_id: str) -> str:
-    """Return the collision-free physical IAM role name for one connection."""
-
-    return f"{AWS_ROLE_NAME_PREFIX}-{UUID(connection_id).hex}"
-
 
 # AWS-published AgentCore feature availability, verified 2026-08-29. Probes still run in
 # every enabled account Region: a successful live call always wins over this catalog, while

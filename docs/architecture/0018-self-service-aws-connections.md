@@ -19,11 +19,12 @@ connection responses expose the role ARN but not the external ID; the external I
 only as the `NoEcho` parameter default in the setup template and in the internal role
 assumption target.
 
-Every new AWS connection receives a deterministic physical IAM role name derived from its
-internally generated Denali connection UUID. The role name is not supplied by the browser
-and is never shared between connection records, including multiple connections to the same
-AWS account. This prevents CloudFormation physical-name conflicts while preserving existing
-connections and their previously stored role ARNs unchanged.
+AWS connections default to the stable physical IAM role name `DenaliSecurityAuditRole` for
+compatibility with the operator role's least-privilege `sts:AssumeRole` policy. An AWS account
+can therefore have only one default Denali onboarding role at a time. Before replacing a
+connection for the same AWS account, the customer must delete the previous Denali CloudFormation
+stack (or otherwise remove its role) and wait for deletion to complete. Denali must surface an
+`AlreadyExists` stack failure rather than implying that validation can repair the conflict.
 
 The primary hosted onboarding path is CloudFormation Quick Create, not a shell installer.
 Denali renders the same connection-specific template as the download path, uploads it under
@@ -71,7 +72,7 @@ remains a single deterministic attempt.
 The UI must keep that durable wait visible after route changes, distinguish the role-deploy
 wait from plane validation, state the 10-second retry cadence and 15-minute ceiling, and
 direct the user to CloudFormation stack Events when AWS reports a rollback. Denali cannot
-read CloudFormation status until the connection-specific role exists and can be assumed.
+read CloudFormation status until the configured role exists and can be assumed.
 
 The initial regional planes are Bedrock Agents Classic agents and guardrails; AgentCore
 runtimes, gateways, workload identities, and memories; Bedrock management activity in
