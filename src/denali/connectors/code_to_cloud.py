@@ -13,7 +13,7 @@ import os
 import posixpath
 import re
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -65,6 +65,13 @@ _TERRAFORM_RESOURCE_RE = re.compile(
 )
 _AZURERM_PROVIDER_RE = re.compile(r"\bprovider\s+(['\"])azurerm\1\s*\{")
 _AWS_PROVIDER_RE = re.compile(r"\bprovider\s+(['\"])aws\1\s*\{")
+_TERRAFORM_VARIABLE_RE = re.compile(
+    r"\bvariable\s+(['\"])(?P<name>[A-Za-z_][A-Za-z0-9_-]*)\1\s*\{"
+)
+_TERRAFORM_LOCALS_RE = re.compile(r"\blocals\s*\{")
+_TERRAFORM_MODULE_RE = re.compile(
+    r"\bmodule\s+(['\"])(?P<name>[A-Za-z_][A-Za-z0-9_-]*)\1\s*\{"
+)
 _AZURE_BICEP_RESOURCE_RE = re.compile(
     r"(?m)^\s*resource\s+(?P<symbol>[A-Za-z_][A-Za-z0-9_]*)\s+"
     r"(['\"])(?P<type>Microsoft\.(?:App/containerApps|Web/sites))@[^'\"]+\2\s*=\s*\{"
@@ -198,6 +205,13 @@ class ArtifactReachability:
     warnings: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class TerraformModuleContext:
+    bindings: dict[str, str]
+    aws_scope: tuple[str, str] | None
+    azure_subscription: str | None
+
+
 class CodeToCloudConnector:
     connector_id = CONNECTOR_ID
     capabilities = CAPABILITIES
@@ -254,7 +268,14 @@ class CodeToCloudConnector:
                 warnings.append(f"{relative}: {error.__class__.__name__}")
                 continue
             source_texts[relative] = text
-            found, file_warnings = _deployment_declarations(text, relative)
+
+        terraform_contexts = _terraform_module_contexts(source_texts)
+        for relative, text in source_texts.items():
+            found, file_warnings = _deployment_declarations(
+                text,
+                relative,
+                terraform_context=terraform_contexts.get(posixpath.dirname(relative)),
+            )
             declarations.extend(found)
             warnings.extend(file_warnings)
 
@@ -440,11 +461,14 @@ def _candidate_observation(
 
 
 def _deployment_declarations(
-    text: str, relative: str
+    text: str,
+    relative: str,
+    *,
+    terraform_context: TerraformModuleContext | None = None,
 ) -> tuple[list[DeploymentDeclaration], list[str]]:
     suffix = Path(relative).suffix.lower()
     if suffix == ".tf":
-        return _terraform_declarations(text, relative)
+        return _terraform_declarations(text, relative, context=terraform_context)
     if suffix == ".json":
         azure, azure_warnings = _azure_json_declarations(text, relative)
         aws, aws_warnings = _aws_cloudformation_json_declarations(text, relative)
@@ -560,14 +584,175 @@ def _deployment_declarations(
     return output, warnings
 
 
+def _terraform_module_contexts(
+    source_texts: dict[str, str],
+) -> dict[str, TerraformModuleContext]:
+    module_texts: dict[str, str] = {}
+    for relative in sorted(path for path in source_texts if path.endswith(".tf")):
+        directory = posixpath.dirname(relative)
+        module_texts[directory] = "\n".join(
+            part
+            for part in (
+                module_texts.get(directory),
+                _strip_hcl_comments(source_texts[relative]),
+            )
+            if part
+        )
+
+    contexts = {
+        directory: _terraform_context(text)
+        for directory, text in module_texts.items()
+    }
+    for _ in range(8):
+        inbound: dict[
+            str,
+            list[tuple[dict[str, str], tuple[str, str] | None, str | None]],
+        ] = {}
+        for parent, text in module_texts.items():
+            context = contexts[parent]
+            for child, arguments, inherits_default_provider in _terraform_module_calls(
+                text, parent, context.bindings
+            ):
+                if child in module_texts:
+                    inbound.setdefault(child, []).append(
+                        (
+                            arguments,
+                            context.aws_scope if inherits_default_provider else None,
+                            (
+                                context.azure_subscription
+                                if inherits_default_provider
+                                else None
+                            ),
+                        )
+                    )
+
+        updated: dict[str, TerraformModuleContext] = {}
+        for directory, text in module_texts.items():
+            calls = inbound.get(directory, [])
+            overrides: dict[str, str] = {}
+            argument_names = {name for arguments, _, _ in calls for name in arguments}
+            for name in argument_names:
+                values = {
+                    arguments[name]
+                    for arguments, _, _ in calls
+                    if name in arguments
+                }
+                if len(values) == 1 and all(name in arguments for arguments, _, _ in calls):
+                    overrides[f"var.{name}"] = values.pop()
+            context = _terraform_context(text, overrides=overrides)
+            if not _AWS_PROVIDER_RE.search(text):
+                inherited_aws = {scope for _, scope, _ in calls if scope is not None}
+                if len(inherited_aws) == 1 and all(scope is not None for _, scope, _ in calls):
+                    context = replace(context, aws_scope=inherited_aws.pop())
+            if not _AZURERM_PROVIDER_RE.search(text):
+                inherited_azure = {
+                    subscription
+                    for _, _, subscription in calls
+                    if subscription is not None
+                }
+                if len(inherited_azure) == 1 and all(
+                    subscription is not None for _, _, subscription in calls
+                ):
+                    context = replace(
+                        context, azure_subscription=inherited_azure.pop()
+                    )
+            updated[directory] = context
+        if updated == contexts:
+            return updated
+        contexts = updated
+    return contexts
+
+
+def _terraform_context(
+    text: str, *, overrides: dict[str, str] | None = None
+) -> TerraformModuleContext:
+    bindings = _terraform_literal_bindings(text, overrides=overrides)
+    return TerraformModuleContext(
+        bindings=bindings,
+        aws_scope=_terraform_aws_scope(text, bindings),
+        azure_subscription=_terraform_azure_subscription(text, bindings),
+    )
+
+
+def _terraform_literal_bindings(
+    text: str, *, overrides: dict[str, str] | None = None
+) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    for match in _TERRAFORM_VARIABLE_RE.finditer(text):
+        end = _balanced_object_end(text, match.end() - 1)
+        if end is None:
+            continue
+        block = text[match.end() - 1 : end + 1]
+        default = _hcl_top_level_resolved(block, "default", bindings)
+        if default is not None:
+            bindings[f"var.{match.group('name')}"] = default
+    bindings.update(overrides or {})
+
+    local_expressions: dict[str, str] = {}
+    for match in _TERRAFORM_LOCALS_RE.finditer(text):
+        end = _balanced_object_end(text, match.end() - 1)
+        if end is None:
+            continue
+        block = text[match.end() - 1 : end + 1]
+        local_expressions.update(_hcl_top_level_expressions(block))
+    for _ in range(8):
+        changed = False
+        for name, expression in local_expressions.items():
+            value = _terraform_resolve_expression(expression, bindings)
+            key = f"local.{name}"
+            if value is not None and bindings.get(key) != value:
+                bindings[key] = value
+                changed = True
+        if not changed:
+            break
+    return bindings
+
+
+def _terraform_module_calls(
+    text: str, parent: str, bindings: dict[str, str]
+) -> list[tuple[str, dict[str, str], bool]]:
+    calls: list[tuple[str, dict[str, str], bool]] = []
+    for match in _TERRAFORM_MODULE_RE.finditer(text):
+        end = _balanced_object_end(text, match.end() - 1)
+        if end is None:
+            continue
+        block = text[match.end() - 1 : end + 1]
+        source = _hcl_top_level_resolved(block, "source", bindings)
+        if source is None or not source.startswith(("./", "../")):
+            continue
+        child = posixpath.normpath(posixpath.join(parent, source))
+        if child == ".." or child.startswith("../") or child.startswith("/"):
+            continue
+        expressions = _hcl_top_level_expressions(block)
+        arguments: dict[str, str] = {}
+        for name, expression in expressions.items():
+            if name in {"source", "providers"}:
+                continue
+            value = _terraform_resolve_expression(expression, bindings)
+            if value is not None:
+                arguments[name] = value
+        calls.append(
+            ("" if child == "." else child, arguments, "providers" not in expressions)
+        )
+    return calls
+
+
 def _terraform_declarations(
-    text: str, relative: str
+    text: str,
+    relative: str,
+    *,
+    context: TerraformModuleContext | None = None,
 ) -> tuple[list[DeploymentDeclaration], list[str]]:
     output: list[DeploymentDeclaration] = []
     warnings: list[str] = []
     scan_text = _strip_hcl_comments(text)
-    azure_subscription = _terraform_azure_subscription(scan_text)
-    aws_scope = _terraform_aws_scope(scan_text)
+    bindings = context.bindings if context else _terraform_literal_bindings(scan_text)
+    azure_subscription = (
+        context.azure_subscription
+        if context
+        else _terraform_azure_subscription(scan_text, bindings)
+    )
+    aws_scope = context.aws_scope if context else _terraform_aws_scope(scan_text, bindings)
     for match in _TERRAFORM_RESOURCE_RE.finditer(scan_text):
         block_start = match.end() - 1
         block_end = _balanced_object_end(scan_text, block_start)
@@ -577,14 +762,20 @@ def _terraform_declarations(
             continue
         block = scan_text[block_start : block_end + 1]
         resource_type = match.group("type")
-        location = _hcl_top_level_literal(block, "location")
-        name = _hcl_top_level_literal(block, "name")
+        if "provider" in _hcl_top_level_expressions(block):
+            warnings.append(
+                f"{relative}:{line}: Terraform resource provider alias is not safely "
+                "resolved"
+            )
+            continue
+        location = _hcl_top_level_resolved(block, "location", bindings)
+        name = _hcl_top_level_resolved(block, "name", bindings)
         if resource_type.startswith("google_"):
-            project = _hcl_top_level_literal(block, "project")
+            project = _hcl_top_level_resolved(block, "project", bindings)
             if not project or not location or not name:
                 warnings.append(
                     f"{relative}:{line}: Terraform GCP project, location, and name "
-                    "must all be literal"
+                    "must each resolve to one literal"
                 )
                 continue
             if resource_type == "google_cloud_run_v2_service":
@@ -611,11 +802,14 @@ def _terraform_declarations(
                 ),
             )
         elif resource_type.startswith("azurerm_"):
-            resource_group = _hcl_top_level_literal(block, "resource_group_name")
+            resource_group = _hcl_top_level_resolved(
+                block, "resource_group_name", bindings
+            )
             if not azure_subscription or not resource_group or not location or not name:
                 warnings.append(
                     f"{relative}:{line}: Terraform Azure provider subscription_id and "
-                    "resource resource_group_name, location, and name must all be literal"
+                    "resource resource_group_name, location, and name must each resolve "
+                    "to one literal"
                 )
                 continue
             is_container = resource_type == "azurerm_container_app"
@@ -641,11 +835,12 @@ def _terraform_declarations(
             field = "family" if resource_type == "aws_ecs_task_definition" else "name"
             if resource_type == "aws_lambda_function":
                 field = "function_name"
-            deployment_name = _hcl_top_level_literal(block, field)
+            deployment_name = _hcl_top_level_resolved(block, field, bindings)
             if not account_id or not region or not deployment_name:
                 warnings.append(
                     f"{relative}:{line}: Terraform AWS provider region and single "
-                    f"allowed_account_ids value plus resource {field} must all be literal"
+                    f"allowed_account_ids value plus resource {field} must each resolve "
+                    "to one literal"
                 )
                 continue
             service, runtime_kind, identifier_name = {
@@ -677,7 +872,9 @@ def _terraform_declarations(
     return output, warnings
 
 
-def _terraform_azure_subscription(text: str) -> str | None:
+def _terraform_azure_subscription(
+    text: str, bindings: dict[str, str] | None = None
+) -> str | None:
     subscriptions: list[str] = []
     for match in _AZURERM_PROVIDER_RE.finditer(text):
         block_start = match.end() - 1
@@ -685,15 +882,19 @@ def _terraform_azure_subscription(text: str) -> str | None:
         if block_end is None:
             continue
         block = text[block_start : block_end + 1]
-        if _hcl_top_level_literal(block, "alias") is not None:
+        if "alias" in _hcl_top_level_expressions(block):
             continue
-        subscription = _hcl_top_level_literal(block, "subscription_id")
+        subscription = _hcl_top_level_resolved(
+            block, "subscription_id", bindings or {}
+        )
         if subscription and _valid_azure_uuid(subscription):
             subscriptions.append(subscription.lower())
     return subscriptions[0] if len(set(subscriptions)) == 1 else None
 
 
-def _terraform_aws_scope(text: str) -> tuple[str, str] | None:
+def _terraform_aws_scope(
+    text: str, bindings: dict[str, str] | None = None
+) -> tuple[str, str] | None:
     scopes: list[tuple[str, str]] = []
     for match in _AWS_PROVIDER_RE.finditer(text):
         block_start = match.end() - 1
@@ -701,26 +902,70 @@ def _terraform_aws_scope(text: str) -> tuple[str, str] | None:
         if block_end is None:
             continue
         block = text[block_start : block_end + 1]
-        if _hcl_top_level_literal(block, "alias") is not None:
+        if "alias" in _hcl_top_level_expressions(block):
             continue
-        region = _hcl_top_level_literal(block, "region")
-        accounts = _hcl_top_level_string_list(block, "allowed_account_ids")
+        resolved = bindings or {}
+        region = _hcl_top_level_resolved(block, "region", resolved)
+        accounts = _hcl_top_level_resolved_list(
+            block, "allowed_account_ids", resolved
+        )
         if region and len(accounts) == 1 and re.fullmatch(r"[0-9]{12}", accounts[0]):
             scopes.append((accounts[0], region))
     return scopes[0] if len(set(scopes)) == 1 else None
 
 
-def _hcl_top_level_string_list(block: str, key: str) -> tuple[str, ...]:
+def _hcl_top_level_resolved_list(
+    block: str, key: str, bindings: dict[str, str]
+) -> tuple[str, ...]:
     pattern = re.compile(rf"(?m)^\s*{re.escape(key)}\s*=\s*\[(?P<value>[^\]]*)\]")
     for match in pattern.finditer(block):
         if _hcl_brace_depth(block, match.start()) != 1:
             continue
-        raw = match.group("value")
-        values = re.findall(r"(['\"])(?P<value>[^'\"\r\n]+)\1", raw)
-        residue = re.sub(r"(['\"])[^'\"\r\n]+\1", "", raw).replace(",", "").strip()
-        if not residue:
-            return tuple(value for _, value in values if "${" not in value)
+        expressions = [item.strip() for item in match.group("value").split(",")]
+        values = tuple(
+            value
+            for expression in expressions
+            if expression
+            if (value := _terraform_resolve_expression(expression, bindings)) is not None
+        )
+        if len(values) == len([item for item in expressions if item]):
+            return values
     return ()
+
+
+def _hcl_top_level_expressions(block: str) -> dict[str, str]:
+    output: dict[str, str] = {}
+    pattern = re.compile(
+        r"(?m)^\s*(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?P<value>[^\r\n#]+)"
+    )
+    for match in pattern.finditer(block):
+        if _hcl_brace_depth(block, match.start()) == 1:
+            output[match.group("key")] = match.group("value").strip()
+    return output
+
+
+def _hcl_top_level_resolved(
+    block: str, key: str, bindings: dict[str, str]
+) -> str | None:
+    expression = _hcl_top_level_expressions(block).get(key)
+    return (
+        None
+        if expression is None
+        else _terraform_resolve_expression(expression, bindings)
+    )
+
+
+def _terraform_resolve_expression(
+    expression: str, bindings: dict[str, str]
+) -> str | None:
+    value = expression.strip().removesuffix(",").strip()
+    literal = re.fullmatch(r"(['\"])(?P<value>[^'\"\r\n]+)\1", value)
+    if literal:
+        resolved = literal.group("value")
+        return None if "${" in resolved else resolved
+    if re.fullmatch(r"(?:var|local)\.[A-Za-z_][A-Za-z0-9_-]*", value):
+        return bindings.get(value)
+    return None
 
 
 def _aws_deployment_identity(

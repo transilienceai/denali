@@ -180,7 +180,8 @@ resource "google_cloud_run_v2_service" "agent" {
 
     assert declarations == []
     assert warnings == [
-        "infra/main.tf:2: Terraform GCP project, location, and name must all be literal"
+        "infra/main.tf:2: Terraform GCP project, location, and name must each resolve "
+        "to one literal"
     ]
 
 
@@ -244,6 +245,232 @@ resource "aws_lambda_function" "agent" {
 
     assert declarations == []
     assert "single allowed_account_ids" in warnings[0]
+
+
+def test_terraform_resolves_single_valued_module_bindings_across_files(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "variables.tf").write_text(
+        '''
+variable "account_id" {
+  default = "123456789012"
+}
+variable "region" {
+  default = "us-east-1"
+}
+variable "function_name" {
+  default = "denali-agent"
+}
+locals {
+  resolved_name = var.function_name
+}
+'''
+    )
+    (tmp_path / "provider.tf").write_text(
+        '''
+provider "aws" {
+  region              = var.region
+  allowed_account_ids = [var.account_id]
+}
+'''
+    )
+    (tmp_path / "main.tf").write_text(
+        '''
+resource "aws_lambda_function" "agent" {
+  function_name = local.resolved_name
+}
+'''
+    )
+
+    batch = CodeToCloudConnector(
+        tmp_path,
+        repository_name="github.com/example/terraform-bindings",
+        targets=(),
+    ).collect()
+
+    assert {item.state for item in batch.coverage} == {CoverageState.COMPLETE}
+    summary = batch.assets[0].attributes["correlation_summary"]
+    assert summary["declarations"] == 1
+    assert summary["unmatched"] == 1
+    candidate = batch.assets[0].attributes["correlation_candidates"][0]
+    assert candidate["deployment_identifier"] == "denali-agent"
+    assert candidate["match_basis"] == [
+        "literal_aws_account_id",
+        "literal_aws_region",
+        "literal_aws_function_name",
+    ]
+
+
+def test_terraform_local_module_inherits_one_provider_scope_and_literal_arguments(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "modules" / "agent").mkdir(parents=True)
+    (tmp_path / "main.tf").write_text(
+        '''
+provider "aws" {
+  region              = "us-east-1"
+  allowed_account_ids = ["123456789012"]
+}
+module "agent" {
+  source        = "./modules/agent"
+  function_name = "denali-agent"
+}
+'''
+    )
+    (tmp_path / "modules" / "agent" / "main.tf").write_text(
+        '''
+variable "function_name" {
+  type = string
+}
+resource "aws_lambda_function" "agent" {
+  function_name = var.function_name
+}
+'''
+    )
+
+    batch = CodeToCloudConnector(
+        tmp_path,
+        repository_name="github.com/example/terraform-module",
+        targets=(),
+    ).collect()
+
+    assert {item.state for item in batch.coverage} == {CoverageState.COMPLETE}
+    summary = batch.assets[0].attributes["correlation_summary"]
+    assert summary["declarations"] == 1
+    assert summary["unmatched"] == 1
+
+
+def test_terraform_module_with_multiple_argument_values_stays_partial(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "modules" / "agent").mkdir(parents=True)
+    (tmp_path / "main.tf").write_text(
+        '''
+provider "aws" {
+  region              = "us-east-1"
+  allowed_account_ids = ["123456789012"]
+}
+module "first" {
+  source        = "./modules/agent"
+  function_name = "first-agent"
+}
+module "second" {
+  source        = "./modules/agent"
+  function_name = "second-agent"
+}
+'''
+    )
+    (tmp_path / "modules" / "agent" / "main.tf").write_text(
+        '''
+variable "function_name" {
+  type = string
+}
+resource "aws_lambda_function" "agent" {
+  function_name = var.function_name
+}
+'''
+    )
+
+    batch = CodeToCloudConnector(
+        tmp_path,
+        repository_name="github.com/example/terraform-ambiguous",
+        targets=(),
+    ).collect()
+
+    assert batch.relationships == ()
+    assert {item.state for item in batch.coverage} == {CoverageState.PARTIAL}
+    assert batch.assets[0].attributes["correlation_summary"]["declarations"] == 0
+    assert "function_name must each resolve to one literal" in (
+        batch.coverage[0].detail or ""
+    )
+
+
+def test_terraform_module_never_inherits_ambiguous_cross_account_scope(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "env-one").mkdir()
+    (tmp_path / "env-two").mkdir()
+    (tmp_path / "modules" / "agent").mkdir(parents=True)
+    for directory, account in (("env-one", "111111111111"), ("env-two", "222222222222")):
+        (tmp_path / directory / "main.tf").write_text(
+            f'''
+provider "aws" {{
+  region              = "us-east-1"
+  allowed_account_ids = ["{account}"]
+}}
+module "agent" {{
+  source        = "../modules/agent"
+  function_name = "denali-agent"
+}}
+'''
+        )
+    (tmp_path / "modules" / "agent" / "main.tf").write_text(
+        '''
+variable "function_name" {
+  type = string
+}
+resource "aws_lambda_function" "agent" {
+  function_name = var.function_name
+}
+'''
+    )
+
+    batch = CodeToCloudConnector(
+        tmp_path,
+        repository_name="github.com/example/terraform-cross-account",
+        targets=(),
+    ).collect()
+
+    assert batch.relationships == ()
+    assert {item.state for item in batch.coverage} == {CoverageState.PARTIAL}
+    assert batch.assets[0].attributes["correlation_summary"]["declarations"] == 0
+    assert "allowed_account_ids" in (batch.coverage[0].detail or "")
+
+
+def test_terraform_module_provider_mapping_never_uses_the_default_scope(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "modules" / "agent").mkdir(parents=True)
+    (tmp_path / "main.tf").write_text(
+        '''
+provider "aws" {
+  region              = "us-east-1"
+  allowed_account_ids = ["111111111111"]
+}
+provider "aws" {
+  alias               = "other"
+  region              = "us-west-2"
+  allowed_account_ids = ["222222222222"]
+}
+module "agent" {
+  source = "./modules/agent"
+  providers = {
+    aws = aws.other
+  }
+  function_name = "denali-agent"
+}
+'''
+    )
+    (tmp_path / "modules" / "agent" / "main.tf").write_text(
+        '''
+variable "function_name" {
+  type = string
+}
+resource "aws_lambda_function" "agent" {
+  function_name = var.function_name
+}
+'''
+    )
+
+    batch = CodeToCloudConnector(
+        tmp_path,
+        repository_name="github.com/example/terraform-provider-map",
+        targets=(),
+    ).collect()
+
+    assert batch.relationships == ()
+    assert {item.state for item in batch.coverage} == {CoverageState.PARTIAL}
+    assert batch.assets[0].attributes["correlation_summary"]["declarations"] == 0
 
 
 def test_discovers_sam_function_with_denali_boundary_metadata() -> None:
@@ -536,7 +763,7 @@ resource "azurerm_container_app" "agent" {
     assert declarations == []
     assert warnings == [
         "infra/main.tf:6: Terraform Azure provider subscription_id and resource "
-        "resource_group_name, location, and name must all be literal"
+        "resource_group_name, location, and name must each resolve to one literal"
     ]
 
 
