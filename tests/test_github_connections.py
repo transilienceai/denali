@@ -483,6 +483,12 @@ class FakeResponse:
         return self._payload
 
 
+class GitHubStatusError(RuntimeError):
+    def __init__(self, status_code: int):
+        super().__init__(f"HTTP {status_code}")
+        self.response = type("Response", (), {"status_code": status_code})()
+
+
 class ValidatorGitHubApp:
     def __init__(self):
         self.token_repositories: list[int] = []
@@ -546,6 +552,42 @@ def test_github_validation_uses_one_exact_repository_token_and_isolates_planes()
         for item in result["results"]
         if item is not failed[0]
     )
+
+
+def test_github_validation_classifies_an_empty_repository_as_not_applicable() -> None:
+    class EmptyRepositoryGitHubApp(ValidatorGitHubApp):
+        def installation_request(
+            self, method: str, path: str, *, token: str, **kwargs: Any
+        ) -> FakeResponse:
+            if path.endswith("/git/ref/heads/main"):
+                return FakeResponse({}, GitHubStatusError(409))
+            return super().installation_request(method, path, token=token, **kwargs)
+
+    github = EmptyRepositoryGitHubApp()
+    validator = GitHubConnectionValidator(github)  # type: ignore[arg-type]
+    repository = REPOSITORIES[0]
+    connection = {
+        "id": CONNECTION_ID,
+        "provider": "github",
+        "credential_reference": {"installation_id": INSTALLATION_ID},
+        "declared_scopes": list(GITHUB_SCOPES),
+        "configuration": {
+            "account_id": 44,
+            "account_login": "example",
+            "repositories": [repository],
+        },
+        "coverage_plan": github_coverage_plan(list(GITHUB_SCOPES), [repository]),
+    }
+
+    result = validator.validate(connection)
+
+    assert result["health_state"] == "healthy"
+    contents = next(
+        item
+        for item in result["results"]
+        if item["plane"] == "github_repository_contents"
+    )
+    assert contents["state"] == "not_applicable"
 
 
 class UserVerificationGitHubApp(GitHubAppClient):
