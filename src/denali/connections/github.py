@@ -471,6 +471,19 @@ class GitHubConnectionValidator:
                     detail = "The read-only Actions workflow entrypoint succeeded."
                 results.append(_result(plan, "passed", detail))
             except Exception as error:
+                if (
+                    plan["plane"] == "github_repository_contents"
+                    and _github_http_status(error) == 409
+                ):
+                    results.append(
+                        _result(
+                            plan,
+                            "not_applicable",
+                            "Contents read is granted; GitHub reports that this repository "
+                            "does not currently have a readable source revision.",
+                        )
+                    )
+                    continue
                 results.append(
                     _result(
                         plan,
@@ -573,6 +586,12 @@ def _github_error_code(error: Exception) -> str:
     if response is not None and getattr(response, "status_code", None):
         return f"HTTP{response.status_code}"
     return error.__class__.__name__
+
+
+def _github_http_status(error: Exception) -> int | None:
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
 
 
 def _github_headers(token: str) -> dict[str, str]:
