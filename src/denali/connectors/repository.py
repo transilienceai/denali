@@ -111,7 +111,14 @@ _SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"([\"'])[^\"']+\3"
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_LITERAL_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,299}$")
 _MAX_STRING_RESOLUTION_DEPTH = 8
+
+
+def _literal_model_id(value: str) -> bool:
+    """Return true only for a concrete provider model identifier, never a template."""
+
+    return value == value.strip() and bool(_LITERAL_MODEL_ID_RE.fullmatch(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +395,8 @@ class RepositoryConnector:
             for match in _BEDROCK_MODEL_ENV_LITERAL_RE.finditer(text):
                 env_var = match.group(1)
                 model_id = match.group(3)
+                if not _literal_model_id(model_id):
+                    continue
                 line = text[: match.start()].count("\n") + 1
                 site = _site(text, relative, line)
                 model_ref = AssetRef(AssetKind.AI_MODEL, _model_natural_key("bedrock", model_id))
@@ -508,6 +517,8 @@ class RepositoryConnector:
                 for pattern in patterns:
                     for match in pattern.finditer(text):
                         model_id = match.group(1)
+                        if not _literal_model_id(model_id):
+                            continue
                         resolved = _resolve_provider(provider, model_id)
                         line = text[: match.start()].count("\n") + 1
                         site = _site(text, relative, line)
@@ -539,7 +550,6 @@ class RepositoryConnector:
                         self._link_agent_to_source_and_model(
                             assets, relationships, repo_ref, model_ref, site, observed_at
                         )
-
     def _discover_capabilities(
         self,
         text: str,

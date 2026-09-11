@@ -35,6 +35,43 @@ def test_framework_and_azure_models_are_declared_with_source_evidence(tmp_path: 
     assert by_key["azure_openai:env:AZURE_OPENAI_CHAT_DEPLOYMENT"].confidence == 0.6
 
 
+def test_dynamic_model_placeholders_do_not_become_canonical_inventory(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text(
+        "from openai import OpenAI\n"
+        "client = OpenAI()\n"
+        "client.responses.create(model='{model}')\n"
+        "request = {'model': '${OPENAI_MODEL}'}\n"
+        "client.responses.create(model='gpt-4o-mini')\n"
+    )
+
+    batch = RepositoryConnector(
+        tmp_path, repository_name="github.com/acme/placeholders"
+    ).collect()
+    models = [item for item in batch.assets if item.asset.kind is AssetKind.AI_MODEL]
+
+    assert [item.asset.natural_key for item in models] == ["openai:gpt-4o-mini"]
+    assert "{model}" not in repr(batch)
+    assert "${OPENAI_MODEL}" not in repr(batch)
+    assert {item.state for item in batch.coverage} == {CoverageState.COMPLETE}
+    assert batch.may_withdraw(INVENTORY_PLANE)
+
+
+def test_bedrock_environment_placeholders_are_not_model_inventory(tmp_path: Path) -> None:
+    (tmp_path / "stack.ts").write_text(
+        "import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';\n"
+        "const environment = { BEDROCK_MODEL_ID: '{model}' };\n"
+    )
+
+    batch = RepositoryConnector(
+        tmp_path, repository_name="github.com/acme/bedrock-placeholder"
+    ).collect()
+
+    assert not any(item.asset.kind is AssetKind.AI_MODEL for item in batch.assets)
+    assert {item.state for item in batch.coverage} == {CoverageState.COMPLETE}
+
+
 def test_test_fixtures_do_not_become_inventory(tmp_path: Path) -> None:
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_models.py").write_text(
