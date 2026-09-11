@@ -414,7 +414,7 @@
         <p class="lead">An evidence-backed platform for discovering AI systems across code, cloud, and enterprise applications; connecting source to runtime; evaluating posture and vulnerabilities; and investigating activity without turning missing data into false assurance.</p>
         <div class="hero-meta">
           <span><strong>Document</strong><br>Capabilities, features, use cases &amp; roadmap</span>
-          <span><strong>Edition</strong><br>Updated 9 September 2026</span>
+          <span><strong>Edition</strong><br>Updated 10 September 2026</span>
           <span><strong>Deployment</strong><br>Live hosted multi-tenant service and open-source local stack</span>
         </div>
       </div>
@@ -477,7 +477,7 @@
           <div class="icon" aria-hidden="true">↗</div>
           <div>
             <strong>Latest production update</strong>
-            <p>Google Workspace is now a first-class, keyless connection for bounded Gemini and AI-related OAuth audit evidence. Healthy provider validation automatically starts durable evidence collection; cloud collection refreshes dependent source correlation and rule evaluation. Deployment workflows can also submit matching Syft and Grype evidence through GitHub OIDC without a Denali API key, while a secure administrator upload remains available as a recovery path. The connection experience now exposes clearer setup progress, per-plane validation, evidence readiness, and background collection status.</p>
+            <p>Azure Repos is now a separate read-only connection with one-time delegated repository selection, app-only steady-state access, immutable revision binding, bounded source analysis, and eligible code-to-cloud correlation. Google Workspace provides a keyless connection for bounded Gemini and AI-related OAuth audit evidence. Healthy provider validation automatically starts durable evidence collection; cloud collection refreshes dependent source correlation and rule evaluation. Deployment workflows can also submit matching Syft and Grype evidence through GitHub OIDC without a Denali API key, while a secure administrator upload remains available as a recovery path. The connection experience exposes setup progress, per-plane validation, evidence readiness, and background collection status.</p>
           </div>
         </div>
       </section>
@@ -514,7 +514,7 @@
             <header><div class="cap-icon">&lt;/&gt;</div><h3>Source and code-to-cloud lineage</h3></header>
             <p>Trace AI applications from immutable source context to independently observed runtime.</p>
             <ul>
-              <li>GitHub App-backed or local static analysis of Python, TypeScript, JavaScript, Terraform, CloudFormation/SAM, Kubernetes, Cloud Run, ARM, and Bicep.</li>
+              <li>GitHub App-backed, Azure Repos service-principal-backed, or local static analysis of Python, TypeScript, JavaScript, Terraform, CloudFormation/SAM, Kubernetes, Cloud Run, ARM, and Bicep.</li>
               <li>Exact provider, account/project/subscription, Region/location, workload, revision, image, and execution-identity comparisons.</li>
               <li>Proven, unmatched, and ambiguous candidates shown separately.</li>
               <li>Declared tools and actions are explicitly labelled “not observed” until runtime evidence proves execution.</li>
@@ -588,6 +588,7 @@
               <li>GCP connection-specific keyless principal with selected projects.</li>
               <li>Google Workspace domain-wide delegation for one disclosed read-only Admin Reports scope; no service-account key or customer token is stored.</li>
               <li>GitHub App installation with exact repositories and temporary installation tokens.</li>
+              <li>Azure Repos with one-time delegated proof, exact repository selection, and app-only <code>vso.code</code> access for validation and collection; no personal access token or refresh token is stored.</li>
               <li>Per-plane validation and background progress remain visible; healthy validation automatically queues the provider’s first durable collection, while manual collection remains available for retry and refresh.</li>
             </ul>
           </article>
@@ -638,6 +639,12 @@
                 <td><p>Exact repository identity, immutable revision, bounded source analysis, workflow inventory, posture, declarations, and code-to-cloud correlation.</p></td>
                 <td><p>Organization-owned GitHub App with Metadata, Contents, and Actions read-only permissions; exact repositories selected.</p></td>
                 <td><span class="status accepted">Production installation observed</span></td>
+              </tr>
+              <tr>
+                <td>Azure Repos</td>
+                <td><p>Exact Azure DevOps organization, project, and repository identity; immutable default-branch revision; bounded source analysis; repository posture; declarations; and eligible code-to-cloud correlation.</p></td>
+                <td><p>One-time delegated sign-in proves organization visibility and selects exact repositories. Steady-state validation and collection use Denali’s service principal with Basic access and read-only <code>vso.code</code> permission. Delegated tokens, refresh tokens, and personal access tokens are not retained.</p></td>
+                <td><span class="status accepted">Hosted lifecycle and code-to-cloud acceptance passed Sep 10, 2026</span></td>
               </tr>
               <tr>
                 <td>Microsoft Entra</td>
@@ -816,7 +823,7 @@
             <h3>Production-capable evidence platform</h3>
             <ul>
               <li>Provider-neutral inventory, relationships, coverage, governance, findings, vulnerabilities, issues, activity, and detections.</li>
-              <li>Self-service AWS, Azure, Microsoft Entra, Google Cloud, Google Workspace, and GitHub connections using scoped, revocable access.</li>
+              <li>Self-service AWS, Azure, Microsoft Entra, Google Cloud, Google Workspace, GitHub, and Azure Repos connections using scoped, revocable access.</li>
               <li>Exact code-to-cloud correlation across AWS, Azure, GCP, and Kubernetes.</li>
               <li>Durable validation and collection orchestration with automatic first collection, dependent source refresh, and rule evaluation.</li>
               <li>Automated Syft and Grype submission from deployment workflows through GitHub OIDC and exact image-digest correlation.</li>
@@ -915,7 +922,7 @@
     </section>
 
     <footer>
-      <span>Denali AI Security · Customer proposal overview · Updated 9 September 2026</span>
+      <span>Denali AI Security · Customer proposal overview · Updated 10 September 2026</span>
       <span>Open-source platform · Apache License 2.0</span>
     </footer>
   </article>
