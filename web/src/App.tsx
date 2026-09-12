@@ -111,6 +111,8 @@ import type {
   RuntimeActivity,
   RuntimeActivityDetail,
   RuntimeActivitySummary,
+  RuntimeSessionDetail,
+  RuntimeSessionSummary,
   RuntimeDetection,
   RuntimeDetectionDetail,
   RuntimeDetectionEvaluation,
@@ -298,6 +300,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
   const [codeToCloudObservations, setCodeToCloudObservations] = useState<CodeToCloudObservation[]>([]);
   const [activitySummary, setActivitySummary] = useState<RuntimeActivitySummary | null>(null);
   const [activities, setActivities] = useState<RuntimeActivity[]>([]);
+  const [runtimeSessions, setRuntimeSessions] = useState<RuntimeSessionSummary[]>([]);
   const [detectionSummary, setDetectionSummary] = useState<RuntimeDetectionSummary | null>(null);
   const [detections, setDetections] = useState<RuntimeDetection[]>([]);
   const [detectionEvaluations, setDetectionEvaluations] = useState<RuntimeDetectionEvaluation[]>([]);
@@ -355,6 +358,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
         codeToCloudObservationsResult,
         activitySummaryResult,
         activityResult,
+        runtimeSessionsResult,
         detectionSummaryResult,
         detectionsResult,
         detectionEvaluationsResult,
@@ -374,6 +378,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
         api.codeToCloudObservations(),
         api.activitySummary(),
         api.activity(),
+        api.runtimeSessions(),
         api.detectionSummary(),
         api.detections(),
         api.detectionEvaluations(),
@@ -394,6 +399,7 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
       setCodeToCloudObservations(codeToCloudObservationsResult.items);
       setActivitySummary(activitySummaryResult);
       setActivities(activityResult.items);
+      setRuntimeSessions(runtimeSessionsResult.items);
       setDetectionSummary(detectionSummaryResult);
       setDetections(detectionsResult.items);
       setDetectionEvaluations(detectionEvaluationsResult.items);
@@ -414,7 +420,8 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
     (connection) => connection.validation_state === "running"
       || connection.evidence_collection_state === "running"
       || connection.source_collection_state === "running"
-      || connection.deployment_collection_state === "running",
+      || connection.deployment_collection_state === "running"
+      || connection.runtime_collection_state === "running",
   );
 
   useEffect(() => {
@@ -589,6 +596,8 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
     navigation.drawer?.kind === "issue" ? navigation.drawer.id : null;
   const selectedActivityId =
     navigation.drawer?.kind === "activity" ? navigation.drawer.id : null;
+  const selectedSessionKey =
+    navigation.drawer?.kind === "session" ? navigation.drawer.id : null;
   const selectedDetectionId =
     navigation.drawer?.kind === "detection" ? navigation.drawer.id : null;
   const runningOperations = runningConnectionOperations(connections);
@@ -704,11 +713,13 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
             <RuntimeActivityPage
               summary={activitySummary ?? { total: 0, last_24h: 0, providers: 0, failures: 0, fixture_total: 0, by_category: {} }}
               activities={activities}
+              sessions={runtimeSessions}
               coverage={coverage}
               includeFixtures={includeActivityFixtures}
               navigation={filterNavigation}
               onToggleFixtures={toggleActivityFixtures}
               onOpenActivity={(id) => openDrawer("activity", id)}
+              onOpenSession={(id) => openDrawer("session", id)}
             />
           ) : page === "detections" ? (
             <RuntimeDetectionsPage
@@ -772,12 +783,22 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
           }}
         />
       )}
+      {selectedSessionKey && (
+        <RuntimeSessionDrawer
+          sessionKey={selectedSessionKey}
+          onClose={closeDrawer}
+          onOpenActivity={(activityId) => {
+            openDrawer("activity", activityId);
+          }}
+        />
+      )}
       {selectedDetectionId && (
         <RuntimeDetectionDrawer
           detectionId={selectedDetectionId}
           tab={(navigation.drawer?.tab ?? "overview") as DetectionDetailTab}
           onTab={setDrawerTab}
           onClose={closeDrawer}
+          canWrite={canWrite}
           onOpenActivity={(activityId) => {
             openDrawer("activity", activityId);
           }}
@@ -2362,19 +2383,23 @@ function directoryConnectionLabel(connectionId: string): string {
 function RuntimeActivityPage({
   summary,
   activities,
+  sessions,
   coverage,
   includeFixtures,
   navigation,
   onToggleFixtures,
   onOpenActivity,
+  onOpenSession,
 }: {
   summary: RuntimeActivitySummary;
   activities: RuntimeActivity[];
+  sessions: RuntimeSessionSummary[];
   coverage: Coverage[];
   includeFixtures: boolean;
   navigation: FilterNavigation;
   onToggleFixtures: () => void;
   onOpenActivity: (id: string) => void;
+  onOpenSession: (id: string) => void;
 }) {
   const search = navigation.values.q ?? "";
   const category = navigation.values.category ?? "all";
@@ -2392,6 +2417,7 @@ function RuntimeActivityPage({
     "azure_ai_management_activity",
     "entra_ai_signins",
     "entra_ai_directory_audits",
+    "aws_agent_runtime_activity",
   ]);
   const assessed = coverage.some(
     (item) => activityPlanes.has(item.plane) && !item.connector_id.includes("demo"),
@@ -2410,6 +2436,20 @@ function RuntimeActivityPage({
       <div><CircleHelp size={20} /><span><strong>{summary.fixture_total} transparent demo {summary.fixture_total === 1 ? "record" : "records"} {includeFixtures ? "included" : "excluded"}</strong><small>Fixture observations are clearly marked and never counted as live unless you choose to include them.</small></span></div>
       <button onClick={onToggleFixtures}>{includeFixtures ? "Hide demo data" : "Include demo data"}</button>
     </section>}
+    <section className="panel runtime-session-panel">
+      <div className="panel-heading"><div><span className="eyebrow">AWS AGENT EXECUTION GRAPH</span><h3>Agent sessions</h3><p>Ordered provider-native spans correlated to exact agents, models, tools, resources, and detections.</p></div><span className="result-count"><strong>{sessions.length}</strong><small>recent sessions</small></span></div>
+      <div className="runtime-session-table" role="table" aria-label="AWS agent runtime sessions">
+        <div className="runtime-session-table-head" role="row"><span>Agent session</span><span>Execution</span><span>Calls</span><span>Evidence</span><span>Started</span><span /></div>
+        {sessions.map((session) => <button className="runtime-session-row" role="row" key={session.session_key} onClick={() => onOpenSession(session.session_key)}>
+          <span className="runtime-title-cell"><span className="asset-icon violet"><Waypoints /></span><span><strong>{session.agent_names?.join(", ") || "Unresolved AWS agent"}</strong><small>{session.account_uid ?? "AWS account unavailable"} · {session.region ?? "Region unavailable"}</small></span></span>
+          <span><span className={`outcome-badge ${session.outcome}`}>{titleCase(session.outcome)}</span><small>{session.trace_count} {session.trace_count === 1 ? "trace" : "traces"}</small></span>
+          <span><strong>{session.tool_invocation_count}</strong><small>{session.model_invocation_count} model · {session.retrieval_count} retrieval</small></span>
+          <span><strong>{session.correlated_entity_count}</strong><small>{session.detection_count} {session.detection_count === 1 ? "detection" : "detections"}</small></span>
+          <span>{formatTime(session.started_at)}</span><span><ChevronRight size={17} /></span>
+        </button>)}
+        {sessions.length === 0 && <div className="empty-state"><Waypoints /><strong>No AWS agent sessions observed yet</strong><span>Enable AgentCore observability and the AgentCore runtime activity scope, then collect evidence.</span></div>}
+      </div>
+    </section>
     <section className="panel runtime-panel">
       <div className="filterbar">
         <label className="search-field"><Search size={18} /><input value={search} onChange={(event) => navigation.set("q", event.target.value, "", "replace")} placeholder="Search activity, actor, or provider…" /></label>
@@ -2442,6 +2482,67 @@ function RuntimeActivityRow({ item, onClick }: { item: RuntimeActivity; onClick:
     <span>{titleCase(item.provider)}</span>
     <span>{formatTime(item.occurred_at)}</span><span><ChevronRight size={17} /></span>
   </button>;
+}
+
+function RuntimeSessionDrawer({
+  sessionKey,
+  onClose,
+  onOpenActivity,
+}: {
+  sessionKey: string;
+  onClose: () => void;
+  onOpenActivity: (id: string) => void;
+}) {
+  const [detail, setDetail] = useState<RuntimeSessionDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDetail(null);
+    setError(null);
+    setExportError(null);
+    api.runtimeSession(sessionKey).then(setDetail).catch((cause) =>
+      setError(cause instanceof Error ? cause.message : "Unable to load agent session"));
+  }, [sessionKey]);
+
+  const exportEvidence = async () => {
+    setExporting(true);
+    setExportError(null);
+    try {
+      const blob = await api.runtimeSessionExport(sessionKey);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `denali-aws-session-${sessionKey.slice(0, 12)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (cause) {
+      setExportError(cause instanceof Error ? cause.message : "Unable to export session evidence");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return <div className="drawer-layer"><button className="drawer-scrim" onClick={onClose} aria-label="Close agent session" /><aside className="resource-drawer runtime-session-drawer" aria-label="AWS agent session investigation">
+    {!detail && !error ? <LoadingState compact /> : error ? <ErrorState message={error} subject="agent session" /> : detail && <>
+      <div className="drawer-header runtime-drawer-header"><button className="drawer-close" onClick={onClose}><X /></button><span className="asset-icon large violet"><Waypoints /></span><div><span>AWS AGENT SESSION</span><h2>{detail.agent_names?.join(", ") || "Unresolved AWS agent"}</h2><p>{detail.account_uid ?? "AWS"} · {detail.region ?? "unknown region"}</p></div><span className={`outcome-badge ${detail.outcome}`}>{titleCase(detail.outcome)}</span></div>
+      <div className="finding-summary-strip"><span><strong>{detail.activity_count}</strong> spans</span><span><strong>{detail.tool_invocation_count}</strong> tool calls</span><span><strong>{detail.correlated_entity_count}</strong> correlated entities</span><span><strong>{detail.detection_count}</strong> detections</span></div>
+      <div className="drawer-content"><div className="detail-stack">
+        <div className="evidence-principle"><ShieldCheck /><div><strong>Metadata-only by design</strong><p>Prompts, responses, retrieved documents, tool arguments, and tool results are not collected. Investigation links preserve exact provider evidence and span order.</p></div><button className="secondary-action" disabled={exporting} onClick={exportEvidence}>{exporting ? <RefreshCw className="spin" /> : <Download />}{exporting ? "Exporting…" : "Export evidence"}</button></div>
+        {exportError && <p className="fixture-note"><CircleAlert size={15} /> {exportError}</p>}
+        {detail.detections.length > 0 && <DetailSection title="Session detections"><div className="session-detection-list">{detail.detections.map((detection) => <div key={detection.id}><span className={`severity-badge ${detection.severity}`}>{titleCase(detection.severity)}</span><span><strong>{detection.title}</strong><small>{detection.rule_uid}</small></span></div>)}</div></DetailSection>}
+        <DetailSection title="Ordered execution timeline"><div className="session-timeline">{detail.activities.map((activity, index) => {
+          const item = ACTIVITY_META[activity.category];
+          const Icon = item.icon;
+          const linked = activity.entities.filter((entity) => entity.asset_id).length;
+          return <button key={activity.id} onClick={() => onOpenActivity(activity.id)}><span className={`timeline-node ${activity.outcome}`}><Icon /></span><span><small>{index + 1} · {formatTime(activity.occurred_at)}</small><strong>{activity.title}</strong><em>{item.label} · {linked}/{activity.entities.length} entities correlated{activity.duration_ms !== null ? ` · ${Math.round(activity.duration_ms)} ms` : ""}</em><code>{activity.span_uid ?? activity.source_uid}{activity.parent_span_uid ? ` ← ${activity.parent_span_uid}` : ""}</code></span><ChevronRight /></button>;
+        })}</div></DetailSection>
+        <DetailSection title="Session properties"><div className="property-grid"><Property label="Provider" value={titleCase(detail.provider)} /><Property label="Connection" value={detail.connection_id} mono /><Property label="Session" value={detail.session_uid ?? "Provider session unavailable"} mono /><Property label="Started" value={formatTime(detail.started_at)} /><Property label="Completed" value={formatTime(detail.completed_at)} /><Property label="Telemetry" value={detail.activities[0]?.telemetry_convention ?? "Provider native"} /><Property label="Content policy" value={detail.metadata_only ? "Metadata only" : "Mixed"} /><Property label="Session key" value={detail.session_key} mono /></div></DetailSection>
+        {detail.truncated && <p className="fixture-note"><CircleAlert size={15} /> Timeline reached the bounded 2,000-event investigation limit.</p>}
+      </div></div>
+    </>}
+  </aside></div>;
 }
 
 function RuntimeActivityDrawer({ activityId, tab, onTab, onClose, onOpenAsset }: { activityId: string; tab: "overview" | "evidence"; onTab: (tab: string) => void; onClose: () => void; onOpenAsset: (id: string) => void }) {
@@ -2554,31 +2655,71 @@ function RuntimeDetectionRow({ item, onClick }: { item: RuntimeDetection; onClic
   </button>;
 }
 
-function RuntimeDetectionDrawer({ detectionId, tab, onTab, onClose, onOpenActivity, onOpenAsset }: { detectionId: string; tab: DetectionDetailTab; onTab: (tab: string) => void; onClose: () => void; onOpenActivity: (id: string) => void; onOpenAsset: (id: string) => void }) {
+function RuntimeDetectionDrawer({ detectionId, tab, onTab, onClose, onOpenActivity, onOpenAsset, canWrite }: { detectionId: string; tab: DetectionDetailTab; onTab: (tab: string) => void; onClose: () => void; onOpenActivity: (id: string) => void; onOpenAsset: (id: string) => void; canWrite: boolean }) {
   const [detail, setDetail] = useState<RuntimeDetectionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
+  const loadDetail = useCallback(() => {
     setDetail(null); setError(null);
     api.detection(detectionId).then(setDetail).catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to load runtime detection"));
   }, [detectionId]);
+  useEffect(() => { loadDetail(); }, [loadDetail]);
   return <div className="drawer-layer"><button className="drawer-scrim" onClick={onClose} aria-label="Close runtime detection detail" /><aside className="resource-drawer detection-drawer" aria-label="Runtime detection detail">
     {!detail && !error ? <LoadingState compact /> : error ? <ErrorState message={error} subject="runtime detection" /> : detail && <>
       <div className="drawer-header detection-drawer-header"><button className="drawer-close" onClick={onClose}><X /></button><span className="asset-icon large coral"><Gauge /></span><div><span>BEHAVIOR DETECTION</span><h2>{detail.title}</h2><p>{detail.rule_uid}</p></div><span className={`severity-badge ${detail.severity}`}>{titleCase(detail.severity)}</span></div>
       <div className="finding-summary-strip"><span className={`finding-state ${detail.state}`}>{titleCase(detail.state)}</span><span><strong>{Math.round(detail.confidence * 100)}%</strong> evidence confidence</span><span><strong>{detail.activities.length}</strong> activities</span><span><strong>{detail.assets.length}</strong> exact assets</span><span>Last seen <strong>{formatTime(detail.last_seen_at)}</strong></span></div>
       <div className="drawer-tabs">{(["overview", "evidence"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => onTab(item)}>{titleCase(item)}{item === "evidence" && <small>{detail.activities.length + detail.assets.length}</small>}</button>)}</div>
-      <div className="drawer-content">{tab === "overview" ? <RuntimeDetectionOverview detail={detail} onOpenAsset={onOpenAsset} /> : <RuntimeDetectionEvidence detail={detail} onOpenActivity={onOpenActivity} onOpenAsset={onOpenAsset} />}</div>
+      <div className="drawer-content">{tab === "overview" ? <RuntimeDetectionOverview detail={detail} onOpenAsset={onOpenAsset} canWrite={canWrite} onChanged={loadDetail} /> : <RuntimeDetectionEvidence detail={detail} onOpenActivity={onOpenActivity} onOpenAsset={onOpenAsset} />}</div>
     </>}
   </aside></div>;
 }
 
-function RuntimeDetectionOverview({ detail, onOpenAsset }: { detail: RuntimeDetectionDetail; onOpenAsset: (id: string) => void }) {
+function RuntimeDetectionOverview({ detail, onOpenAsset, canWrite, onChanged }: { detail: RuntimeDetectionDetail; onOpenAsset: (id: string) => void; canWrite: boolean; onChanged: () => void }) {
   return <div className="detail-stack">
     <div className="runtime-observation"><span>WHAT DENALI EVALUATED</span><p>{detail.description}</p><small>This conclusion crossed the named rule threshold. It is not a confirmed compromise or proof of malicious intent.</small></div>
     <DetailSection title="Risk and limits"><p className="finding-copy">{detail.risk}</p></DetailSection>
     <DetailSection title="Investigation guidance"><p className="finding-copy">{detail.investigation_guidance}</p></DetailSection>
+    <RuntimeResponsePanel detail={detail} canWrite={canWrite} onChanged={onChanged} />
     <DetailSection title="Affected inventory"><div className="affected-list">{detail.assets.map((asset) => <button key={asset.id} onClick={() => onOpenAsset(asset.id)}><span className={`asset-icon ${meta(asset.kind).color}`}>{(() => { const Icon = meta(asset.kind).icon; return <Icon />; })()}</span><span><strong>{asset.display_name}</strong><small>{meta(asset.kind).label} · {titleCase(asset.role)} · {titleCase(asset.assertion_type)}</small><code>{asset.natural_key}</code></span><em>{Math.round(asset.confidence * 100)}% confidence</em><ChevronRight /></button>)}</div></DetailSection>
     <DetailSection title="Detection properties"><div className="property-grid"><Property label="Rule" value={detail.rule_uid} mono /><Property label="State" value={titleCase(detail.state)} /><Property label="First seen" value={formatTime(detail.first_seen_at)} /><Property label="Last evaluated" value={formatTime(detail.last_evaluated_at)} />{Object.entries(detail.attributes).map(([key, value]) => <Property key={key} label={titleCase(key)} value={typeof value === "object" ? JSON.stringify(value) : String(value)} />)}</div></DetailSection>
   </div>;
+}
+
+function RuntimeResponsePanel({ detail, canWrite, onChanged }: { detail: RuntimeDetectionDetail; canWrite: boolean; onChanged: () => void }) {
+  const [action, setAction] = useState<"preserve_and_investigate" | "disable_agent_runtime" | "revoke_tool_access" | "block_model" | "rotate_execution_identity">("preserve_and_investigate");
+  const [target, setTarget] = useState("");
+  const [justification, setJustification] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const targetKind = action === "disable_agent_runtime" ? "ai_agent" : action === "revoke_tool_access" ? "ai_tool" : action === "block_model" ? "ai_model" : action === "rotate_execution_identity" ? "identity" : null;
+  const eligibleTargets = targetKind ? detail.assets.filter((asset) => asset.kind === targetKind) : detail.assets;
+
+  async function propose() {
+    if (!justification.trim() || (targetKind && !target)) return;
+    setBusy(true); setError(null);
+    try {
+      await api.createRuntimeResponse(detail.id, { action_type: action, target_asset_id: target || null, justification: justification.trim() });
+      setJustification(""); onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to propose response");
+    } finally { setBusy(false); }
+  }
+
+  async function review(responseId: string, decision: "approved" | "rejected") {
+    setBusy(true); setError(null);
+    try {
+      await api.reviewRuntimeResponse(detail.id, responseId, decision);
+      onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to review response");
+    } finally { setBusy(false); }
+  }
+
+  return <DetailSection title="Approval-gated response"><div className="runtime-response-panel">
+    <div className="runtime-response-boundary"><ShieldCheck /><span><strong>Approval is recorded; execution remains manual</strong><small>Denali does not mutate AWS resources in this release. A different organization administrator must approve a proposed action.</small></span></div>
+    {canWrite && <div className="runtime-response-form"><select value={action} onChange={(event) => { setAction(event.target.value as typeof action); setTarget(""); }}><option value="preserve_and_investigate">Preserve and investigate</option><option value="disable_agent_runtime">Disable agent runtime</option><option value="revoke_tool_access">Revoke tool access</option><option value="block_model">Block model</option><option value="rotate_execution_identity">Rotate execution identity</option></select><select value={target} onChange={(event) => setTarget(event.target.value)}><option value="">{targetKind ? "Select exact linked target" : "No single target"}</option>{eligibleTargets.map((asset) => <option value={asset.id} key={asset.id}>{asset.display_name}</option>)}</select><textarea value={justification} onChange={(event) => setJustification(event.target.value)} maxLength={2000} placeholder="Why is this response proportionate to the linked evidence?" /><button className="primary-action" disabled={busy || !justification.trim() || Boolean(targetKind && !target)} onClick={propose}>Propose response</button></div>}
+    {error && <p className="runtime-response-error">{error}</p>}
+    <div className="runtime-response-list">{detail.responses.map((response) => <div key={response.id}><span><strong>{titleCase(response.action_type)}</strong><small>{response.target_name ?? "Detection-wide"} · requested {formatTime(response.requested_at)}</small><p>{response.justification}</p></span><span className={`finding-state ${response.state}`}>{titleCase(response.state)}</span>{canWrite && response.state === "awaiting_approval" && <span className="runtime-response-actions"><button disabled={busy} onClick={() => review(response.id, "rejected")}>Reject</button><button disabled={busy} onClick={() => review(response.id, "approved")}>Approve</button></span>}</div>)}{detail.responses.length === 0 && <p className="finding-copy">No response has been proposed. Investigate the evidence before requesting an action.</p>}</div>
+  </div></DetailSection>;
 }
 
 function RuntimeDetectionEvidence({ detail, onOpenActivity, onOpenAsset }: { detail: RuntimeDetectionDetail; onOpenActivity: (id: string) => void; onOpenAsset: (id: string) => void }) {
@@ -2592,12 +2733,16 @@ function RuntimeDetectionEvidence({ detail, onOpenActivity, onOpenAsset }: { det
 function detectionRuleName(ruleUid: string) {
   if (ruleUid === "DENALI-RUNTIME-ENTRA-FAILURES-001") return "Repeated failed access to an AI application";
   if (ruleUid === "DENALI-RUNTIME-ENTRA-CONSENT-001") return "Consent changed for an unreviewed AI application";
+  if (ruleUid === "DENALI-RUNTIME-AWS-UNDECLARED-MODEL-001") return "Observed model absent from the agent declaration";
+  if (ruleUid === "DENALI-RUNTIME-AWS-UNAPPROVED-TOOL-001") return "Observed tool is not approved";
+  if (ruleUid === "DENALI-RUNTIME-AWS-RISKY-SEQUENCE-001") return "Retrieval followed by a mutating tool action";
   return titleCase(ruleUid);
 }
 
 const AWS_CONNECTION_SCOPES = [
   { id: "aws.bedrock_agents", label: "Bedrock Agents Classic", detail: "Agents and guardrails" },
   { id: "aws.agentcore", label: "Amazon Bedrock AgentCore", detail: "Runtimes, gateways, identities, and memory metadata" },
+  { id: "aws.agent_runtime_activity", label: "AgentCore runtime activity", detail: "Metadata-only CloudWatch sessions, traces, model calls, and tool invocations" },
   { id: "aws.bedrock_activity", label: "Bedrock management activity", detail: "Bounded CloudTrail event history" },
   { id: "aws.bedrock_logging", label: "Invocation logging configuration", detail: "Configuration presence, never prompts or responses" },
   { id: "aws.code_to_cloud", label: "Code-to-cloud deployments", detail: "Lambda, ECS, EKS, and SageMaker endpoint identities and runtime roles" },
@@ -3051,9 +3196,27 @@ function ConnectionsPage({
     setActionNotice(null);
     try {
       const accepted = await api.collectAwsDeployments(connection.id);
-      onOperationAccepted(connection.id, "deployment");
+      const runtimeSelected = connection.declared_scopes.includes("aws.agent_runtime_activity");
+      const deploymentSelected = connection.declared_scopes.some(
+        (scope) => scope !== "aws.agent_runtime_activity",
+      );
+      if (deploymentSelected) onOperationAccepted(connection.id, "deployment");
+      if (runtimeSelected) onOperationAccepted(connection.id, "runtime");
       setActionNotice(accepted.status === "already_running" ? "AWS evidence collection is already running." : "AWS evidence collection accepted. It continues safely in the background.");
-      await waitForCollection(connection, "deployment");
+      const previousDeployment = connection.last_deployment_collection?.completed_at ?? null;
+      const previousRuntime = connection.last_runtime_collection?.completed_at ?? null;
+      await waitForAcceptedOperation({
+        fetchCurrent: () => api.connection(connection.id),
+        isRunning: (current) =>
+          (deploymentSelected && current.deployment_collection_state === "running")
+          || (runtimeSelected && current.runtime_collection_state === "running"),
+        isComplete: (current) =>
+          (!deploymentSelected || current.last_deployment_collection?.completed_at !== previousDeployment)
+          && (!runtimeSelected || current.last_runtime_collection?.completed_at !== previousRuntime),
+        stoppedMessage: "AWS evidence collection stopped before every selected plane recorded a result.",
+        timeoutMessage: "AWS evidence collection is still running. Refresh shortly to see its result.",
+      });
+      await onChanged();
       setActionNotice("AWS evidence collection completed.");
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to collect AWS deployments");
@@ -3358,9 +3521,18 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
   const validating = connection.validation_state === "running" || busy === `validate:${connection.id}` || launching;
   const validatedRole = validation?.credential_state === "passed";
   const waitingForAwsRole = !validatedRole && validating;
-  const collecting = connection.deployment_collection_state === "running" || busy === `collect-aws:${connection.id}`;
+  const collecting = connection.deployment_collection_state === "running"
+    || connection.runtime_collection_state === "running"
+    || busy === `collect-aws:${connection.id}`;
   const collection = connection.last_deployment_collection && "region_count" in connection.last_deployment_collection ? connection.last_deployment_collection : null;
-  const collectionScopeSelected = connection.declared_scopes.some((scope) => ["aws.bedrock_agents", "aws.agentcore", "aws.bedrock_activity", "aws.bedrock_logging", "aws.code_to_cloud"].includes(scope));
+  const runtimeCollection = connection.last_runtime_collection;
+  const runtimeScopeSelected = connection.declared_scopes.includes("aws.agent_runtime_activity");
+  const deploymentScopeSelected = connection.declared_scopes.some((scope) => scope !== "aws.agent_runtime_activity");
+  const collectionScopeSelected = deploymentScopeSelected || runtimeScopeSelected;
+  const collectionComplete = deploymentScopeSelected
+    ? Boolean(collection && collection.failed_count === 0 && collection.partial_count === 0)
+    : runtimeCollection?.state === "complete";
+  const collectionAvailable = deploymentScopeSelected ? Boolean(collection) : Boolean(runtimeCollection);
   const permissions = [...new Set(["ec2:DescribeRegions", ...connection.coverage_plan.flatMap((item) => item.permissions)])].sort();
   const regionDiscovery = validation?.results.find((result) => result.plane === "aws_region_discovery");
   const planeResults = validation?.results.filter((result) => result.plane !== "aws_region_discovery") ?? [];
@@ -3381,7 +3553,7 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>Account, scopes, role ARN, and {coverageMode === "automatic" ? "automatic enabled-region coverage" : "the selected-region boundary"} are recorded.</small></div></div>
       <div className={validatedRole ? "complete" : "current"}><span>{validatedRole ? <Check /> : "2"}</span><div><strong>2. Deploy the CloudFormation stack</strong><small>The stack is managed in {connection.configuration.deployment_region ?? "us-east-1"}; its account-wide IAM role does not restrict inventory to that Region. If this account already has a Denali stack, delete that stack and wait for its role to be removed before launching the replacement. AWS lets you inspect the exact template and permissions before creating it.</small><div className="connection-launch-actions"><button className="primary-action" aria-busy={waitingForAwsRole} disabled={validating || !connection.setup_capabilities.cloudformation_quick_create} onClick={onLaunch}>{waitingForAwsRole ? <RefreshCw className="spin" /> : <ExternalLink />}{waitingForAwsRole ? "Waiting for AWS role…" : "Launch in AWS"}</button><button className="secondary-action" aria-busy={busy === `download:${connection.id}`} disabled={busy === `download:${connection.id}`} onClick={onDownload}>{busy === `download:${connection.id}` ? <RefreshCw className="spin" /> : <Download />}{busy === `download:${connection.id}` ? "Downloading…" : "Download template"}</button></div>{waitingForAwsRole && <small className="connection-inline-progress"><RefreshCw className="spin" />CloudFormation may need several minutes. Denali is continuing the role check in the background.</small>}{!connection.setup_capabilities.cloudformation_quick_create && <small className="launch-unavailable">One-click launch requires the Denali onboarding bucket and runtime principal configuration. Manual template download remains available.</small>}{connection.configuration.onboarding?.template_sha256 && connection.configuration.onboarding.published_at && <small className="launch-record">Last launch prepared {formatTime(connection.configuration.onboarding.published_at)} · template {connection.configuration.onboarding.template_sha256.slice(0, 12)}</small>}</div></div>
       <div className={validating ? "current" : validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Discover Regions and validate every plane</strong><small>Role assumption and account binding run first. Enabled Regions are observed next; each applicable regional plane then succeeds or fails independently.</small>{connection.lifecycle_state === "active" && <button className="primary-action" disabled={validating} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating across AWS…" : validation ? "Validate again" : "Validate connection"}</button>}{validating && <small className="validation-progress-note">For a new launch, Denali retries role assumption every 10 seconds for up to 15 minutes while CloudFormation creates the role. If AWS reports a rollback, review the stack Events; the final failure appears here when the validation window ends.</small>}</div></div>
-      <div className={collection ? (collection.failed_count === 0 && collection.partial_count === 0 ? "complete" : "attention") : "pending"}><span>{collection?.failed_count === 0 && collection?.partial_count === 0 ? <Check /> : "4"}</span><div><strong>4. Collect declared AWS evidence</strong><small>Denali collects the selected Bedrock, AgentCore, activity, logging-configuration, and deployment planes across the declared Region boundary without reading code, prompts, responses, or environment values.</small>{connection.lifecycle_state === "active" && collectionScopeSelected && <button className="primary-action" disabled={collecting || validating || !validatedRole} onClick={onCollectAws}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting AWS evidence…" : collection ? "Collect evidence again" : "Collect AWS evidence"}</button>}{!collectionScopeSelected && <small className="launch-unavailable">This connection has no supported AWS evidence scope. Create a new plan and select at least one collection plane.</small>}{collection && <small className="validation-progress-note">{collection.region_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
+      <div className={collectionAvailable ? (collectionComplete ? "complete" : "attention") : "pending"}><span>{collectionComplete ? <Check /> : "4"}</span><div><strong>4. Collect declared AWS evidence</strong><small>Denali collects the selected Bedrock, AgentCore, activity, logging-configuration, and deployment planes across the declared Region boundary without reading code, prompts, responses, or environment values.</small>{connection.lifecycle_state === "active" && collectionScopeSelected && <button className="primary-action" disabled={collecting || validating || !validatedRole} onClick={onCollectAws}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting AWS evidence…" : collectionAvailable ? "Collect evidence again" : "Collect AWS evidence"}</button>}{!collectionScopeSelected && <small className="launch-unavailable">This connection has no supported AWS evidence scope. Create a new plan and select at least one collection plane.</small>}{collection && <small className="validation-progress-note">{collection.region_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}{runtimeCollection && <small className="validation-progress-note">AgentCore sensor: {runtimeCollection.activities ?? 0} new spans · {runtimeCollection.partial_regions ?? 0} partial Regions · {runtimeCollection.failed_regions ?? 0} failed Regions · metadata only · finished {formatTime(runtimeCollection.completed_at)}</small>}</div></div>
     </div>
     <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed account {validation.account_id_observed ?? "not established"}</small></div>{regionDiscovery && <div className={`region-discovery ${regionDiscovery.state}`}><span>{regionDiscovery.state === "passed" ? <CircleCheck /> : regionDiscovery.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{coverageMode === "automatic" ? "Automatic enabled-region coverage" : "Selected-region coverage"}</strong><p>{regionDiscovery.detail}</p>{regionDiscovery.discovered_regions && regionDiscovery.discovered_regions.length > 0 && <small>{regionDiscovery.discovered_regions.join(", ")}</small>}{regionDiscovery.excluded_enabled_regions && regionDiscovery.excluded_enabled_regions.length > 0 && <small className="excluded-regions">Outside declared scope: {regionDiscovery.excluded_enabled_regions.join(", ")}</small>}</div></div>}<div className="validation-plane-rollup">{planeSummaries.map((summary) => <div className={summary.failed || summary.unknown ? "attention" : "complete"} key={summary.label}><span>{summary.failed || summary.unknown ? <CircleAlert /> : <CircleCheck />}</span><div><strong>{summary.label}</strong><small>{summary.total} Region checks</small></div><div className="rollup-counts"><b className="passed">{summary.passed} passed</b>{summary.notApplicable > 0 && <b>{summary.notApplicable} not applicable</b>}{summary.failed > 0 && <b className="failed">{summary.failed} failed</b>}{summary.unknown > 0 && <b className="failed">{summary.unknown} unknown</b>}</div></div>)}</div><details className="plane-validation-results"><summary>View all {planeResults.length} raw plane/Region results</summary><div className="validation-grid">{planeResults.map((result) => <div key={`${result.scope}:${result.plane}:${result.region}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.region} · {result.state === "not_applicable" ? "Not applicable" : titleCase(result.plane)}</small><p>{result.detail}</p></div></div>)}</div></details></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>No coverage conclusion is available until the stack is deployed and validation runs.</small></span></div>}</div>
     <details className="connection-permissions"><summary>Review {permissions.length} declared permissions</summary><div>{permissions.map((permission) => <code key={permission}>{permission}</code>)}</div><p>The downloaded role also includes bounded read-only permissions for future explicit stack scopes. Those custom stack planes are not configured or claimed here.</p></details>

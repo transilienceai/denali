@@ -31,6 +31,7 @@ Status terms in this README are deliberately independent:
 | Self-service GitHub connection | **Shipped** | **Locally accepted** through the organization-owned GitHub App against 18 exact repositories, with all 54 repository/plane validations passing |
 | GCP and Azure code-to-cloud correlation | **Shipped** | **Locally accepted** against independently observed, private scale-to-zero fixtures with exact source identity, PostgreSQL reporting, and browser evidence |
 | AWS Lambda, ECS, EKS, and SageMaker code-to-cloud correlation | **Shipped** | **Locally accepted** against exact live account/Region validation and eight independent deployment collection planes |
+| AWS AgentCore runtime detection and response | **Shipped** | **Pending live acceptance**. Metadata-only CloudWatch span collection, five-minute durable polling, exact session correlation, drift/tool/sequence detections, and manual maker-checker response approval pass automated and PostgreSQL verification; hosted AWS create/update, collect, investigate, and approve remains required |
 | Shared EKS, GKE, and AKS workload correlation | **Shipped** | **Locally accepted** through a live, control-plane-only EKS fixture with exact workload UID/revision, service-account, image-digest, negative-case, persistence, API, and teardown evidence; GKE and AKS workload identities remain covered by automated contract tests |
 | GitHub source-to-cloud correlation | **Shipped** | **Locally accepted** against two immutable GitHub revisions, with all source/inventory/posture/correlation planes complete and two independently observed runtime links proven |
 | Two-application code-to-cloud Golden Path | **Shipped** | Anna on AWS and Summit on GCP are bounded by a versioned reset/verify manifest with exact source-to-runtime links, declared model/tool/action context, real Vertex activity, Entra discovery context, three image vulnerabilities, two correlated governance issues, and a dedicated dashboard story |
@@ -50,7 +51,8 @@ Denali presents the following product surfaces in the web application and API:
 - GitHub-backed, immutable-revision source collection and code-to-cloud views that require
   exact deployment identifiers, preserve unmatched and ambiguous candidates, and keep
   artifact identity separate from unattested source revision claims.
-- Provider-neutral runtime activity plus deterministic, evidence-linked runtime detections.
+- Provider-neutral runtime activity plus deterministic, evidence-linked runtime detections,
+  ordered AWS AgentCore session investigations, and approval-gated manual response requests.
 - Source coverage that keeps complete, partial, failed, unsupported, and unknown states
   visible.
 - Stable application routes with direct deep links and browser Back/Forward navigation.
@@ -65,12 +67,12 @@ Implemented collection and import paths include:
 | --- | --- |
 | Source repositories | Local or GitHub App-backed static Python, TypeScript, JavaScript, Terraform, SAM/CloudFormation YAML and JSON, Cloud Run YAML, Kubernetes YAML, ARM JSON, and Bicep analysis; bounded repository posture; exact-identifier code-to-cloud correlation |
 | MCP Streamable HTTP | Initialization and paginated `tools/list` observation without tool invocation |
-| AWS | Bedrock Agents Classic, AgentCore, bounded Lambda/ECS/EKS/SageMaker deployment inventory, CloudFormation-stack inventory and posture, and Bedrock management activity from CloudTrail Event History |
+| AWS | Bedrock Agents Classic, AgentCore, bounded Lambda/ECS/EKS/SageMaker deployment inventory, CloudFormation-stack inventory and posture, Bedrock management activity from CloudTrail Event History, and metadata-only AgentCore OpenTelemetry/OpenInference spans from CloudWatch Logs |
 | Google Cloud | Cloud Run, Cloud Run functions Gen2, and GKE cluster inventory through Cloud Asset RESOURCE snapshots; Vertex AI audit activity from Cloud Logging |
 | Microsoft Azure | Container Apps, Function Apps, and AKS cluster inventory through Azure Resource Graph with exact Azure code-to-cloud identity; Entra activity remains a separate connector |
 | Microsoft Entra | AI application, permission, sign-in, and application-management collection through a separate Microsoft Graph connector |
 | External findings and scanners | OCSF findings, Syft SBOMs, and Grype vulnerability reports |
-| Runtime exports | AWS Bedrock CloudTrail, Google Cloud Vertex AI, Google Workspace Gemini, and Microsoft Entra AI sign-in JSON |
+| Runtime exports | AWS Bedrock CloudTrail, Google Cloud Vertex AI, Google Workspace Gemini, and Microsoft Entra AI sign-in JSON; hosted AgentCore spans use the keyless AWS connection instead of browser upload |
 
 Provider validation and collection remain separate boundaries. A healthy connection does not
 claim that collection ran. GitHub validation reads no source blobs; an explicit collection
@@ -207,7 +209,8 @@ Start with the product and evidence boundaries, then follow only the slice being
   [deployment artifact provenance](docs/architecture/0012-deployment-artifact-provenance.md)
 - [Provider-neutral runtime activity](docs/architecture/0015-provider-neutral-runtime-activity.md),
   [Entra AI application discovery and runtime](docs/architecture/0016-entra-shadow-ai-and-runtime.md), and
-  [runtime detections](docs/architecture/0017-evidence-led-runtime-detections.md)
+  [runtime detections](docs/architecture/0017-evidence-led-runtime-detections.md), including
+  [AWS AgentCore AIDR](docs/architecture/0035-aws-agentcore-runtime-detection-and-response.md)
 
 Product-preview definitions remain available for
 [inventory](docs/product/inventory-preview.md),

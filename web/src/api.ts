@@ -29,10 +29,13 @@ import type {
   RuntimeActivity,
   RuntimeActivityDetail,
   RuntimeActivitySummary,
+  RuntimeSessionDetail,
+  RuntimeSessionSummary,
   RuntimeDetection,
   RuntimeDetectionDetail,
   RuntimeDetectionEvaluation,
   RuntimeDetectionSummary,
+  RuntimeResponseRequest,
   Summary,
   Vulnerability,
   VulnerabilityDetail,
@@ -290,12 +293,42 @@ export const api = {
     ),
   activityDetail: (id: string) =>
     request<RuntimeActivityDetail>(`/v1/activity/${id}`),
+  runtimeSessions: () =>
+    request<{ items: RuntimeSessionSummary[] }>(
+      "/v1/runtime/sessions?provider=aws_agentcore&limit=200",
+    ),
+  runtimeSession: (sessionKey: string) =>
+    request<RuntimeSessionDetail>(
+      `/v1/runtime/sessions/${encodeURIComponent(sessionKey)}`,
+    ),
+  runtimeSessionExport: (sessionKey: string) =>
+    requestBlob(`/v1/runtime/sessions/${encodeURIComponent(sessionKey)}/export`),
   detectionSummary: () => request<RuntimeDetectionSummary>("/v1/detections/summary"),
   detections: () => request<{ items: RuntimeDetection[] }>("/v1/detections?limit=500"),
   detectionEvaluations: () =>
     request<{ items: RuntimeDetectionEvaluation[] }>("/v1/detections/evaluations"),
   detection: (id: string) =>
     request<RuntimeDetectionDetail>(`/v1/detections/${id}`),
+  createRuntimeResponse: (
+    detectionId: string,
+    input: {
+      action_type: RuntimeResponseRequest["action_type"];
+      target_asset_id?: string | null;
+      justification: string;
+    },
+  ) => request<RuntimeResponseRequest>(`/v1/detections/${detectionId}/responses`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  }),
+  reviewRuntimeResponse: (
+    detectionId: string,
+    responseId: string,
+    decision: "approved" | "rejected",
+    reviewNote?: string,
+  ) => request<RuntimeResponseRequest>(
+    `/v1/detections/${detectionId}/responses/${responseId}`,
+    { method: "PATCH", body: JSON.stringify({ decision, review_note: reviewNote }) },
+  ),
   governance: (
     id: string,
     update: { status: Asset["governance_status"]; owner?: string | null; notes?: string | null },

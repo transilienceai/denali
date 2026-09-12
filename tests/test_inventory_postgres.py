@@ -37,6 +37,9 @@ from denali.connectors.code_to_cloud import CodeToCloudConnector, DeploymentTarg
 from denali.connectors.demo import demo_batch, demo_findings_batch
 from denali.connectors.repository_posture import RepositoryPostureConnector
 from denali.detections import (
+    AWS_RISKY_SEQUENCE_RULE_UID,
+    AWS_UNAPPROVED_TOOL_RULE_UID,
+    AWS_UNDECLARED_MODEL_RULE_UID,
     ENTRA_CONSENT_RULE_UID,
     ENTRA_FAILURE_RULE_UID,
     UNREVIEWED_MODEL_RULE_UID,
@@ -1591,6 +1594,9 @@ def test_runtime_detections_are_evidence_linked_and_idempotent(repository) -> No
         ENTRA_FAILURE_RULE_UID: ("complete", 1),
         ENTRA_CONSENT_RULE_UID: ("complete", 1),
         UNREVIEWED_MODEL_RULE_UID: ("unknown", 0),
+        AWS_UNDECLARED_MODEL_RULE_UID: ("unknown", 0),
+        AWS_UNAPPROVED_TOOL_RULE_UID: ("unknown", 0),
+        AWS_RISKY_SEQUENCE_RULE_UID: ("unknown", 0),
     }
 
 

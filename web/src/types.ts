@@ -202,6 +202,8 @@ export type Connection = {
   last_evidence_collection?: EntraEvidenceCollection | null;
   deployment_collection_state?: "idle" | "running";
   last_deployment_collection?: GcpDeploymentCollection | AzureDeploymentCollection | AwsDeploymentCollection | null;
+  runtime_collection_state?: "idle" | "running";
+  last_runtime_collection?: AwsAgentRuntimeCollection | null;
   setup_capabilities: {
     cloudformation_quick_create: boolean;
     azure_cloud_shell: boolean;
@@ -368,6 +370,24 @@ export type AwsDeploymentCollection = {
     assets?: number;
     ai_workloads?: number;
   }>;
+  detail?: string;
+};
+
+export type AwsAgentRuntimeCollection = {
+  state: "complete" | "partial" | "failed";
+  completed_at: string;
+  regions?: number;
+  activities?: number;
+  duplicates?: number;
+  linked_entities?: number;
+  unresolved_entities?: number;
+  partial_regions?: number;
+  failed_regions?: number;
+  window_start?: string;
+  window_end?: string;
+  content_policy?: "metadata_only";
+  catchup_capped?: boolean;
+  cursor_advance_safe?: boolean;
   detail?: string;
 };
 
@@ -949,6 +969,13 @@ export type RuntimeActivity = {
   source_observed_at: string;
   session_uid: string | null;
   trace_uid: string | null;
+  session_key: string | null;
+  span_uid: string | null;
+  parent_span_uid: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  telemetry_convention: string | null;
+  content_policy: "metadata_only" | "redacted" | "explicit_content";
   evidence: Evidence;
   attributes: Record<string, unknown>;
   ingested_at: string;
@@ -991,6 +1018,50 @@ export type RuntimeActivitySummary = {
   by_category: Partial<Record<ActivityCategory, number>>;
 };
 
+export type RuntimeSessionSummary = {
+  session_key: string;
+  provider: string;
+  connection_id: string;
+  session_uid: string | null;
+  account_uid: string | null;
+  region: string | null;
+  started_at: string;
+  completed_at: string;
+  last_ingested_at: string;
+  activity_count: number;
+  trace_count: number;
+  agent_invocation_count: number;
+  model_invocation_count: number;
+  tool_invocation_count: number;
+  retrieval_count: number;
+  failure_count: number;
+  success_count: number;
+  total_duration_ms: number | null;
+  metadata_only: boolean;
+  outcome: "success" | "failure" | "unknown";
+  correlated_entity_count: number;
+  detection_count: number;
+  agent_names: string[] | null;
+};
+
+export type RuntimeSessionDetection = {
+  id: string;
+  rule_uid: string;
+  title: string;
+  severity: FindingSeverity;
+  state: string;
+  confidence: number;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+export type RuntimeSessionDetail = RuntimeSessionSummary & {
+  activities: RuntimeActivityDetail[];
+  detections: RuntimeSessionDetection[];
+  coverage: Coverage[];
+  truncated: boolean;
+};
+
 export type RuntimeDetection = {
   id: string;
   correlation_key: string;
@@ -1031,9 +1102,28 @@ export type RuntimeDetectionAsset = {
   evidence: Evidence;
 };
 
+export type RuntimeResponseRequest = {
+  id: string;
+  detection_id: string;
+  target_asset_id: string | null;
+  target_kind: string | null;
+  target_natural_key: string | null;
+  target_name: string | null;
+  action_type: "preserve_and_investigate" | "disable_agent_runtime" | "revoke_tool_access" | "block_model" | "rotate_execution_identity";
+  justification: string;
+  state: "awaiting_approval" | "approved" | "rejected" | "cancelled";
+  execution_mode: "manual";
+  requested_by: string;
+  reviewed_by: string | null;
+  review_note: string | null;
+  requested_at: string;
+  reviewed_at: string | null;
+};
+
 export type RuntimeDetectionDetail = Omit<RuntimeDetection, "activity_count" | "asset_count"> & {
   activities: RuntimeDetectionActivity[];
   assets: RuntimeDetectionAsset[];
+  responses: RuntimeResponseRequest[];
 };
 
 export type RuntimeDetectionSummary = {

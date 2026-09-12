@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from denali.connections.aws import render_cloudformation
 
-AWS_ONBOARDING_TEMPLATE_VERSION = "denali-aws-readonly-role-v1"
+AWS_ONBOARDING_TEMPLATE_VERSION = "denali-aws-readonly-role-v2-agent-runtime"
 _PRINCIPAL_ARN_PATTERN = re.compile(
     r"^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:(role|user)/.+$"
 )

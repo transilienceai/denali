@@ -1,6 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
 from denali.detections import (
+    evaluate_aws_risky_action_sequence,
+    evaluate_aws_unapproved_tool_invocation,
+    evaluate_aws_undeclared_model_invocation,
     evaluate_repeated_failed_ai_signins,
     evaluate_unreviewed_ai_consent,
     evaluate_unreviewed_model_invocation,
@@ -180,12 +183,8 @@ def test_successful_invocation_of_exact_unreviewed_model_creates_detection() -> 
         title="Generate content",
         occurred_at=NOW,
         entities=(
-            DetectionActivityEntity(
-                "actor", "summit@example.com", "Summit service account"
-            ),
-            DetectionActivityEntity(
-                "model", model.natural_key, model.display_name, model.id
-            ),
+            DetectionActivityEntity("actor", "summit@example.com", "Summit service account"),
+            DetectionActivityEntity("model", model.natural_key, model.display_name, model.id),
         ),
     )
 
@@ -221,3 +220,241 @@ def test_unreviewed_model_rule_requires_exact_model_link() -> None:
 
     assert evaluation.candidates == ()
     assert evaluation.incomplete_candidates == 1
+
+
+def _aws_assets(*, declared_model: bool = False, approved_tool: bool = False):
+    agent = DetectionAsset(
+        id="agent-1",
+        kind="ai_agent",
+        natural_key="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/sales",
+        display_name="Sales agent",
+        governance_status="approved",
+        lifecycle_state="active",
+    )
+    model = DetectionAsset(
+        id="model-aws-1",
+        kind="ai_model",
+        natural_key="aws:bedrock:model:global.anthropic.claude-sonnet-4-6",
+        display_name="Claude Sonnet 4.6",
+        governance_status="approved",
+        lifecycle_state="active",
+        attributes={"_denali_declared": declared_model},
+    )
+    tool = DetectionAsset(
+        id="tool-1",
+        kind="ai_tool",
+        natural_key="arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/gw#target/slack",
+        display_name="send_message",
+        governance_status="approved" if approved_tool else "unreviewed",
+        lifecycle_state="active",
+    )
+    return agent, model, tool
+
+
+def _aws_activity(
+    activity_id: str,
+    category: str,
+    *,
+    offset_seconds: int,
+    entities: tuple[DetectionActivityEntity, ...],
+    outcome: str = "success",
+    attributes: dict | None = None,
+    connection_id: str = "connection-1",
+    session_key: str = "session-key-1",
+) -> DetectionActivity:
+    return DetectionActivity(
+        id=activity_id,
+        category=category,
+        outcome=outcome,
+        title=activity_id,
+        occurred_at=NOW + timedelta(seconds=offset_seconds),
+        provider="aws_agentcore",
+        connection_id=connection_id,
+        session_key=session_key,
+        session_uid="session-1",
+        trace_uid="trace-1",
+        attributes=attributes or {},
+        entities=entities,
+    )
+
+
+def test_aws_exact_observed_model_without_declaration_is_drift() -> None:
+    agent, model, _ = _aws_assets()
+    invocation = _aws_activity(
+        "model-span",
+        "model_invocation",
+        offset_seconds=1,
+        entities=(DetectionActivityEntity("model", model.natural_key, asset_id=model.id),),
+    )
+    root = _aws_activity(
+        "agent-span",
+        "agent_invocation",
+        offset_seconds=0,
+        entities=(DetectionActivityEntity("agent", agent.natural_key, asset_id=agent.id),),
+    )
+
+    evaluation = evaluate_aws_undeclared_model_invocation(
+        DetectionSnapshot((root, invocation), (agent, model)),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    assert {link.asset_id for link in evaluation.candidates[0].assets} == {
+        agent.id,
+        model.id,
+    }
+
+
+def test_aws_declared_model_is_not_reported_as_drift() -> None:
+    agent, model, _ = _aws_assets(declared_model=True)
+    root = _aws_activity(
+        "agent-span",
+        "agent_invocation",
+        offset_seconds=0,
+        entities=(DetectionActivityEntity("agent", agent.natural_key, asset_id=agent.id),),
+    )
+    invocation = _aws_activity(
+        "model-span",
+        "model_invocation",
+        offset_seconds=1,
+        entities=(DetectionActivityEntity("model", model.natural_key, asset_id=model.id),),
+    )
+
+    evaluation = evaluate_aws_undeclared_model_invocation(
+        DetectionSnapshot((root, invocation), (agent, model)),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert evaluation.candidates == ()
+
+
+def test_aws_unapproved_exact_tool_invocation_is_detected() -> None:
+    agent, _, tool = _aws_assets()
+    root = _aws_activity(
+        "agent-span",
+        "agent_invocation",
+        offset_seconds=0,
+        entities=(DetectionActivityEntity("agent", agent.natural_key, asset_id=agent.id),),
+    )
+    invocation = _aws_activity(
+        "tool-span",
+        "tool_invocation",
+        offset_seconds=2,
+        entities=(DetectionActivityEntity("tool", tool.natural_key, asset_id=tool.id),),
+        attributes={"gen_ai.tool.name": "send_message"},
+    )
+
+    evaluation = evaluate_aws_unapproved_tool_invocation(
+        DetectionSnapshot((root, invocation), (agent, tool)),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    assert evaluation.candidates[0].confidence == 1.0
+
+
+def test_aws_sessions_are_scoped_by_connection_key_not_raw_session_id() -> None:
+    agent, model, _ = _aws_assets()
+    other_agent = DetectionAsset(
+        id="agent-2",
+        kind="ai_agent",
+        natural_key="arn:aws:bedrock-agentcore:us-west-2:210987654321:runtime/support",
+        display_name="Support agent",
+        governance_status="approved",
+        lifecycle_state="active",
+    )
+    first_root = _aws_activity(
+        "agent-span-1",
+        "agent_invocation",
+        offset_seconds=0,
+        entities=(DetectionActivityEntity("agent", agent.natural_key, asset_id=agent.id),),
+    )
+    first_model = _aws_activity(
+        "model-span-1",
+        "model_invocation",
+        offset_seconds=1,
+        entities=(DetectionActivityEntity("model", model.natural_key, asset_id=model.id),),
+    )
+    second_root = _aws_activity(
+        "agent-span-2",
+        "agent_invocation",
+        offset_seconds=0,
+        entities=(
+            DetectionActivityEntity(
+                "agent", other_agent.natural_key, asset_id=other_agent.id
+            ),
+        ),
+        connection_id="connection-2",
+        session_key="session-key-2",
+    )
+
+    evaluation = evaluate_aws_undeclared_model_invocation(
+        DetectionSnapshot((first_root, first_model, second_root), (agent, other_agent, model)),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    assert {link.asset_id for link in evaluation.candidates[0].assets} == {
+        agent.id,
+        model.id,
+    }
+
+
+def test_aws_unresolved_tool_requires_complete_inventory_coverage() -> None:
+    agent, _, _ = _aws_assets()
+    root = _aws_activity(
+        "agent-span",
+        "agent_invocation",
+        offset_seconds=0,
+        entities=(DetectionActivityEntity("agent", agent.natural_key, asset_id=agent.id),),
+    )
+    invocation = _aws_activity(
+        "tool-span",
+        "tool_invocation",
+        offset_seconds=2,
+        entities=(DetectionActivityEntity("tool", "mystery", "mystery"),),
+    )
+
+    evaluation = evaluate_aws_unapproved_tool_invocation(
+        DetectionSnapshot((root, invocation), (agent,)),
+        coverage_state=CoverageState.PARTIAL,
+        evaluated_at=NOW,
+    )
+
+    assert evaluation.candidates == ()
+    assert evaluation.incomplete_candidates == 1
+
+
+def test_aws_retrieval_then_mutating_tool_is_ordered_sequence() -> None:
+    agent, _, tool = _aws_assets(approved_tool=True)
+    root = _aws_activity(
+        "agent-span",
+        "agent_invocation",
+        offset_seconds=0,
+        entities=(DetectionActivityEntity("agent", agent.natural_key, asset_id=agent.id),),
+    )
+    retrieval = _aws_activity("retrieve-span", "retrieval", offset_seconds=5, entities=())
+    invocation = _aws_activity(
+        "tool-span",
+        "tool_invocation",
+        offset_seconds=15,
+        entities=(DetectionActivityEntity("tool", tool.natural_key, asset_id=tool.id),),
+        attributes={"gen_ai.tool.name": "send_message"},
+    )
+
+    evaluation = evaluate_aws_risky_action_sequence(
+        DetectionSnapshot((root, invocation, retrieval), (agent, tool)),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    assert [link.activity_id for link in evaluation.candidates[0].activities] == [
+        retrieval.id,
+        invocation.id,
+    ]
+    assert evaluation.candidates[0].attributes["elapsed_ms"] == 10_000

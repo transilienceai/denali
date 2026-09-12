@@ -48,6 +48,13 @@ successful evidence run, and an absent scan or activity plane must not be render
 8. A successful durable vulnerability evidence import evaluates tenant issue rules before the
    import job completes. Evaluation failures use the import job's bounded retry path, so scanner
    evidence cannot appear current while the issue view remains silently stale.
+9. AWS AgentCore activity uses a five-minute Modal schedule that performs only bounded,
+   identifier-only eligibility selection and durable job dispatch. Provider reads, evidence
+   ingestion, detection evaluation, retries, and completion still occur inside the existing
+   PostgreSQL job and Modal worker boundary. The scheduler neither uses process-local state nor
+   claims streaming delivery. Cursor advancement comes only from a durable job whose regional
+   reads were safe to advance; bounded catch-up exposes, rather than conceals, an outage over 24
+   hours.
 
 Vulnerability collection is not inferred from a cloud connection. It still requires a bounded SBOM
 and scanner report for an exact artifact or target. Missing vulnerability coverage is therefore

@@ -38,7 +38,13 @@ class DetectionActivity:
     outcome: str
     title: str
     occurred_at: datetime
+    provider: str | None = None
+    connection_id: str | None = None
+    session_key: str | None = None
+    session_uid: str | None = None
     trace_uid: str | None = None
+    span_uid: str | None = None
+    parent_span_uid: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
     evidence: dict[str, Any] = field(default_factory=dict)
     entities: tuple[DetectionActivityEntity, ...] = ()
@@ -68,6 +74,7 @@ class DetectionAsset:
 class DetectionSnapshot:
     activities: tuple[DetectionActivity, ...]
     assets: tuple[DetectionAsset, ...]
+    truncated: bool = False
 
 
 @dataclass(frozen=True, slots=True)

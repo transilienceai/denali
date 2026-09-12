@@ -30,6 +30,9 @@ function collectionState(connection: Connection) {
   if (connection.provider === "entra" || connection.provider === "google_workspace") {
     return connection.evidence_collection_state;
   }
+  if (connection.provider === "aws" && connection.runtime_collection_state === "running") {
+    return connection.runtime_collection_state;
+  }
   return connection.deployment_collection_state;
 }
 

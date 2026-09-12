@@ -150,15 +150,23 @@ def _queue_collection(repository, tenant_id: str, connection_id: str, kind: str)
 def _queue_primary_collection(tenant_id: str, connection_id: str, provider: str) -> None:
     from denali.store.repository import PostgresInventoryRepository
 
+    repository = PostgresInventoryRepository(os.environ["DENALI_DSN"])
+    if provider == "aws":
+        from denali.connections import AWS_SCOPE_AGENT_RUNTIME_ACTIVITY
+
+        connection = repository.get_connection_validation_target(tenant_id, connection_id)
+        if connection is None:
+            raise RuntimeError("validated AWS connection is unavailable")
+        scopes = set(connection.get("declared_scopes", []))
+        if scopes - {AWS_SCOPE_AGENT_RUNTIME_ACTIVITY}:
+            _queue_collection(repository, tenant_id, connection_id, "aws_deployments")
+        if AWS_SCOPE_AGENT_RUNTIME_ACTIVITY in scopes:
+            _queue_collection(repository, tenant_id, connection_id, "aws_agent_runtime")
+        return
     kind = _PRIMARY_COLLECTION_KINDS.get(provider)
     if kind is None:
         raise RuntimeError("validated provider has no collection workflow")
-    _queue_collection(
-        PostgresInventoryRepository(os.environ["DENALI_DSN"]),
-        tenant_id,
-        connection_id,
-        kind,
-    )
+    _queue_collection(repository, tenant_id, connection_id, kind)
 
 
 @app.function(
@@ -176,6 +184,9 @@ def collection_worker(job_id: str) -> None:
         _google_workspace_operator_from_environment,
     )
     from denali.api.collection import run_durable_collection_job
+    from denali.connectors.aws_agent_runtime_activity import (
+        AwsConnectionAgentRuntimeCollector,
+    )
     from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
     from denali.connectors.azure_deployments import AzureConnectionDeploymentCollector
     from denali.connectors.azure_repos_repository import AzureReposRepositoryCollector
@@ -195,6 +206,7 @@ def collection_worker(job_id: str) -> None:
         PostgresInventoryRepository(os.environ["DENALI_DSN"]),
         {
             "aws_deployments": AwsConnectionDeploymentCollector(),
+            "aws_agent_runtime": AwsConnectionAgentRuntimeCollector(),
             "azure_deployments": AzureConnectionDeploymentCollector(),
             "entra_ai": EntraConnectionCollector(entra_client) if entra_client else None,
             "gcp_deployments": GcpConnectionDeploymentCollector(),
@@ -215,7 +227,7 @@ def collection_worker(job_id: str) -> None:
 
 def _after_collection_succeeded(
     tenant_id: str,
-    _connection_id: str,
+    connection_id: str,
     collection_kind: str,
     _result: dict[str, object],
 ) -> None:
@@ -240,6 +252,31 @@ def _after_collection_succeeded(
 def _dispatch_collection(job_id: str) -> str:
     call = collection_worker.spawn(job_id)
     return call.object_id
+
+
+@app.function(
+    image=image,
+    secrets=runtime_secrets,
+    schedule=modal.Period(minutes=5),
+    timeout=300,
+    retries=0,
+    **_region_options(),
+)
+def schedule_aws_agent_runtime_collection() -> dict[str, int]:
+    """Queue restart-safe AgentCore telemetry jobs; never collect in the scheduler."""
+
+    from denali.api.collection import queue_due_aws_agent_runtime_collections
+    from denali.store.repository import PostgresInventoryRepository
+
+    repository = PostgresInventoryRepository(os.environ["DENALI_DSN"])
+    return queue_due_aws_agent_runtime_collections(
+        repository,
+        lambda tenant_id, connection_id: _queue_collection(
+            repository, tenant_id, connection_id, "aws_agent_runtime"
+        ),
+        interval_minutes=5,
+        limit=200,
+    )
 
 
 @app.function(
