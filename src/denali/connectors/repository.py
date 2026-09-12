@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,6 +66,12 @@ _TEST_FILE_RE = re.compile(
 )
 _GENERATED_FILE_RE = re.compile(r"(?:^|\.)generated\.(?:py|[cm]?[jt]sx?)$", re.IGNORECASE)
 _NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+_PYTHON_PACKAGE_NORMALIZE_RE = re.compile(r"[-_.]+")
+_PYTHON_REQUIREMENT_RE = re.compile(
+    r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?:\[[^\]]+\])?\s*(?P<constraint>(?:===|==|~=|!=|<=|>=|<|>).*)?$"
+)
+_SAFE_DEPENDENCY_CONSTRAINT_RE = re.compile(r"^[A-Za-z0-9*^~<>=!.,|+_\-\s]{1,200}$")
 
 _FRAMEWORKS = {
     "autogen": "AutoGen",
@@ -149,50 +156,260 @@ class CapabilitySpec:
     action: RelationshipKind
 
 
+@dataclass(frozen=True, slots=True)
+class DependencySpec:
+    kind: AssetKind
+    natural_key: str
+    display_name: str
+    family: str
+    provider: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DependencyDeclaration:
+    ecosystem: str
+    package: str
+    constraint: str | None
+    scope: str
+    line: int
+
+
+_PYTHON_DEPENDENCIES = {
+    "anthropic": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:pypi:anthropic",
+        "Anthropic Python SDK",
+        "anthropic_sdk",
+        "anthropic",
+    ),
+    "autogen": DependencySpec(AssetKind.AI_FRAMEWORK, "pypi:autogen", "AutoGen", "autogen"),
+    "autogen-agentchat": DependencySpec(
+        AssetKind.AI_FRAMEWORK, "pypi:autogen", "AutoGen", "autogen"
+    ),
+    "azure-ai-inference": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:pypi:azure-ai-inference",
+        "Azure AI Inference SDK",
+        "azure_ai_inference_sdk",
+        "azure_ai",
+    ),
+    "crewai": DependencySpec(AssetKind.AI_FRAMEWORK, "pypi:crewai", "CrewAI", "crewai"),
+    "dspy-ai": DependencySpec(AssetKind.AI_FRAMEWORK, "pypi:dspy", "DSPy", "dspy"),
+    "fastmcp": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:pypi:fastmcp",
+        "FastMCP SDK",
+        "mcp_sdk",
+        "model_context_protocol",
+    ),
+    "google-generativeai": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:pypi:google-generativeai",
+        "Google Generative AI SDK",
+        "google_generative_ai_sdk",
+        "google_ai",
+    ),
+    "google-genai": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:pypi:google-genai",
+        "Google Gen AI SDK",
+        "google_genai_sdk",
+        "google_ai",
+    ),
+    "langchain": DependencySpec(AssetKind.AI_FRAMEWORK, "pypi:langchain", "LangChain", "langchain"),
+    "langgraph": DependencySpec(AssetKind.AI_FRAMEWORK, "pypi:langgraph", "LangGraph", "langgraph"),
+    "llama-cpp-python": DependencySpec(
+        AssetKind.AI_FRAMEWORK, "pypi:llama_cpp", "llama.cpp", "llama_cpp"
+    ),
+    "llama-index": DependencySpec(
+        AssetKind.AI_FRAMEWORK, "pypi:llama_index", "LlamaIndex", "llama_index"
+    ),
+    "mcp": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:pypi:mcp",
+        "Model Context Protocol SDK",
+        "mcp_sdk",
+        "model_context_protocol",
+    ),
+    "mistralai": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:pypi:mistralai",
+        "Mistral AI SDK",
+        "mistral_sdk",
+        "mistral",
+    ),
+    "openai": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:pypi:openai",
+        "OpenAI Python SDK",
+        "openai_sdk",
+        "openai",
+    ),
+    "openai-agents": DependencySpec(
+        AssetKind.AI_FRAMEWORK,
+        "pypi:openai_agents",
+        "OpenAI Agents SDK",
+        "openai_agents",
+        "openai",
+    ),
+    "pydantic-ai": DependencySpec(
+        AssetKind.AI_FRAMEWORK, "pypi:pydantic_ai", "Pydantic AI", "pydantic_ai"
+    ),
+    "pyautogen": DependencySpec(AssetKind.AI_FRAMEWORK, "pypi:autogen", "AutoGen", "autogen"),
+    "semantic-kernel": DependencySpec(
+        AssetKind.AI_FRAMEWORK,
+        "pypi:semantic_kernel",
+        "Semantic Kernel",
+        "semantic_kernel",
+    ),
+}
+
+_NPM_DEPENDENCIES = {
+    "@anthropic-ai/sdk": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:npm:@anthropic-ai/sdk",
+        "Anthropic TypeScript SDK",
+        "anthropic_sdk",
+        "anthropic",
+    ),
+    "@aws-sdk/client-bedrock-runtime": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:npm:@aws-sdk/client-bedrock-runtime",
+        "AWS Bedrock Runtime SDK",
+        "bedrock_runtime_sdk",
+        "aws_bedrock",
+    ),
+    "@azure-rest/ai-inference": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:npm:@azure-rest/ai-inference",
+        "Azure AI Inference SDK",
+        "azure_ai_inference_sdk",
+        "azure_ai",
+    ),
+    "@google/generative-ai": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:npm:@google/generative-ai",
+        "Google Generative AI SDK",
+        "google_generative_ai_sdk",
+        "google_ai",
+    ),
+    "@google/genai": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:npm:@google/genai",
+        "Google Gen AI SDK",
+        "google_genai_sdk",
+        "google_ai",
+    ),
+    "@modelcontextprotocol/sdk": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:npm:@modelcontextprotocol/sdk",
+        "Model Context Protocol SDK",
+        "mcp_sdk",
+        "model_context_protocol",
+    ),
+    "ai": DependencySpec(
+        AssetKind.AI_FRAMEWORK, "npm:vercel_ai_sdk", "Vercel AI SDK", "vercel_ai_sdk"
+    ),
+    "cohere-ai": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:npm:cohere-ai",
+        "Cohere TypeScript SDK",
+        "cohere_sdk",
+        "cohere",
+    ),
+    "langchain": DependencySpec(AssetKind.AI_FRAMEWORK, "npm:langchain", "LangChain", "langchain"),
+    "openai": DependencySpec(
+        AssetKind.SOFTWARE_COMPONENT,
+        "dependency:npm:openai",
+        "OpenAI JavaScript SDK",
+        "openai_sdk",
+        "openai",
+    ),
+}
+
+
 _CAPABILITY_SPECS = (
     CapabilitySpec(
         re.compile(r"\bthis\.call\(\s*['\"]chat\.postMessage['\"]"),
-        "slack_post_message", "Post Slack message", "slack", "chat.postMessage",
-        AssetKind.APPLICATION_ENDPOINT, "saas:slack:api", "Slack API",
-        {"provider": "slack", "endpoint_class": "saas_api"}, RelationshipKind.CAN_WRITE,
+        "slack_post_message",
+        "Post Slack message",
+        "slack",
+        "chat.postMessage",
+        AssetKind.APPLICATION_ENDPOINT,
+        "saas:slack:api",
+        "Slack API",
+        {"provider": "slack", "endpoint_class": "saas_api"},
+        RelationshipKind.CAN_WRITE,
     ),
     CapabilitySpec(
         re.compile(r"\bthis\.call\(\s*['\"]canvases\.(?:create|edit)['\"]"),
-        "slack_canvas_write", "Write Slack canvas", "slack", "canvases.create/edit",
-        AssetKind.APPLICATION_ENDPOINT, "saas:slack:api", "Slack API",
-        {"provider": "slack", "endpoint_class": "saas_api"}, RelationshipKind.CAN_WRITE,
+        "slack_canvas_write",
+        "Write Slack canvas",
+        "slack",
+        "canvases.create/edit",
+        AssetKind.APPLICATION_ENDPOINT,
+        "saas:slack:api",
+        "Slack API",
+        {"provider": "slack", "endpoint_class": "saas_api"},
+        RelationshipKind.CAN_WRITE,
     ),
     CapabilitySpec(
         re.compile(r"https://api\.hubapi\.com/crm/v3/objects/deals"),
-        "hubspot_deal_write", "Write HubSpot deal", "hubspot", "crm.deals.write",
-        AssetKind.AI_DATASTORE, "saas:hubspot:crm:deals", "HubSpot deals",
-        {"provider": "hubspot", "classification": "business_data"}, RelationshipKind.CAN_WRITE,
+        "hubspot_deal_write",
+        "Write HubSpot deal",
+        "hubspot",
+        "crm.deals.write",
+        AssetKind.AI_DATASTORE,
+        "saas:hubspot:crm:deals",
+        "HubSpot deals",
+        {"provider": "hubspot", "classification": "business_data"},
+        RelationshipKind.CAN_WRITE,
     ),
     CapabilitySpec(
         re.compile(r"\bnew\s+PutObjectCommand\s*\("),
-        "s3_put_object", "Write proposal artifact", "aws", "s3:PutObject",
-        AssetKind.AI_DATASTORE, "aws:s3:configured-bucket", "Configured S3 bucket",
+        "s3_put_object",
+        "Write proposal artifact",
+        "aws",
+        "s3:PutObject",
+        AssetKind.AI_DATASTORE,
+        "aws:s3:configured-bucket",
+        "Configured S3 bucket",
         {"provider": "aws", "service": "s3", "classification": "business_data"},
         RelationshipKind.CAN_WRITE,
     ),
     CapabilitySpec(
         re.compile(r"\bnew\s+GetObjectCommand\s*\("),
-        "s3_get_object", "Read proposal artifact", "aws", "s3:GetObject",
-        AssetKind.AI_DATASTORE, "aws:s3:configured-bucket", "Configured S3 bucket",
+        "s3_get_object",
+        "Read proposal artifact",
+        "aws",
+        "s3:GetObject",
+        AssetKind.AI_DATASTORE,
+        "aws:s3:configured-bucket",
+        "Configured S3 bucket",
         {"provider": "aws", "service": "s3", "classification": "business_data"},
         RelationshipKind.CAN_READ,
     ),
     CapabilitySpec(
         re.compile(r"\bnew\s+InvokeCommand\s*\("),
-        "lambda_invoke", "Invoke AWS Lambda", "aws", "lambda:InvokeFunction",
-        AssetKind.CLOUD_RESOURCE, "aws:lambda:configured-function", "Configured Lambda function",
+        "lambda_invoke",
+        "Invoke AWS Lambda",
+        "aws",
+        "lambda:InvokeFunction",
+        AssetKind.CLOUD_RESOURCE,
+        "aws:lambda:configured-function",
+        "Configured Lambda function",
         {"provider": "aws", "service": "lambda", "resource_binding": "runtime_configuration"},
         RelationshipKind.CAN_INVOKE,
     ),
     CapabilitySpec(
         re.compile(r"/messages/\$\{encodeURIComponent\(draftId\)\}/send"),
-        "graph_send_mail", "Send Microsoft 365 email", "microsoft_graph", "mail.send",
-        AssetKind.APPLICATION_ENDPOINT, "saas:microsoft-graph:mail", "Microsoft Graph Mail",
+        "graph_send_mail",
+        "Send Microsoft 365 email",
+        "microsoft_graph",
+        "mail.send",
+        AssetKind.APPLICATION_ENDPOINT,
+        "saas:microsoft-graph:mail",
+        "Microsoft Graph Mail",
         {"provider": "microsoft_graph", "endpoint_class": "mail_api"},
         RelationshipKind.CAN_WRITE,
     ),
@@ -222,13 +439,11 @@ class RepositoryConnector:
         self.root = root.expanduser().resolve()
         if not self.root.is_dir():
             raise ValueError(f"repository path is not a directory: {self.root}")
-        self.remote = remote if remote is not None else _git(
-            self.root, "remote", "get-url", "origin"
+        self.remote = (
+            remote if remote is not None else _git(self.root, "remote", "get-url", "origin")
         )
         self.commit = commit or _git(self.root, "rev-parse", "HEAD") or "working-tree"
-        self.dirty = (
-            dirty if dirty is not None else bool(_git(self.root, "status", "--porcelain"))
-        )
+        self.dirty = dirty if dirty is not None else bool(_git(self.root, "status", "--porcelain"))
         self.revision = f"{self.commit}+dirty" if self.dirty else self.commit
         self.repository_name = repository_name or _canonical_repository(self.remote, self.root)
         self.app_id = _normalize_name(app_id or self.repository_name.rsplit("/", 1)[-1])
@@ -318,6 +533,28 @@ class RepositoryConnector:
             except CanonicalIdentityCollision as error:
                 warnings.append(f"{relative}: {error}")
 
+        for manifest_file in _dependency_manifest_files(self.root):
+            relative = manifest_file.relative_to(self.root).as_posix()
+            try:
+                if manifest_file.stat().st_size > MAX_SOURCE_BYTES:
+                    warnings.append(f"{relative}: larger than {MAX_SOURCE_BYTES} bytes")
+                    continue
+                text = manifest_file.read_text(encoding="utf-8", errors="replace")
+                declarations = _dependency_declarations(manifest_file.name, text)
+            except (OSError, json.JSONDecodeError, tomllib.TOMLDecodeError, ValueError) as error:
+                warnings.append(f"{relative}: {error.__class__.__name__}")
+                continue
+            self._discover_dependency_declarations(
+                declarations,
+                relative,
+                observed_at,
+                repo_ref,
+                assets,
+                relationships,
+            )
+
+        self._ensure_source_application(observed_at, repo_ref, assets, relationships)
+
         coverage_state = CoverageState.PARTIAL if warnings else CoverageState.COMPLETE
         detail = "; ".join(warnings[:10]) if warnings else None
         return InventoryBatch(
@@ -332,6 +569,131 @@ class RepositoryConnector:
             ),
             assets=tuple(assets.values()),
             relationships=tuple(relationships.values()),
+        )
+
+    def _discover_dependency_declarations(
+        self,
+        declarations: tuple[DependencyDeclaration, ...],
+        relative: str,
+        observed_at: datetime,
+        repo_ref: AssetRef,
+        assets: dict[AssetRef, AssetAssertion],
+        relationships: dict[
+            tuple[AssetRef, AssetRef, RelationshipKind, AssertionType], RelationshipAssertion
+        ],
+    ) -> None:
+        for declaration in declarations:
+            spec = _dependency_spec(declaration.ecosystem, declaration.package)
+            if spec is None:
+                continue
+            site = SourceSite(
+                relative,
+                declaration.line,
+                f"dependency {declaration.package} ({declaration.scope})",
+            )
+            asset_ref = AssetRef(spec.kind, spec.natural_key)
+            attributes = {
+                "classification": (
+                    "ai_framework" if spec.kind is AssetKind.AI_FRAMEWORK else "ai_sdk"
+                ),
+                "dependency_ecosystem": declaration.ecosystem,
+                "package": declaration.package,
+                "family": spec.family,
+                "dependency_scope": declaration.scope,
+                "source_path": relative,
+                **(
+                    {"version_constraint": declaration.constraint} if declaration.constraint else {}
+                ),
+                **({"provider": spec.provider} if spec.provider else {}),
+            }
+            self._add_asset(
+                assets,
+                asset_ref,
+                spec.display_name,
+                AssertionType.DECLARED,
+                1.0,
+                site,
+                observed_at,
+                attributes,
+                "ai_dependency_manifest",
+            )
+            self._add_relationship(
+                relationships,
+                repo_ref,
+                asset_ref,
+                (
+                    RelationshipKind.USES
+                    if spec.kind is AssetKind.AI_FRAMEWORK
+                    else RelationshipKind.DEPENDS_ON
+                ),
+                AssertionType.DECLARED,
+                1.0,
+                site,
+                observed_at,
+                "ai_dependency_manifest",
+            )
+
+    def _ensure_source_application(
+        self,
+        observed_at: datetime,
+        repo_ref: AssetRef,
+        assets: dict[AssetRef, AssetAssertion],
+        relationships: dict[
+            tuple[AssetRef, AssetRef, RelationshipKind, AssertionType], RelationshipAssertion
+        ],
+    ) -> None:
+        signal_kinds = {
+            AssetKind.AI_AGENT,
+            AssetKind.AI_FRAMEWORK,
+            AssetKind.AI_MODEL,
+            AssetKind.AI_TOOL,
+            AssetKind.MCP_SERVER,
+            AssetKind.SOFTWARE_COMPONENT,
+        }
+        signal = next(
+            (assertion for assertion in assets.values() if assertion.asset.kind in signal_kinds),
+            None,
+        )
+        if signal is None:
+            return
+        payload = signal.evidence.payload
+        site = SourceSite(
+            str(payload.get("path", "repository")),
+            int(payload.get("line", 1)),
+            str(payload.get("snippet", "AI source declaration")),
+        )
+        application_ref = AssetRef(
+            AssetKind.AI_APPLICATION,
+            f"repository:{self.repository_name}:ai_application",
+        )
+        repository_slug = self.repository_name.rsplit("/", 1)[-1].replace("-", " ").title()
+        self._add_asset(
+            assets,
+            application_ref,
+            f"{repository_slug} AI application",
+            AssertionType.DECLARED,
+            1.0,
+            site,
+            observed_at,
+            {
+                "repository": self.repository_name,
+                "repository_revision": self.revision,
+                "evidence_basis": "source_declaration",
+                "deployment_status": "not_observed",
+                "runtime_status": "not_observed",
+            },
+            "source_ai_application",
+        )
+        self._add_relationship(
+            relationships,
+            application_ref,
+            repo_ref,
+            RelationshipKind.DEFINED_IN,
+            AssertionType.DECLARED,
+            1.0,
+            site,
+            observed_at,
+            "source_ai_application",
         )
 
     def _discover_frameworks(
@@ -550,6 +912,7 @@ class RepositoryConnector:
                         self._link_agent_to_source_and_model(
                             assets, relationships, repo_ref, model_ref, site, observed_at
                         )
+
     def _discover_capabilities(
         self,
         text: str,
@@ -567,13 +930,9 @@ class RepositoryConnector:
                 continue
             line = text[: match.start()].count("\n") + 1
             site = _site(text, relative, line)
-            agent_ref = self._ensure_agent(
-                assets, relationships, repo_ref, site, observed_at
-            )
+            agent_ref = self._ensure_agent(assets, relationships, repo_ref, site, observed_at)
             tool_ref = AssetRef(AssetKind.AI_TOOL, f"app:{self.app_id}:tool:{spec.tool_key}")
-            target_ref = AssetRef(
-                spec.target_kind, f"app:{self.app_id}:target:{spec.target_key}"
-            )
+            target_ref = AssetRef(spec.target_kind, f"app:{self.app_id}:target:{spec.target_key}")
             self._add_asset(
                 assets,
                 tool_ref,
@@ -641,9 +1000,7 @@ class RepositoryConnector:
         site: SourceSite,
         observed_at: datetime,
     ) -> None:
-        agent_ref = self._ensure_agent(
-            assets, relationships, repo_ref, site, observed_at
-        )
+        agent_ref = self._ensure_agent(assets, relationships, repo_ref, site, observed_at)
         self._add_relationship(
             relationships,
             agent_ref,
@@ -988,6 +1345,204 @@ def _source_files(root: Path) -> list[Path]:
             if not candidate.is_symlink():
                 output.append(candidate)
     return output
+
+
+def _dependency_manifest_files(root: Path) -> list[Path]:
+    output: list[Path] = []
+    for current_root, directory_names, file_names in os.walk(root):
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if name not in _EXCLUDED_DIRS and not name.startswith(".")
+        )
+        current = Path(current_root)
+        for file_name in sorted(file_names):
+            lowered = file_name.lower()
+            if not (
+                lowered in {"package.json", "pyproject.toml"}
+                or (lowered.startswith("requirements") and lowered.endswith(".txt"))
+            ):
+                continue
+            candidate = current / file_name
+            if not candidate.is_symlink():
+                output.append(candidate)
+    return output
+
+
+def _dependency_declarations(file_name: str, text: str) -> tuple[DependencyDeclaration, ...]:
+    lowered = file_name.lower()
+    if lowered == "package.json":
+        parsed = json.loads(text)
+        if not isinstance(parsed, dict):
+            raise ValueError("package manifest root must be an object")
+        declarations: list[DependencyDeclaration] = []
+        for section, scope in (
+            ("dependencies", "runtime"),
+            ("optionalDependencies", "optional"),
+            ("peerDependencies", "peer"),
+            ("devDependencies", "development"),
+        ):
+            values = parsed.get(section)
+            if not isinstance(values, dict):
+                continue
+            for package, constraint in sorted(values.items()):
+                if not isinstance(package, str) or not isinstance(constraint, str):
+                    continue
+                declarations.append(
+                    DependencyDeclaration(
+                        "npm",
+                        package.lower(),
+                        _safe_dependency_constraint(constraint),
+                        scope,
+                        _dependency_line(text, package),
+                    )
+                )
+        return tuple(declarations)
+
+    if lowered == "pyproject.toml":
+        parsed = tomllib.loads(text)
+        declarations = []
+        project = parsed.get("project", {})
+        if isinstance(project, dict):
+            declarations.extend(
+                _python_dependency_list(project.get("dependencies"), "runtime", text)
+            )
+            optional = project.get("optional-dependencies")
+            if isinstance(optional, dict):
+                for group, values in sorted(optional.items()):
+                    declarations.extend(_python_dependency_list(values, f"optional:{group}", text))
+        dependency_groups = parsed.get("dependency-groups")
+        if isinstance(dependency_groups, dict):
+            for group, values in sorted(dependency_groups.items()):
+                declarations.extend(_python_dependency_list(values, f"group:{group}", text))
+        tool = parsed.get("tool", {})
+        poetry = tool.get("poetry", {}) if isinstance(tool, dict) else {}
+        if isinstance(poetry, dict):
+            declarations.extend(_poetry_dependencies(poetry.get("dependencies"), "runtime", text))
+            groups = poetry.get("group")
+            if isinstance(groups, dict):
+                for group, configuration in sorted(groups.items()):
+                    if isinstance(configuration, dict):
+                        declarations.extend(
+                            _poetry_dependencies(
+                                configuration.get("dependencies"), f"group:{group}", text
+                            )
+                        )
+        return tuple(declarations)
+
+    scope = (
+        "development"
+        if any(marker in lowered for marker in ("dev", "test", "lint", "docs"))
+        else "runtime"
+    )
+    declarations = []
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        requirement = raw_line.split("#", 1)[0].strip()
+        if not requirement or requirement.startswith(("-", "git+", "http:", "https:")):
+            continue
+        marker_free = requirement.split(";", 1)[0].strip()
+        match = _PYTHON_REQUIREMENT_RE.fullmatch(marker_free)
+        if match is None:
+            continue
+        package = _normalize_python_package(match.group("name"))
+        constraint = match.group("constraint")
+        declarations.append(
+            DependencyDeclaration(
+                "pypi", package, _safe_dependency_constraint(constraint), scope, line_number
+            )
+        )
+    return tuple(declarations)
+
+
+def _python_dependency_list(values: Any, scope: str, text: str) -> list[DependencyDeclaration]:
+    if not isinstance(values, list):
+        return []
+    declarations = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        requirement = value.split(";", 1)[0].strip()
+        match = _PYTHON_REQUIREMENT_RE.fullmatch(requirement)
+        if match is None:
+            continue
+        package = _normalize_python_package(match.group("name"))
+        constraint = match.group("constraint")
+        declarations.append(
+            DependencyDeclaration(
+                "pypi",
+                package,
+                _safe_dependency_constraint(constraint),
+                scope,
+                _dependency_line(text, match.group("name")),
+            )
+        )
+    return declarations
+
+
+def _poetry_dependencies(values: Any, scope: str, text: str) -> list[DependencyDeclaration]:
+    if not isinstance(values, dict):
+        return []
+    declarations = []
+    for raw_package, raw_constraint in sorted(values.items()):
+        if not isinstance(raw_package, str) or raw_package.lower() == "python":
+            continue
+        if isinstance(raw_constraint, str):
+            constraint = raw_constraint
+        elif isinstance(raw_constraint, dict) and isinstance(raw_constraint.get("version"), str):
+            constraint = raw_constraint["version"]
+        else:
+            constraint = None
+        declarations.append(
+            DependencyDeclaration(
+                "pypi",
+                _normalize_python_package(raw_package),
+                _safe_dependency_constraint(constraint),
+                scope,
+                _dependency_line(text, raw_package),
+            )
+        )
+    return declarations
+
+
+def _dependency_spec(ecosystem: str, package: str) -> DependencySpec | None:
+    if ecosystem == "pypi":
+        return _PYTHON_DEPENDENCIES.get(_normalize_python_package(package))
+    lowered = package.lower()
+    if lowered == "@langchain/langgraph":
+        return DependencySpec(AssetKind.AI_FRAMEWORK, "npm:langgraph", "LangGraph", "langgraph")
+    if lowered.startswith("@langchain/"):
+        return DependencySpec(AssetKind.AI_FRAMEWORK, "npm:langchain", "LangChain", "langchain")
+    if lowered.startswith("@ai-sdk/"):
+        return DependencySpec(
+            AssetKind.AI_FRAMEWORK,
+            "npm:vercel_ai_sdk",
+            "Vercel AI SDK",
+            "vercel_ai_sdk",
+        )
+    return _NPM_DEPENDENCIES.get(lowered)
+
+
+def _dependency_line(text: str, package: str) -> int:
+    target = package.casefold()
+    return next(
+        (
+            line_number
+            for line_number, line in enumerate(text.splitlines(), 1)
+            if target in line.casefold()
+        ),
+        1,
+    )
+
+
+def _normalize_python_package(value: str) -> str:
+    return _PYTHON_PACKAGE_NORMALIZE_RE.sub("-", value.lower())
+
+
+def _safe_dependency_constraint(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped if _SAFE_DEPENDENCY_CONSTRAINT_RE.fullmatch(stripped) else None
 
 
 def _mcp_config_files(root: Path) -> list[Path]:

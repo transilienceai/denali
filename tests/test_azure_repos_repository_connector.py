@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from denali.connectors.azure_repos_repository import AzureReposRepositoryCollector
+from denali.connectors.azure_repos_repository import (
+    AzureReposRepositoryCollector,
+    _eligible_path,
+)
 
 TENANT_ID = "11111111-1111-4111-8111-111111111111"
 CONNECTION_ID = "22222222-2222-4222-8222-222222222222"
@@ -20,6 +23,13 @@ BOUNDARY = {
     "default_branch": "refs/heads/main",
     "remote_url": "https://dev.azure.com/example/AI/_git/anna",
 }
+
+
+def test_azure_repos_snapshot_selects_ai_dependency_manifests() -> None:
+    assert _eligible_path("package.json")
+    assert _eligible_path("services/agent/pyproject.toml")
+    assert _eligible_path("services/agent/requirements.txt")
+    assert not _eligible_path("services/agent/requirements.lock")
 
 
 class Response:

@@ -31,3 +31,32 @@ export function applicableDetectionEvaluations(
       observedRules.has(item.rule_uid),
   );
 }
+
+export function inventoryEvidenceSummary(
+  assertionType: string,
+  relationshipCount: number,
+): { headline: string; detail: string } {
+  const linked = `linked to ${relationshipCount} part${relationshipCount === 1 ? "" : "s"} of the AI system`;
+  if (assertionType === "externally_verified") {
+    return {
+      headline: `This resource is externally verified and ${linked}.`,
+      detail: "Security conclusions remain separate from this inventory assertion.",
+    };
+  }
+  if (assertionType === "observed") {
+    return {
+      headline: `This resource was directly observed and is ${linked}.`,
+      detail: "Observation does not by itself establish approval or safety.",
+    };
+  }
+  if (assertionType === "declared") {
+    return {
+      headline: `This resource is declared by source evidence and ${linked}.`,
+      detail: "Source evidence does not establish deployment, runtime use, approval, or safety.",
+    };
+  }
+  return {
+    headline: `This resource is inferred from retained evidence and ${linked}.`,
+    detail: "Review the evidence before treating this inference as deployed or active.",
+  };
+}

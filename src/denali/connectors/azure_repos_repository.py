@@ -511,9 +511,17 @@ def _eligible_path(path: str) -> bool:
     suffix = PurePosixPath(name).suffix.lower()
     return (
         suffix in _SOURCE_SUFFIXES
-        or name in {"mcp.json", "claude_desktop_config.json", "package.json"}
+        or name in {"mcp.json", "claude_desktop_config.json"}
+        or _is_dependency_manifest(name)
         or name.lower().startswith("dockerfile")
         or name.endswith(".assets.json")
+    )
+
+
+def _is_dependency_manifest(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in {"package.json", "pyproject.toml"} or (
+        lowered.startswith("requirements") and lowered.endswith(".txt")
     )
 
 
