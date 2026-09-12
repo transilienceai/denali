@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
@@ -21,6 +22,9 @@ from denali.domain import (
 ENTRA_FAILURE_RULE_UID = "DENALI-RUNTIME-ENTRA-FAILURES-001"
 ENTRA_CONSENT_RULE_UID = "DENALI-RUNTIME-ENTRA-CONSENT-001"
 UNREVIEWED_MODEL_RULE_UID = "DENALI-RUNTIME-UNREVIEWED-MODEL-001"
+AWS_UNDECLARED_MODEL_RULE_UID = "DENALI-RUNTIME-AWS-UNDECLARED-MODEL-001"
+AWS_UNAPPROVED_TOOL_RULE_UID = "DENALI-RUNTIME-AWS-UNAPPROVED-TOOL-001"
+AWS_RISKY_SEQUENCE_RULE_UID = "DENALI-RUNTIME-AWS-RISKY-SEQUENCE-001"
 FAILURE_THRESHOLD = 3
 FAILURE_WINDOW = timedelta(hours=24)
 CONSENT_OPERATIONS = (
@@ -36,6 +40,19 @@ HIGH_IMPACT_SCOPES = {
     "directory.readwrite.all",
     "rolemanagement.readwrite.directory",
 }
+AWS_SEQUENCE_WINDOW = timedelta(minutes=5)
+MUTATING_TOOL_TOKENS = (
+    "create",
+    "delete",
+    "execute",
+    "invoke",
+    "post",
+    "publish",
+    "put",
+    "send",
+    "update",
+    "write",
+)
 
 
 def evaluate_repeated_failed_ai_signins(
@@ -110,8 +127,7 @@ def evaluate_repeated_failed_ai_signins(
                 first_seen_at=activities[0].occurred_at,
                 last_seen_at=activities[-1].occurred_at,
                 activities=tuple(
-                    DetectionActivityLink(activity.id, "failed_sign_in")
-                    for activity in activities
+                    DetectionActivityLink(activity.id, "failed_sign_in") for activity in activities
                 ),
                 assets=(DetectionAssetLink(app.id, "ai_application"),),
                 attributes={
@@ -312,6 +328,343 @@ def evaluate_unreviewed_model_invocation(
             else None
         ),
     )
+
+
+def evaluate_aws_undeclared_model_invocation(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect an exact AWS model used by an agent without declared evidence."""
+
+    now = evaluated_at or datetime.now(UTC)
+    assets = {asset.id: asset for asset in snapshot.assets}
+    agents_by_session = _aws_agents_by_session(snapshot, assets)
+    grouped: dict[tuple[str, str], list[DetectionActivity]] = defaultdict(list)
+    incomplete = 0
+    for activity in snapshot.activities:
+        if not _successful_aws(activity, "model_invocation"):
+            continue
+        model_entity = _one_entity(activity, "model")
+        model = assets.get(model_entity.asset_id) if model_entity else None
+        session = _session(activity)
+        agents = agents_by_session.get(session, ()) if session else ()
+        if model is None or model.kind != "ai_model" or len(agents) != 1:
+            incomplete += 1
+            continue
+        if bool(model.attributes.get("_denali_declared")):
+            continue
+        grouped[(agents[0].id, model.id)].append(activity)
+
+    candidates: list[RuntimeDetectionCandidate] = []
+    for (agent_id, model_id), activities in grouped.items():
+        activities.sort(key=lambda item: (item.occurred_at, item.id))
+        agent, model = assets[agent_id], assets[model_id]
+        candidates.append(
+            RuntimeDetectionCandidate(
+                correlation_key=_key(
+                    AWS_UNDECLARED_MODEL_RULE_UID, agent.natural_key, model.natural_key
+                ),
+                rule_uid=AWS_UNDECLARED_MODEL_RULE_UID,
+                title=f"{agent.display_name} invoked undeclared model {model.display_name}",
+                description=(
+                    f"AWS AgentCore telemetry recorded {len(activities)} successful invocation(s) "
+                    f"of {model.display_name}, but Denali has no active declared assertion for "
+                    "that exact model."
+                ),
+                risk=(
+                    "Runtime model use that is absent from reviewed configuration can change data "
+                    "handling, cost, residency, and model-risk assumptions. This is evidence of "
+                    "configuration drift, not evidence of malicious use."
+                ),
+                investigation_guidance=(
+                    "Review the ordered session evidence, confirm the intended model and agent "
+                    "version, then update the reviewed declaration or remove the unexpected path."
+                ),
+                severity=FindingSeverity.HIGH,
+                confidence=1.0,
+                first_seen_at=activities[0].occurred_at,
+                last_seen_at=activities[-1].occurred_at,
+                activities=tuple(
+                    DetectionActivityLink(activity.id, "undeclared_model_invocation")
+                    for activity in activities
+                ),
+                assets=(
+                    DetectionAssetLink(agent.id, "executing_agent"),
+                    DetectionAssetLink(model.id, "undeclared_model"),
+                ),
+                attributes={
+                    "agent_natural_key": agent.natural_key,
+                    "model_natural_key": model.natural_key,
+                    "invocation_count": len(activities),
+                    "content_policy": "metadata_only",
+                },
+            )
+        )
+    return RuntimeDetectionEvaluation(
+        rule_uid=AWS_UNDECLARED_MODEL_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} AWS model observations lacked one exact agent/model correlation"
+            if incomplete
+            else None
+        ),
+    )
+
+
+def evaluate_aws_unapproved_tool_invocation(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect observed AWS tool execution that is not explicitly approved."""
+
+    now = evaluated_at or datetime.now(UTC)
+    assets = {asset.id: asset for asset in snapshot.assets}
+    agents_by_session = _aws_agents_by_session(snapshot, assets)
+    candidates: list[RuntimeDetectionCandidate] = []
+    incomplete = 0
+    for activity in snapshot.activities:
+        if not _successful_aws(activity, "tool_invocation"):
+            continue
+        session = _session(activity)
+        agents = agents_by_session.get(session, ()) if session else ()
+        tool_entity = _one_entity(activity, "tool")
+        tool = assets.get(tool_entity.asset_id) if tool_entity else None
+        if len(agents) != 1:
+            incomplete += 1
+            continue
+        agent = agents[0]
+        if tool is not None and tool.kind != "ai_tool":
+            incomplete += 1
+            continue
+        if tool is not None and tool.governance_status == "approved":
+            continue
+        if tool is None and coverage_state is not CoverageState.COMPLETE:
+            incomplete += 1
+            continue
+        tool_uid = (
+            tool.natural_key if tool else (tool_entity.external_uid if tool_entity else "unknown")
+        )
+        tool_name = (
+            tool.display_name
+            if tool
+            else (
+                (tool_entity.display_name or tool_entity.external_uid)
+                if tool_entity
+                else "unknown tool"
+            )
+        )
+        links = [DetectionAssetLink(agent.id, "executing_agent")]
+        if tool is not None:
+            links.append(DetectionAssetLink(tool.id, "unapproved_tool"))
+        candidates.append(
+            RuntimeDetectionCandidate(
+                correlation_key=_key(
+                    AWS_UNAPPROVED_TOOL_RULE_UID,
+                    agent.natural_key,
+                    tool_uid,
+                    activity.id,
+                ),
+                rule_uid=AWS_UNAPPROVED_TOOL_RULE_UID,
+                title=f"{agent.display_name} invoked unapproved tool {tool_name}",
+                description=(
+                    "Provider-native AgentCore telemetry recorded a successful tool execution, "
+                    "but the exact tool is not approved in Denali."
+                ),
+                risk=(
+                    "An unapproved tool path can give an agent access to actions or data outside "
+                    "its reviewed operating boundary. An unresolved tool identity means the "
+                    "runtime name could not be joined to complete inventory, not that Denali "
+                    "invented an asset."
+                ),
+                investigation_guidance=(
+                    "Inspect the linked session, agent version, execution identity, tool target, "
+                    "and adjacent calls. Approve the exact tool only after confirming intended use."
+                ),
+                severity=FindingSeverity.HIGH,
+                confidence=1.0 if tool is not None else 0.8,
+                first_seen_at=activity.occurred_at,
+                last_seen_at=activity.occurred_at,
+                activities=(DetectionActivityLink(activity.id, "unapproved_tool_invocation"),),
+                assets=tuple(links),
+                attributes={
+                    "agent_natural_key": agent.natural_key,
+                    "tool_natural_key": tool.natural_key if tool else None,
+                    "observed_tool_uid": tool_uid,
+                    "inventory_linked": tool is not None,
+                    "content_policy": "metadata_only",
+                },
+            )
+        )
+    return RuntimeDetectionEvaluation(
+        rule_uid=AWS_UNAPPROVED_TOOL_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} AWS tool observations lacked complete correlation evidence"
+            if incomplete
+            else None
+        ),
+    )
+
+
+def evaluate_aws_risky_action_sequence(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect a retrieval followed by a mutation-like tool call in one AWS session."""
+
+    now = evaluated_at or datetime.now(UTC)
+    assets = {asset.id: asset for asset in snapshot.assets}
+    agents_by_session = _aws_agents_by_session(snapshot, assets)
+    sessions: dict[str, list[DetectionActivity]] = defaultdict(list)
+    for activity in snapshot.activities:
+        session = _session(activity)
+        if session and activity.provider == "aws_agentcore":
+            sessions[session].append(activity)
+
+    candidates: list[RuntimeDetectionCandidate] = []
+    incomplete = 0
+    for session, activities in sessions.items():
+        activities.sort(key=lambda item: (item.occurred_at, item.id))
+        agents = agents_by_session.get(session, ())
+        if len(agents) != 1:
+            incomplete += 1
+            continue
+        agent = agents[0]
+        retrievals: list[DetectionActivity] = []
+        for activity in activities:
+            if activity.category == "retrieval" and activity.outcome != "failure":
+                retrievals.append(activity)
+                continue
+            if not _successful_aws(activity, "tool_invocation") or not _is_mutating_tool(activity):
+                continue
+            eligible = [
+                item
+                for item in retrievals
+                if timedelta(0) <= activity.occurred_at - item.occurred_at <= AWS_SEQUENCE_WINDOW
+            ]
+            if not eligible:
+                continue
+            retrieval = eligible[-1]
+            tool_entity = _one_entity(activity, "tool")
+            tool = assets.get(tool_entity.asset_id) if tool_entity else None
+            asset_links = [DetectionAssetLink(agent.id, "executing_agent")]
+            if tool is not None:
+                asset_links.append(DetectionAssetLink(tool.id, "mutation_tool"))
+            candidates.append(
+                RuntimeDetectionCandidate(
+                    correlation_key=_key(
+                        AWS_RISKY_SEQUENCE_RULE_UID, session, retrieval.id, activity.id
+                    ),
+                    rule_uid=AWS_RISKY_SEQUENCE_RULE_UID,
+                    title=f"{agent.display_name} retrieved data then invoked a mutating tool",
+                    description=(
+                        "An ordered AgentCore session shows retrieval followed within five "
+                        "minutes by a successful mutation-like tool call."
+                    ),
+                    risk=(
+                        "This sequence can move retrieved or sensitive context into a "
+                        "consequential "
+                        "action. Metadata establishes ordering only; Denali intentionally does not "
+                        "collect prompt, response, document, argument, or result content."
+                    ),
+                    investigation_guidance=(
+                        "Review the exact span order, execution identity, tool target, agent "
+                        "release, "
+                        "and the provider-side content under your existing access controls."
+                    ),
+                    severity=FindingSeverity.HIGH,
+                    confidence=0.9,
+                    first_seen_at=retrieval.occurred_at,
+                    last_seen_at=activity.occurred_at,
+                    activities=(
+                        DetectionActivityLink(retrieval.id, "preceding_retrieval"),
+                        DetectionActivityLink(activity.id, "subsequent_mutating_tool"),
+                    ),
+                    assets=tuple(asset_links),
+                    attributes={
+                        "session_uid_hash": _key("aws-session", session),
+                        "elapsed_ms": int(
+                            (activity.occurred_at - retrieval.occurred_at).total_seconds() * 1000
+                        ),
+                        "tool_operation": _tool_operation(activity),
+                        "content_policy": "metadata_only",
+                    },
+                )
+            )
+    return RuntimeDetectionEvaluation(
+        rule_uid=AWS_RISKY_SEQUENCE_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} AWS sessions lacked one exact agent correlation" if incomplete else None
+        ),
+    )
+
+
+def _successful_aws(activity: DetectionActivity, category: str) -> bool:
+    return (
+        activity.provider == "aws_agentcore"
+        and activity.category == category
+        and activity.outcome == "success"
+    )
+
+
+def _session(activity: DetectionActivity) -> str | None:
+    if activity.session_key:
+        return activity.session_key
+    runtime_uid = activity.session_uid or activity.trace_uid
+    if runtime_uid and activity.connection_id:
+        return f"{activity.connection_id}\x1f{runtime_uid}"
+    return runtime_uid
+
+
+def _aws_agents_by_session(
+    snapshot: DetectionSnapshot, assets: dict[str, DetectionAsset]
+) -> dict[str, tuple[DetectionAsset, ...]]:
+    grouped: dict[str, dict[str, DetectionAsset]] = defaultdict(dict)
+    for activity in snapshot.activities:
+        if activity.provider != "aws_agentcore":
+            continue
+        session = _session(activity)
+        if session is None:
+            continue
+        for entity in activity.entities:
+            asset = assets.get(entity.asset_id) if entity.role == "agent" else None
+            if asset is not None and asset.kind == "ai_agent":
+                grouped[session][asset.id] = asset
+    return {
+        session: tuple(sorted(items.values(), key=lambda item: item.id))
+        for session, items in grouped.items()
+    }
+
+
+def _tool_operation(activity: DetectionActivity) -> str:
+    for key in ("gen_ai.tool.name", "tool.name", "aws.operation.name"):
+        value = activity.attributes.get(key)
+        if isinstance(value, str) and value:
+            return value
+    entity = _one_entity(activity, "tool")
+    return (entity.display_name or entity.external_uid) if entity else ""
+
+
+def _is_mutating_tool(activity: DetectionActivity) -> bool:
+    operation = _tool_operation(activity).casefold().replace("_", "-")
+    tokens = {token for token in re.split(r"[^a-z0-9]+", operation) if token}
+    return bool(tokens.intersection(MUTATING_TOOL_TOKENS))
 
 
 def _one_entity(activity: DetectionActivity, role: str):

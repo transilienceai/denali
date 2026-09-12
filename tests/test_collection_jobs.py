@@ -4,7 +4,10 @@ from typing import Any
 
 import pytest
 
-from denali.api.collection import run_durable_collection_job
+from denali.api.collection import (
+    queue_due_aws_agent_runtime_collections,
+    run_durable_collection_job,
+)
 
 
 class DurableCollectionRepository:
@@ -85,6 +88,7 @@ def test_collection_job_survives_api_replacement_and_duplicate_worker_delivery()
     "collection_kind",
     [
         "aws_deployments",
+        "aws_agent_runtime",
         "azure_deployments",
         "entra_ai",
         "gcp_deployments",
@@ -127,8 +131,7 @@ def test_collection_job_retries_transient_timeout_and_worker_failure(failure: Ex
     assert collector.calls == 2
     assert repository.job["state"] == "succeeded"
     assert repository.failures == [
-        "Collection worker could not complete the declared read planes "
-        f"({type(failure).__name__})."
+        f"Collection worker could not complete the declared read planes ({type(failure).__name__})."
     ]
 
 
@@ -152,9 +155,10 @@ def test_collection_job_stops_after_bounded_failures_without_leaking_error() -> 
     assert collector.calls == 3
     assert repository.job["state"] == "failed"
     assert all("secret-provider" not in summary for summary in repository.failures)
-    assert repository.failures == [
-        "Collection worker could not complete the declared read planes (RuntimeError)."
-    ] * 3
+    assert (
+        repository.failures
+        == ["Collection worker could not complete the declared read planes (RuntimeError)."] * 3
+    )
 
 
 def test_successful_collection_runs_post_processing_before_completion() -> None:
@@ -203,3 +207,49 @@ def test_failed_post_processing_retries_the_durable_collection() -> None:
     assert collector.calls == 2
     assert attempts == 2
     assert repository.job["state"] == "succeeded"
+
+
+class RuntimeScheduleRepository:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, int]] = []
+
+    def list_due_aws_agent_runtime_connections(
+        self, *, interval_minutes: int, limit: int
+    ) -> list[dict[str, str]]:
+        self.calls.append((interval_minutes, limit))
+        return [
+            {"tenant_id": "tenant-1", "connection_id": "connection-1"},
+            {"tenant_id": "tenant-2", "connection_id": "connection-2"},
+        ]
+
+
+def test_runtime_schedule_only_queues_durable_connection_identifiers() -> None:
+    repository = RuntimeScheduleRepository()
+    queued: list[tuple[str, str]] = []
+
+    result = queue_due_aws_agent_runtime_collections(
+        repository,
+        lambda tenant_id, connection_id: queued.append((tenant_id, connection_id)),
+    )
+
+    assert repository.calls == [(5, 200)]
+    assert queued == [
+        ("tenant-1", "connection-1"),
+        ("tenant-2", "connection-2"),
+    ]
+    assert result == {"eligible": 2, "queued": 2, "failed": 0}
+
+
+def test_runtime_schedule_isolates_one_dispatch_failure() -> None:
+    repository = RuntimeScheduleRepository()
+    queued: list[str] = []
+
+    def queue(_tenant_id: str, connection_id: str) -> None:
+        if connection_id == "connection-1":
+            raise RuntimeError("dispatch unavailable")
+        queued.append(connection_id)
+
+    result = queue_due_aws_agent_runtime_collections(repository, queue)
+
+    assert queued == ["connection-2"]
+    assert result == {"eligible": 2, "queued": 1, "failed": 1}

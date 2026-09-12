@@ -161,11 +161,11 @@ collection run ID, scope key, timestamp, observations, and coverage.
 | --- | --- | --- |
 | Repository source | `repository.py`, `github_repository.py`, `repository_posture.py` | Immutable repository revision, bounded source tree, AI declarations, posture, deployment identifiers, model/tool/action declarations. |
 | Code to cloud | `code_to_cloud.py`, provider deployment modules | Exact source declaration to independently observed workload joins; unmatched and ambiguous candidates remain visible. |
-| AWS AI | `aws_bedrock.py`, `aws_agentcore.py`, `aws_stack.py`, `aws_deployments.py` | Bedrock, AgentCore, Lambda, ECS, EKS, SageMaker, CloudFormation topology and posture. |
+| AWS AI | `aws_bedrock.py`, `aws_agentcore.py`, `aws_agent_runtime_activity.py`, `aws_stack.py`, `aws_deployments.py` | Bedrock, AgentCore, metadata-only ordered runtime spans, Lambda, ECS, EKS, SageMaker, CloudFormation topology and posture. |
 | Azure | `azure_deployments.py` | Container Apps, Function Apps, AKS, deployment identity and control-plane metadata. |
 | GCP | `gcp_deployments.py`, `gcp_vertex_activity.py` | Cloud Run, Cloud Run functions Gen2, GKE, Vertex model references, Cloud Audit Log runtime metadata. |
 | Microsoft Entra | `entra_ai.py` | Catalog-matched AI enterprise apps, service principals, grants, app roles, sign-ins, and application-management audits. |
-| Runtime imports | `activity_json.py`, `aws_bedrock_activity.py` | Provider-neutral Bedrock, Vertex, Workspace Gemini, and Entra activity. |
+| Runtime imports | `activity_json.py`, `aws_bedrock_activity.py`, `aws_agent_runtime_activity.py` | Provider-neutral Bedrock, Vertex, Workspace Gemini, and Entra activity plus provider-native AgentCore OpenTelemetry/OpenInference session spans. |
 | Software supply chain | `syft_json.py`, `grype_json.py` | Component occurrences, scan subject identity, vulnerabilities, fixes, and exact component correlation. |
 | External findings | `ocsf_findings.py` | Scanner-neutral finding import without invented graph identity. |
 | Kubernetes | `kubernetes.py` | Bounded workload identity import shared across EKS, GKE, and AKS. |
@@ -214,6 +214,8 @@ The migration sequence is append-only:
 | `007`–`009` | Runtime activity, detections, runtime issue evidence. |
 | `010` | Provider connections and setup lifecycle. |
 | `011`–`012` | Hosted tenant mapping, durable validation jobs, and tenant/connection constraints. |
+| `013`–`018` | Durable provider collection, vulnerability evidence, Google Workspace, and Azure Repos jobs. |
+| `019` | AWS AgentCore span/session fields, runtime collection jobs, and approval-gated manual response requests. |
 
 Never edit an applied migration. Add a new numbered migration. `src/denali/store/db.py` runs each
 migration once under a transaction-scoped PostgreSQL advisory lock. Hosted API startup never
@@ -226,7 +228,8 @@ results:
 
 - `src/denali/detections/engine.py` evaluates runtime observations. Current rules include repeated
   failed Entra AI sign-ins, high-impact Entra consent, and invocation of an exact unreviewed AI
-  model.
+  model, plus AWS AgentCore undeclared-model drift, unapproved tool execution, and
+  retrieval-to-mutation session sequences.
 - `src/denali/issues/engine.py` composes findings, exact graph relationships, detections, and
   temporally ordered activity when a rule's evidence threshold is satisfied.
 
@@ -253,7 +256,8 @@ repository agent declaration
 ```
 
 Tool/action declarations say what source is coded to invoke. They are labelled **not observed**
-until an independent runtime source proves execution.
+until a successful runtime event links the exact tool—and for an action, its exact target—in the
+same observation. Name similarity and trace proximity are insufficient.
 
 ## Frontend
 
@@ -368,7 +372,7 @@ separately.
 | Vulnerabilities and component identity | [ADR 0006](0006-sbom-first-vulnerability-model.md), [0013](0013-artifact-vulnerability-correlation.md), [0014](0014-package-occurrence-identity.md) |
 | Code-to-cloud semantics | [ADR 0010](0010-evidence-led-code-to-cloud.md), [0023](0023-provider-neutral-deployment-identity.md) |
 | Provider-specific code to cloud | [GCP 0024](0024-gcp-code-to-cloud.md), [Azure 0025](0025-azure-code-to-cloud.md), [AWS 0026](0026-aws-deployment-code-to-cloud.md), [Kubernetes 0027](0027-shared-kubernetes-code-to-cloud.md) |
-| Runtime activity and detections | [ADR 0015](0015-provider-neutral-runtime-activity.md), [0017](0017-evidence-led-runtime-detections.md) |
+| Runtime activity and detections | [ADR 0015](0015-provider-neutral-runtime-activity.md), [0017](0017-evidence-led-runtime-detections.md), [AWS AgentCore AIDR 0035](0035-aws-agentcore-runtime-detection-and-response.md) |
 | Entra application discovery | [ADR 0016](0016-entra-shadow-ai-and-runtime.md) |
 | Provider onboarding | [AWS 0018](0018-self-service-aws-connections.md), [Azure 0019](0019-self-service-azure-connections.md), [GCP 0020](0020-self-service-gcp-connections.md), [GitHub 0021](0021-self-service-github-connections.md), [Entra 0029](0029-self-service-entra-connections.md) |
 | Hosted deployment status and next actions | [Pilot checklist](../deployment/pilot-launch-checklist.md) |

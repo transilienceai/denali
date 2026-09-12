@@ -21,9 +21,11 @@ from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi import Path as ApiPath
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from denali.api.auth import (
@@ -56,6 +58,7 @@ from denali.api.validation import run_durable_validation_job
 from denali.connections import (
     AWS_COVERAGE_AUTOMATIC,
     AWS_COVERAGE_SELECTED,
+    AWS_SCOPE_AGENT_RUNTIME_ACTIVITY,
     AWS_SCOPES,
     AZURE_CLOUD_PUBLIC,
     AZURE_REPOS_SCOPES,
@@ -90,6 +93,7 @@ from denali.connections import (
 )
 from denali.connections.aws import render_cloudformation
 from denali.connections.gcp import valid_gcp_project_id
+from denali.connectors.aws_agent_runtime_activity import AwsConnectionAgentRuntimeCollector
 from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
 from denali.connectors.azure_deployments import AzureConnectionDeploymentCollector
 from denali.connectors.azure_repos_repository import AzureReposRepositoryCollector
@@ -457,6 +461,20 @@ class InventoryReader(Protocol):
         self, tenant_id: str, *, include_fixtures: bool = False
     ) -> dict[str, Any]: ...
 
+    def list_runtime_sessions(
+        self,
+        tenant_id: str,
+        *,
+        provider: str | None = None,
+        outcome: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]: ...
+
+    def get_runtime_session(
+        self, tenant_id: str, session_key: str, *, activity_limit: int = 2_000
+    ) -> dict[str, Any] | None: ...
+
     def list_runtime_detections(
         self,
         tenant_id: str,
@@ -468,6 +486,14 @@ class InventoryReader(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def get_runtime_detection(self, tenant_id: str, detection_id: str) -> dict[str, Any] | None: ...
+
+    def create_runtime_response_request(
+        self, tenant_id: str, detection_id: str, **values: Any
+    ) -> dict[str, Any] | None: ...
+
+    def review_runtime_response_request(
+        self, tenant_id: str, detection_id: str, response_id: str, **values: Any
+    ) -> dict[str, Any] | None: ...
 
     def runtime_detection_summary(self, tenant_id: str) -> dict[str, Any]: ...
 
@@ -490,6 +516,33 @@ class GovernanceUpdate(BaseModel):
     status: str = Field(pattern="^(approved|unreviewed|unwanted)$")
     owner: str | None = Field(default=None, max_length=256)
     notes: str | None = Field(default=None, max_length=4000)
+
+
+class RuntimeResponseCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_type: Literal[
+        "preserve_and_investigate",
+        "disable_agent_runtime",
+        "revoke_tool_access",
+        "block_model",
+        "rotate_execution_identity",
+    ]
+    target_asset_id: UUID | None = None
+    justification: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_action_target(self) -> RuntimeResponseCreate:
+        if self.action_type != "preserve_and_investigate" and self.target_asset_id is None:
+            raise ValueError("the selected response requires an exact evidence-linked target")
+        return self
+
+
+class RuntimeResponseReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approved", "rejected"]
+    review_note: str | None = Field(default=None, max_length=2000)
 
 
 class VulnerabilityImportCreate(BaseModel):
@@ -676,6 +729,7 @@ def create_app(
     gcp_setup_launcher: GcpSetupScriptLauncher | None = None,
     azure_deployment_collector: AzureConnectionDeploymentCollector | None = None,
     aws_deployment_collector: AwsConnectionDeploymentCollector | None = None,
+    aws_agent_runtime_collector: AwsConnectionAgentRuntimeCollector | None = None,
     gcp_deployment_collector: GcpConnectionDeploymentCollector | None = None,
     github_app_client: GitHubAppClient | None = None,
     github_connection_validator: GitHubConnectionValidator | None = None,
@@ -796,6 +850,9 @@ def create_app(
         )
         app.state.aws_deployment_collector = (
             aws_deployment_collector or AwsConnectionDeploymentCollector()
+        )
+        app.state.aws_agent_runtime_collector = (
+            aws_agent_runtime_collector or AwsConnectionAgentRuntimeCollector()
         )
         app.state.gcp_deployment_collector = (
             gcp_deployment_collector or GcpConnectionDeploymentCollector()
@@ -1289,6 +1346,31 @@ def create_app(
 
         background_tasks.add_task(run_collection)
         return {"status": "started", "connection_id": connection_id}
+
+    def queue_aws_agent_runtime_collection(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        repo: InventoryReader,
+        current_tenant: str,
+        target: dict[str, Any],
+    ) -> dict[str, str]:
+        result = queue_durable_collection(
+            request,
+            background_tasks,
+            repo,
+            current_tenant,
+            target,
+            collection_kind="aws_agent_runtime",
+            collector=request.app.state.aws_agent_runtime_collector,
+            unavailable_detail="AWS AgentCore runtime collection is not configured",
+            dispatch_failure_detail="Unable to dispatch AWS AgentCore runtime collection",
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=503,
+                detail="durable AWS AgentCore runtime collection storage is unavailable",
+            )
+        return result
 
     def queue_azure_deployment_collection(
         request: Request,
@@ -2829,9 +2911,29 @@ def create_app(
             raise HTTPException(status_code=404, detail="AWS connection not found")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot collect")
-        return queue_aws_deployment_collection(
-            request, background_tasks, repo, current_tenant, target
+        scopes = set(target.get("declared_scopes", []))
+        queued: list[dict[str, str]] = []
+        deployment_scopes = set(AWS_SCOPES) - {AWS_SCOPE_AGENT_RUNTIME_ACTIVITY}
+        if scopes & deployment_scopes:
+            queued.append(
+                queue_aws_deployment_collection(
+                    request, background_tasks, repo, current_tenant, target
+                )
+            )
+        if AWS_SCOPE_AGENT_RUNTIME_ACTIVITY in scopes:
+            queued.append(
+                queue_aws_agent_runtime_collection(
+                    request, background_tasks, repo, current_tenant, target
+                )
+            )
+        if not queued:
+            raise HTTPException(status_code=409, detail="AWS connection has no collection scope")
+        status = (
+            "already_running"
+            if all(item["status"] == "already_running" for item in queued)
+            else "started"
         )
+        return {"status": status, "connection_id": str(connection_id)}
 
     @app.post(
         "/v1/connections/{connection_id}/azure/collect-deployments",
@@ -2893,34 +2995,37 @@ def create_app(
                 status_code=409,
                 detail="wait for the active validation to finish before disabling",
             )
-        collection_kind_by_provider = {
-            "aws": ("aws_deployments", "AWS deployment"),
-            "azure": ("azure_deployments", "Azure deployment"),
-            "entra": ("entra_ai", "evidence"),
-            "gcp": ("gcp_deployments", "GCP deployment"),
-            "github": ("github_source", "source"),
-            "azure_repos": ("azure_repos_source", "source"),
-            "google_workspace": ("google_workspace_ai", "evidence"),
+        collection_kinds_by_provider = {
+            "aws": (
+                ("aws_deployments", "AWS evidence"),
+                ("aws_agent_runtime", "AWS runtime"),
+            ),
+            "azure": (("azure_deployments", "Azure deployment"),),
+            "entra": (("entra_ai", "evidence"),),
+            "gcp": (("gcp_deployments", "GCP deployment"),),
+            "github": (("github_source", "source"),),
+            "azure_repos": (("azure_repos_source", "source"),),
+            "google_workspace": (("google_workspace_ai", "evidence"),),
         }
         collection_status = getattr(repo, "connection_collection_status", None)
-        durable_collection = collection_kind_by_provider.get(str(target["provider"]))
-        if collection_status is not None and durable_collection is not None:
-            collection_kind, collection_label = durable_collection
-            if (
-                collection_status(
-                    current_tenant,
-                    str(connection_id),
-                    collection_kind=collection_kind,
-                )["state"]
-                == "running"
-            ):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"wait for the active {collection_label} collection to finish "
-                        "before disabling"
-                    ),
-                )
+        durable_collections = collection_kinds_by_provider.get(str(target["provider"]), ())
+        if collection_status is not None:
+            for collection_kind, collection_label in durable_collections:
+                if (
+                    collection_status(
+                        current_tenant,
+                        str(connection_id),
+                        collection_kind=collection_kind,
+                    )["state"]
+                    == "running"
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"wait for the active {collection_label} collection to finish "
+                            "before disabling"
+                        ),
+                    )
         with request.app.state.github_collection_lock:
             if connection_key in request.app.state.active_github_collections:
                 raise HTTPException(
@@ -2994,9 +3099,7 @@ def create_app(
         repo, current_tenant = _context(request)
         kinds = None
         if category != "all":
-            kinds = tuple(
-                item.value for item in ASSET_CATEGORY_KINDS[InventoryCategory(category)]
-            )
+            kinds = tuple(item.value for item in ASSET_CATEGORY_KINDS[InventoryCategory(category)])
         lifecycle_filter = "" if lifecycle == "all" else lifecycle
         governance_filter = None if governance == "all" else governance
         search = q.strip() if q and q.strip() else None
@@ -3525,6 +3628,63 @@ def create_app(
         repo, current_tenant = _context(request)
         return repo.activity_summary(current_tenant, include_fixtures=include_fixtures)
 
+    @app.get("/v1/runtime/sessions")
+    def list_runtime_sessions(
+        request: Request,
+        provider: str | None = Query(default=None, max_length=64),
+        outcome: str | None = Query(default=None, pattern="^(success|failure|unknown)$"),
+        limit: int = Query(default=100, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        return {
+            "items": repo.list_runtime_sessions(
+                current_tenant,
+                provider=provider,
+                outcome=outcome,
+                limit=limit,
+                offset=offset,
+            ),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @app.get("/v1/runtime/sessions/{session_key}")
+    def runtime_session_detail(
+        request: Request,
+        session_key: str = ApiPath(pattern="^[0-9a-f]{64}$"),
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        row = repo.get_runtime_session(current_tenant, session_key)
+        if row is None:
+            raise HTTPException(status_code=404, detail="runtime session not found")
+        return row
+
+    @app.get("/v1/runtime/sessions/{session_key}/export")
+    def export_runtime_session(
+        request: Request,
+        session_key: str = ApiPath(pattern="^[0-9a-f]{64}$"),
+    ) -> JSONResponse:
+        repo, current_tenant = _context(request)
+        row = repo.get_runtime_session(current_tenant, session_key)
+        if row is None:
+            raise HTTPException(status_code=404, detail="runtime session not found")
+        payload = {
+            "schema_version": "denali.aws_agent_session.v1",
+            "exported_at": datetime.now(UTC),
+            "content_policy": "metadata_only",
+            "session": row,
+        }
+        return JSONResponse(
+            content=jsonable_encoder(payload),
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": (
+                    f'attachment; filename="denali-aws-session-{session_key[:12]}.json"'
+                ),
+            },
+        )
+
     @app.get("/v1/activity")
     def list_activity(
         request: Request,
@@ -3594,6 +3754,69 @@ def create_app(
     def runtime_detection_evaluations(request: Request) -> dict[str, Any]:
         repo, current_tenant = _context(request)
         return {"items": repo.latest_runtime_detection_evaluations(current_tenant)}
+
+    @app.post("/v1/detections/{detection_id}/responses", status_code=201)
+    def create_runtime_response(
+        request: Request,
+        detection_id: UUID,
+        response: RuntimeResponseCreate,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        actor = (
+            request.state.denali_auth.user_id
+            if request.app.state.auth_mode == "clerk"
+            else "local-admin"
+        )
+        try:
+            row = repo.create_runtime_response_request(
+                current_tenant,
+                str(detection_id),
+                action_type=response.action_type,
+                target_asset_id=(
+                    str(response.target_asset_id) if response.target_asset_id else None
+                ),
+                justification=response.justification.strip(),
+                requested_by=actor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail="runtime detection or linked response target not found",
+            )
+        return row
+
+    @app.patch("/v1/detections/{detection_id}/responses/{response_id}")
+    def review_runtime_response(
+        request: Request,
+        detection_id: UUID,
+        response_id: UUID,
+        review: RuntimeResponseReview,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        actor = (
+            request.state.denali_auth.user_id
+            if request.app.state.auth_mode == "clerk"
+            else "local-reviewer"
+        )
+        row = repo.review_runtime_response_request(
+            current_tenant,
+            str(detection_id),
+            str(response_id),
+            decision=review.decision,
+            review_note=review.review_note,
+            reviewed_by=actor,
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "response is unavailable, already reviewed, or requires a different "
+                    "organization administrator"
+                ),
+            )
+        return row
 
     @app.get("/v1/detections/{detection_id}")
     def runtime_detection_detail(request: Request, detection_id: UUID) -> dict[str, Any]:
@@ -3675,6 +3898,8 @@ def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]
     result["last_evidence_collection"] = None
     result["deployment_collection_state"] = "idle"
     result["last_deployment_collection"] = None
+    result["runtime_collection_state"] = "idle"
+    result["last_runtime_collection"] = None
 
     collection_kind_by_provider = {
         "aws": ("aws_deployments", "deployment"),
@@ -3696,6 +3921,17 @@ def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]
         )
         result[f"{field_prefix}_collection_state"] = status["state"]
         result[f"last_{field_prefix}_collection"] = status["last_result"]
+        if (
+            result["provider"] == "aws"
+            and "aws.agent_runtime_activity" in result.get("declared_scopes", [])
+        ):
+            runtime_status = collection_status(
+                tenant_id,
+                str(result["id"]),
+                collection_kind="aws_agent_runtime",
+            )
+            result["runtime_collection_state"] = runtime_status["state"]
+            result["last_runtime_collection"] = runtime_status["last_result"]
         result["setup_capabilities"] = _connection_setup_capabilities(request, result)
         return result
 

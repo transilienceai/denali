@@ -51,6 +51,7 @@ test("hands an accepted validation operation to the app-level monitor immediatel
 
 test("marks each collection kind on its matching durable state field", () => {
   assert.equal(markConnectionOperationRunning([connection()], "connection-1", "deployment")[0]?.deployment_collection_state, "running");
+  assert.equal(markConnectionOperationRunning([connection()], "connection-1", "runtime")[0]?.runtime_collection_state, "running");
   assert.equal(markConnectionOperationRunning([connection()], "connection-1", "evidence")[0]?.evidence_collection_state, "running");
   assert.equal(markConnectionOperationRunning([connection()], "connection-1", "source")[0]?.source_collection_state, "running");
 });

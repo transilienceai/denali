@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from math import isfinite
 from types import MappingProxyType
 from typing import Any
 
@@ -93,6 +94,12 @@ class ActivityRecord:
     region: str | None = None
     session_uid: str | None = None
     trace_uid: str | None = None
+    span_uid: str | None = None
+    parent_span_uid: str | None = None
+    completed_at: datetime | None = None
+    duration_ms: float | None = None
+    telemetry_convention: str | None = None
+    content_policy: str = "metadata_only"
     entities: tuple[ActivityEntity, ...] = ()
     attributes: Mapping[str, Any] = field(default_factory=dict)
 
@@ -107,6 +114,17 @@ class ActivityRecord:
                 raise ValueError(f"activity {label} must be non-empty and trimmed")
         if self.occurred_at.tzinfo is None or self.observed_at.tzinfo is None:
             raise ValueError("activity timestamps must be timezone-aware")
+        if self.completed_at is not None:
+            if self.completed_at.tzinfo is None:
+                raise ValueError("activity completion timestamp must be timezone-aware")
+            if self.completed_at < self.occurred_at:
+                raise ValueError("activity completion cannot precede its start")
+        if self.duration_ms is not None and (
+            not isfinite(self.duration_ms) or self.duration_ms < 0
+        ):
+            raise ValueError("activity duration must be finite and non-negative")
+        if self.content_policy not in {"metadata_only", "redacted", "explicit_content"}:
+            raise ValueError("activity content policy is invalid")
         if self.evidence.observed_at != self.observed_at:
             raise ValueError("activity and evidence observation times must match")
         identities = [(entity.role, entity.external_uid) for entity in self.entities]

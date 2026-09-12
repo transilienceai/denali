@@ -31,6 +31,45 @@ class CollectionRepository(Protocol):
     ) -> bool: ...
 
 
+class RuntimeScheduleRepository(Protocol):
+    def list_due_aws_agent_runtime_connections(
+        self, *, interval_minutes: int, limit: int
+    ) -> list[dict[str, str]]: ...
+
+
+def queue_due_aws_agent_runtime_collections(
+    repository: RuntimeScheduleRepository,
+    queue: Callable[[str, str], None],
+    *,
+    interval_minutes: int = 5,
+    limit: int = 200,
+) -> dict[str, int]:
+    """Dispatch durable jobs for bounded healthy AWS runtime targets."""
+
+    refs = repository.list_due_aws_agent_runtime_connections(
+        interval_minutes=interval_minutes, limit=limit
+    )
+    queued = 0
+    failed = 0
+    for ref in refs:
+        try:
+            queue(ref["tenant_id"], ref["connection_id"])
+            queued += 1
+        except Exception as error:
+            failed += 1
+            logger.warning(
+                "scheduled AWS runtime collection dispatch failed (%s)",
+                type(error).__name__,
+                extra={
+                    "tenant_id": ref["tenant_id"],
+                    "connection_id": ref["connection_id"],
+                    "collection_kind": "aws_agent_runtime",
+                    "error_type": type(error).__name__,
+                },
+            )
+    return {"eligible": len(refs), "queued": queued, "failed": failed}
+
+
 def run_durable_collection_job(
     repository: CollectionRepository,
     collectors: Mapping[str, Collector | None],

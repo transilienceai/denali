@@ -13,6 +13,8 @@ ISSUE_ID = "33333333-3333-4333-8333-333333333333"
 VULNERABILITY_ID = "55555555-5555-4555-8555-555555555555"
 ACTIVITY_ID = "66666666-6666-4666-8666-666666666666"
 DETECTION_ID = "77777777-7777-4777-8777-777777777777"
+RESPONSE_ID = "99999999-9999-4999-8999-999999999999"
+SESSION_KEY = "a" * 64
 GITHUB_CONNECTION_ID = "88888888-8888-4888-8888-888888888888"
 IMAGE_DIGEST = f"sha256:{'a' * 64}"
 
@@ -228,6 +230,39 @@ class RepositoryStub:
             "by_category": {"model_invocation": 1},
         }
 
+    def list_runtime_sessions(
+        self,
+        tenant_id: str,
+        *,
+        provider: str | None = None,
+        outcome: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        assert tenant_id == DEFAULT_LOCAL_TENANT
+        return [
+            {
+                "session_key": SESSION_KEY,
+                "provider": provider or "aws_agentcore",
+                "outcome": outcome or "success",
+                "activity_count": 3,
+            }
+        ]
+
+    def get_runtime_session(
+        self, tenant_id: str, session_key: str, *, activity_limit: int = 2_000
+    ) -> dict[str, Any] | None:
+        assert tenant_id == DEFAULT_LOCAL_TENANT
+        if session_key != SESSION_KEY:
+            return None
+        return {
+            "session_key": SESSION_KEY,
+            "provider": "aws_agentcore",
+            "activities": [],
+            "detections": [],
+            "coverage": [],
+        }
+
     def list_runtime_detections(
         self,
         tenant_id: str,
@@ -255,6 +290,32 @@ class RepositoryStub:
             "severity": "high",
             "activities": [],
             "assets": [],
+            "responses": [],
+        }
+
+    def create_runtime_response_request(
+        self, tenant_id: str, detection_id: str, **values: Any
+    ) -> dict[str, Any] | None:
+        if detection_id != DETECTION_ID or values.get("target_asset_id") == ASSET_ID:
+            return None
+        return {
+            "id": RESPONSE_ID,
+            "detection_id": detection_id,
+            "state": "awaiting_approval",
+            "execution_mode": "manual",
+            **values,
+        }
+
+    def review_runtime_response_request(
+        self, tenant_id: str, detection_id: str, response_id: str, **values: Any
+    ) -> dict[str, Any] | None:
+        if detection_id != DETECTION_ID or response_id != RESPONSE_ID:
+            return None
+        return {
+            "id": response_id,
+            "detection_id": detection_id,
+            "state": values["decision"],
+            "execution_mode": "manual",
         }
 
     def runtime_detection_summary(self, tenant_id: str) -> dict[str, Any]:
@@ -381,6 +442,29 @@ def test_activity_surface_and_filters() -> None:
         assert test_client.get("/v1/activity/summary?include_fixtures=true").status_code == 200
 
 
+def test_runtime_session_surface_is_bounded_and_tenant_scoped() -> None:
+    with client() as test_client:
+        response = test_client.get(
+            "/v1/runtime/sessions?provider=aws_agentcore&outcome=success&limit=20"
+        )
+        assert response.status_code == 200
+        assert response.json()["items"][0]["session_key"] == SESSION_KEY
+        assert test_client.get(f"/v1/runtime/sessions/{SESSION_KEY}").status_code == 200
+        exported = test_client.get(f"/v1/runtime/sessions/{SESSION_KEY}/export")
+        assert exported.status_code == 200
+        assert exported.headers["cache-control"] == "no-store"
+        assert exported.headers["content-disposition"].endswith(
+            f'denali-aws-session-{SESSION_KEY[:12]}.json"'
+        )
+        assert exported.json()["content_policy"] == "metadata_only"
+        assert exported.json()["session"]["session_key"] == SESSION_KEY
+        assert test_client.get(f"/v1/runtime/sessions/{'b' * 64}").status_code == 404
+        assert test_client.get(f"/v1/runtime/sessions/{'b' * 64}/export").status_code == 404
+        assert test_client.get("/v1/runtime/sessions/not-a-key").status_code == 422
+        assert test_client.get("/v1/runtime/sessions?limit=201").status_code == 422
+        assert test_client.get("/v1/runtime/sessions?outcome=compromised").status_code == 422
+
+
 def test_runtime_detections_surface_and_filters() -> None:
     with client() as test_client:
         assert test_client.get("/v1/detections/summary").json()["total"] == 1
@@ -397,6 +481,54 @@ def test_runtime_detections_surface_and_filters() -> None:
         assert test_client.get("/v1/detections/not-a-uuid").status_code == 422
         assert test_client.get("/v1/detections?state=probably-open").status_code == 422
         assert test_client.get("/v1/detections?severity=catastrophic").status_code == 422
+
+
+def test_runtime_response_requires_bounded_evidence_and_approval() -> None:
+    with client() as test_client:
+        proposed = test_client.post(
+            f"/v1/detections/{DETECTION_ID}/responses",
+            json={
+                "action_type": "preserve_and_investigate",
+                "justification": "Contain after confirming the linked execution evidence.",
+            },
+        )
+        assert proposed.status_code == 201
+        assert proposed.json()["state"] == "awaiting_approval"
+        assert proposed.json()["execution_mode"] == "manual"
+        assert (
+            test_client.post(
+                f"/v1/detections/{DETECTION_ID}/responses",
+                json={
+                    "action_type": "disable_agent_runtime",
+                    "justification": "An exact target is required.",
+                },
+            ).status_code
+            == 422
+        )
+        reviewed = test_client.patch(
+            f"/v1/detections/{DETECTION_ID}/responses/{RESPONSE_ID}",
+            json={"decision": "approved", "review_note": "Evidence confirmed."},
+        )
+        assert reviewed.status_code == 200
+        assert reviewed.json()["state"] == "approved"
+        assert (
+            test_client.post(
+                f"/v1/detections/{DETECTION_ID}/responses",
+                json={"action_type": "delete_everything", "justification": "no"},
+            ).status_code
+            == 422
+        )
+        assert (
+            test_client.post(
+                f"/v1/detections/{DETECTION_ID}/responses",
+                json={
+                    "action_type": "disable_agent_runtime",
+                    "target_asset_id": ASSET_ID,
+                    "justification": "Target must be linked evidence.",
+                },
+            ).status_code
+            == 404
+        )
 
 
 def test_issues_surface_and_evaluation_coverage() -> None:

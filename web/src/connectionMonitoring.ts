@@ -1,7 +1,7 @@
 import { getConnectionProgress, type ConnectionProgress } from "./connectionProgress.ts";
 import type { Connection } from "./types";
 
-export type ConnectionOperationKind = "validation" | "deployment" | "evidence" | "source";
+export type ConnectionOperationKind = "validation" | "deployment" | "evidence" | "source" | "runtime";
 
 export type RunningConnectionOperation = {
   connection: Connection;
@@ -13,6 +13,7 @@ const OPERATION_STATE_FIELDS: Record<ConnectionOperationKind, keyof Connection> 
   deployment: "deployment_collection_state",
   evidence: "evidence_collection_state",
   source: "source_collection_state",
+  runtime: "runtime_collection_state",
 };
 
 export function markConnectionOperationRunning(

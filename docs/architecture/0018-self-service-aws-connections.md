@@ -85,6 +85,13 @@ discovered Region is `not_applicable`, which remains visible and is never interp
 an empty inventory result. If automatic Region discovery fails, regional planes remain
 unknown and the connection cannot be healthy.
 
+An opted-in `aws.agent_runtime_activity` plane also validates metadata-only AgentCore span access
+through `logs:DescribeLogGroups` and `logs:FilterLogEvents`. The v2 onboarding template adds
+`logs:FilterLogEvents` for that declared scope; `logs:DescribeLogGroups` remains part of the
+baseline read-only discovery policy. Existing stacks must be updated before the plane can be
+healthy. Collection and detection semantics are defined in
+[ADR 0035](0035-aws-agentcore-runtime-detection-and-response.md).
+
 ## Scope boundary
 
 The onboarding role also contains the bounded read-only permissions already required by

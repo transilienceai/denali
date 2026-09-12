@@ -10,6 +10,7 @@ from denali.api.app import DEFAULT_LOCAL_TENANT, create_app
 from denali.connections import (
     AWS_COVERAGE_AUTOMATIC,
     AWS_COVERAGE_SELECTED,
+    AWS_SCOPE_AGENT_RUNTIME_ACTIVITY,
     AWS_SCOPE_AGENTCORE,
     AWS_SCOPE_BEDROCK_ACTIVITY,
     AWS_SCOPE_BEDROCK_AGENTS,
@@ -106,6 +107,74 @@ class ConnectionRepositoryStub:
         }
 
 
+class DurableConnectionRepositoryStub(ConnectionRepositoryStub):
+    def __init__(self):
+        super().__init__()
+        self.jobs: dict[str, dict[str, Any]] = {}
+
+    def create_connection_collection_job(
+        self, tenant_id: str, connection_id: str, *, collection_kind: str
+    ) -> tuple[dict[str, Any], bool]:
+        active = next(
+            (
+                item
+                for item in self.jobs.values()
+                if item["connection_id"] == connection_id
+                and item["collection_kind"] == collection_kind
+                and item["state"] in {"queued", "running"}
+            ),
+            None,
+        )
+        if active:
+            return active, False
+        job = {
+            "id": f"job-{len(self.jobs) + 1}",
+            "tenant_id": tenant_id,
+            "connection_id": connection_id,
+            "collection_kind": collection_kind,
+            "state": "queued",
+            "attempt_count": 0,
+        }
+        self.jobs[job["id"]] = job
+        return job, True
+
+    def claim_connection_collection_job(
+        self, job_id: str, *, lease_seconds: int
+    ) -> dict[str, Any] | None:
+        job = self.jobs[job_id]
+        if job["state"] != "queued":
+            return None
+        job["state"] = "running"
+        job["attempt_count"] += 1
+        return dict(job)
+
+    def complete_connection_collection_job(self, job_id: str, result: dict[str, Any]) -> None:
+        self.jobs[job_id].update(state="succeeded", result=result)
+
+    def record_connection_collection_failure(
+        self, job_id: str, summary: str, *, max_attempts: int
+    ) -> bool:
+        self.jobs[job_id].update(state="failed", result={"state": "failed", "detail": summary})
+        return False
+
+    def connection_collection_status(
+        self, tenant_id: str, connection_id: str, *, collection_kind: str
+    ) -> dict[str, Any]:
+        matches = [
+            item
+            for item in self.jobs.values()
+            if item["tenant_id"] == tenant_id
+            and item["connection_id"] == connection_id
+            and item["collection_kind"] == collection_kind
+        ]
+        active = any(item["state"] in {"queued", "running"} for item in matches)
+        latest = matches[-1] if matches else None
+        return {
+            "state": "running" if active else "idle",
+            "last_result": latest.get("result") if latest and not active else None,
+        }
+
+
 class PassingValidator:
     def validate(self, target: dict[str, Any]) -> dict[str, Any]:
         now = datetime.now(UTC)
@@ -166,6 +235,26 @@ class PassingAwsDeploymentCollector:
         }
 
 
+class PassingAwsRuntimeCollector:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def collect(
+        self, *, tenant_id: str, connection: dict[str, Any], repository: Any
+    ) -> dict[str, Any]:
+        self.calls.append((tenant_id, str(connection["id"])))
+        return {
+            "state": "complete",
+            "completed_at": datetime.now(UTC).isoformat(),
+            "regions": 1,
+            "activities": 2,
+            "partial_regions": 0,
+            "failed_regions": 0,
+            "content_policy": "metadata_only",
+            "cursor_advance_safe": True,
+        }
+
+
 def test_aws_connection_collects_declared_evidence_scopes() -> None:
     repository = ConnectionRepositoryStub()
     app = create_app(
@@ -209,6 +298,40 @@ def test_aws_connection_collects_declared_evidence_scopes() -> None:
             f"/v1/connections/{other['id']}/aws/collect-deployments"
         )
         assert logging_collection.status_code == 202
+
+
+def test_runtime_only_connection_queues_runtime_without_empty_deployment_collection() -> None:
+    repository = DurableConnectionRepositoryStub()
+    runtime_collector = PassingAwsRuntimeCollector()
+    app = create_app(
+        repository=repository,
+        aws_agent_runtime_collector=runtime_collector,  # type: ignore[arg-type]
+        migrate_on_start=False,
+    )
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/connections",
+            json={
+                "provider": "aws",
+                "display_name": "AWS runtime only",
+                "account_id": "123456789012",
+                "coverage_mode": "selected",
+                "regions": ["us-east-1"],
+                "declared_scopes": [AWS_SCOPE_AGENT_RUNTIME_ACTIVITY],
+            },
+        ).json()
+        response = client.post(
+            f"/v1/connections/{created['id']}/aws/collect-deployments"
+        )
+
+        assert response.status_code == 202
+        assert {item["collection_kind"] for item in repository.jobs.values()} == {
+            "aws_agent_runtime"
+        }
+        assert runtime_collector.calls == [(DEFAULT_LOCAL_TENANT, created["id"])]
+        detail = client.get(f"/v1/connections/{created['id']}").json()
+        assert detail["last_deployment_collection"] is None
+        assert detail["last_runtime_collection"]["activities"] == 2
 
 
 def test_aws_connections_default_to_the_compatibility_role_name() -> None:
@@ -268,7 +391,7 @@ def test_aws_connection_api_never_returns_external_id_and_requires_safe_delete()
         assert created["configuration"]["coverage_mode"] == "automatic"
         assert created["configuration"]["regions"] == []
         assert created["setup_capabilities"]["cloudformation_quick_create"] is False
-        assert len(created["coverage_plan"]) == 13
+        assert len(created["coverage_plan"]) == 14
 
         listed = client.get("/v1/connections").json()["items"]
         assert listed == [created]
@@ -482,6 +605,50 @@ def test_cloudformation_contains_only_declared_and_bounded_future_permissions() 
         for line in action_block.splitlines()
         if line.strip()
     )
+
+
+def test_agent_runtime_validation_probes_describe_and_filter_without_reading_events() -> None:
+    class Logs:
+        def __init__(self):
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def describe_log_groups(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(("describe", kwargs))
+            return {"logGroups": []}
+
+        def filter_log_events(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(("filter", kwargs))
+            return {"events": []}
+
+    class Session:
+        def __init__(self, logs: Logs):
+            self.logs = logs
+
+        def client(self, service: str, **_kwargs: Any):
+            assert service == "logs"
+            return self.logs
+
+    logs = Logs()
+    AwsConnectionValidator._probe(Session(logs), "agentcore_runtime_activity", "us-east-1")
+
+    assert [name for name, _ in logs.calls] == ["describe", "filter"]
+    request = logs.calls[1][1]
+    assert request["logGroupName"].endswith("__denali_permission_probe__")
+    assert request["endTime"] == request["startTime"] + 1
+    assert request["limit"] == 1
+
+
+def test_agent_runtime_scope_adds_both_cloudwatch_read_permissions() -> None:
+    connection = {
+        "declared_scopes": [AWS_SCOPE_AGENT_RUNTIME_ACTIVITY],
+        "configuration": {"role_name": "DenaliSecurityAuditRole"},
+        "credential_reference": {"external_id": "denali-fixture"},
+    }
+
+    template = render_cloudformation(connection)
+
+    assert "logs:DescribeLogGroups" in template
+    assert "logs:FilterLogEvents" in template
 
 
 class FakeClient:

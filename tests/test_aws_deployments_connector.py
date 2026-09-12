@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from denali.connections import AWS_SCOPE_AGENT_RUNTIME_ACTIVITY
 from denali.connectors.aws_deployments import (
     AwsConnectionDeploymentCollector,
     AwsDeploymentConnector,
@@ -328,6 +331,20 @@ def test_connection_collection_ingests_model_links_and_iam_findings() -> None:
         for batch in repository.inventory
         for relationship in batch.relationships
     )
+
+
+def test_deployment_collector_never_claims_runtime_only_evidence() -> None:
+    with pytest.raises(ValueError, match="no supported collection scope"):
+        AwsConnectionDeploymentCollector().collect(
+            tenant_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            connection={
+                "id": "11111111-1111-4111-8111-111111111111",
+                "provider": "aws",
+                "lifecycle_state": "active",
+                "declared_scopes": [AWS_SCOPE_AGENT_RUNTIME_ACTIVITY],
+            },
+            repository=Repository(),
+        )
 
 
 def test_agentcore_marks_undocumented_regions_without_false_failures() -> None:

@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 AWS_SCOPE_BEDROCK_AGENTS = "aws.bedrock_agents"
 AWS_SCOPE_AGENTCORE = "aws.agentcore"
+AWS_SCOPE_AGENT_RUNTIME_ACTIVITY = "aws.agent_runtime_activity"
 AWS_SCOPE_BEDROCK_ACTIVITY = "aws.bedrock_activity"
 AWS_SCOPE_BEDROCK_LOGGING = "aws.bedrock_logging"
 AWS_SCOPE_CODE_TO_CLOUD = "aws.code_to_cloud"
@@ -71,6 +72,7 @@ _AGENTCORE_PLANE_REGIONS = {
 AWS_SCOPES = (
     AWS_SCOPE_BEDROCK_AGENTS,
     AWS_SCOPE_AGENTCORE,
+    AWS_SCOPE_AGENT_RUNTIME_ACTIVITY,
     AWS_SCOPE_BEDROCK_ACTIVITY,
     AWS_SCOPE_BEDROCK_LOGGING,
     AWS_SCOPE_CODE_TO_CLOUD,
@@ -123,6 +125,18 @@ _SCOPE_METADATA = {
                 "permissions": (
                     "bedrock-agentcore:ListMemories",
                     "bedrock-agentcore:GetMemory",
+                ),
+            },
+        ),
+    },
+    AWS_SCOPE_AGENT_RUNTIME_ACTIVITY: {
+        "planes": (
+            {
+                "label": "AgentCore runtime span activity",
+                "plane": "agentcore_runtime_activity",
+                "permissions": (
+                    "logs:DescribeLogGroups",
+                    "logs:FilterLogEvents",
                 ),
             },
         ),
@@ -591,6 +605,7 @@ class AwsConnectionValidator:
             "agentcore_gateways": "bedrock-agentcore-control",
             "agentcore_workload_identities": "bedrock-agentcore-control",
             "agentcore_memories": "bedrock-agentcore-control",
+            "agentcore_runtime_activity": "logs",
             "bedrock_management_activity": "cloudtrail",
             "bedrock_invocation_logging": "bedrock",
             "aws_lambda_deployments": "lambda",
@@ -631,6 +646,33 @@ class AwsConnectionValidator:
             _regional_client(session, "bedrock-agentcore-control", region).list_memories(
                 maxResults=1
             )
+        elif plane == "agentcore_runtime_activity":
+            client = _regional_client(session, "logs", region)
+            response = client.describe_log_groups(
+                logGroupNamePrefix="/aws/bedrock-agentcore/runtimes/", limit=1
+            )
+            groups = response.get("logGroups", [])
+            group_name = next(
+                (
+                    item.get("logGroupName")
+                    for item in groups
+                    if isinstance(item, dict) and item.get("logGroupName")
+                ),
+                "/aws/bedrock-agentcore/runtimes/__denali_permission_probe__",
+            )
+            future = int(datetime.now(UTC).timestamp() * 1000) + 60_000
+            try:
+                client.filter_log_events(
+                    logGroupName=group_name,
+                    startTime=future,
+                    endTime=future + 1,
+                    limit=1,
+                )
+            except Exception as error:
+                # A missing sentinel proves IAM allowed evaluation to reach the resource
+                # lookup while still returning no customer events.
+                if _aws_error_code(error) != "ResourceNotFoundException":
+                    raise
         elif plane == "bedrock_management_activity":
             _regional_client(session, "cloudtrail", region).lookup_events(
                 LookupAttributes=[

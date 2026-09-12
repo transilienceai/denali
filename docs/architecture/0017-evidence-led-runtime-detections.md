@@ -57,6 +57,11 @@ into detections while preserving the distinction between:
     result metadata, event timestamps, correlation identifiers, and scope names needed
     for the rule. It does not retain access tokens, secrets, IP addresses, or prompt and
     response content.
+11. AWS AgentCore rules extend this contract with declared-versus-observed model drift,
+    unapproved tool use, and retrieval-to-mutation sequence review. Exact rule and coverage
+    semantics are in [ADR 0035](0035-aws-agentcore-runtime-detection-and-response.md). In
+    particular, an unresolved tool name can support a negative inventory conclusion only when
+    runtime, agent, and gateway-target coverage are complete.
 
 ## Initial rule boundaries
 
@@ -66,7 +71,7 @@ The first slice intentionally does not claim to detect:
 - impossible travel, unfamiliar location, or device risk;
 - malicious prompt or response content;
 - anomalous model usage volume or cost;
-- harmful tool execution; or
+- semantic judgment about harmful prompt, response, or tool content; or
 - whether an OAuth permission was actually exercised.
 
 Those require additional identity, network, behavioral-baseline, content-safety, or

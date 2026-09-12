@@ -20,6 +20,7 @@ export type DrawerKind =
   | "vulnerability"
   | "issue"
   | "activity"
+  | "session"
   | "detection";
 
 export interface NavigationLocation {
@@ -71,6 +72,7 @@ const DRAWER_TABS: Record<DrawerKind, readonly string[]> = {
   vulnerability: ["overview", "evidence", "sources"],
   issue: ["overview", "path", "evidence"],
   activity: ["overview", "evidence"],
+  session: ["overview"],
   detection: ["overview", "evidence"],
 };
 

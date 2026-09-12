@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,6 +12,9 @@ import psycopg
 from psycopg.rows import dict_row
 
 from denali.detections import (
+    evaluate_aws_risky_action_sequence,
+    evaluate_aws_unapproved_tool_invocation,
+    evaluate_aws_undeclared_model_invocation,
     evaluate_repeated_failed_ai_signins,
     evaluate_unreviewed_ai_consent,
     evaluate_unreviewed_model_invocation,
@@ -58,6 +63,32 @@ END
 """
 
 _TENANT_EVIDENCE_LOCK_NAMESPACE = "denali-tenant-evidence"
+_MAX_DETECTION_ACTIVITIES = 50_000
+_MAX_DETECTION_ASSETS = 100_000
+_RUNTIME_RESPONSE_TARGET_KINDS = {
+    "disable_agent_runtime": "ai_agent",
+    "revoke_tool_access": "ai_tool",
+    "block_model": "ai_model",
+    "rotate_execution_identity": "identity",
+}
+
+
+def _activity_session_key(batch: ActivityBatch, activity: Any) -> str | None:
+    """Create a non-secret stable key scoped to one provider connection and session."""
+
+    runtime_uid = activity.session_uid or activity.trace_uid
+    if runtime_uid is None:
+        return None
+    value = "\x1f".join(
+        (
+            batch.connector_id,
+            batch.connection_id,
+            activity.provider,
+            activity.region or "",
+            runtime_uid,
+        )
+    )
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _lock_tenant_evidence_mutation(connection: psycopg.Connection[Any], tenant_id: str) -> None:
@@ -393,9 +424,12 @@ class PostgresInventoryRepository:
                           (tenant_id, connector_id, connection_id, run_id, scope_key,
                            source_uid, category, activity_name, title, outcome, provider,
                            account_uid, region, occurred_at, source_observed_at,
-                           session_uid, trace_uid, evidence, attributes)
+                           session_uid, trace_uid, session_key, span_uid, parent_span_uid,
+                           completed_at, duration_ms, telemetry_convention, content_policy,
+                           evidence, attributes)
                         VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s::jsonb, %s::jsonb)
                         ON CONFLICT (tenant_id, connector_id, connection_id, source_uid)
                         DO NOTHING
                         RETURNING id
@@ -418,6 +452,13 @@ class PostgresInventoryRepository:
                             activity.observed_at,
                             activity.session_uid,
                             activity.trace_uid,
+                            _activity_session_key(batch, activity),
+                            activity.span_uid,
+                            activity.parent_span_uid,
+                            activity.completed_at,
+                            activity.duration_ms,
+                            activity.telemetry_convention,
+                            activity.content_policy,
                             json.dumps(_evidence_json(activity.evidence)),
                             json.dumps(dict(activity.attributes)),
                         ),
@@ -604,6 +645,224 @@ class PostgresInventoryRepository:
             "by_category": {row["category"]: row["count"] for row in by_category},
         }
 
+    def list_runtime_sessions(
+        self,
+        tenant_id: str,
+        *,
+        provider: str | None = None,
+        outcome: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return bounded runtime-session summaries derived from immutable activity."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                self._runtime_session_summary_sql(
+                    """
+                    event.tenant_id = %s::uuid
+                    AND event.session_key IS NOT NULL
+                    AND event.attributes->>'fixture' IS DISTINCT FROM 'true'
+                    AND (%s::text IS NULL OR event.provider = %s::text)
+                    """
+                )
+                + """
+                ORDER BY started_at DESC, session_key
+                LIMIT %s OFFSET %s
+                """,
+                (
+                    tenant_id,
+                    provider,
+                    provider,
+                    tenant_id,
+                    tenant_id,
+                    tenant_id,
+                    outcome,
+                    outcome,
+                    limit,
+                    offset,
+                ),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_runtime_session(
+        self, tenant_id: str, session_key: str, *, activity_limit: int = 2_000
+    ) -> dict[str, Any] | None:
+        """Return an ordered, parent-linked session investigation for one tenant."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            session = connection.execute(
+                self._runtime_session_summary_sql(
+                    "event.tenant_id = %s::uuid AND event.session_key = %s"
+                ),
+                (
+                    tenant_id,
+                    session_key,
+                    tenant_id,
+                    tenant_id,
+                    tenant_id,
+                    None,
+                    None,
+                ),
+            ).fetchone()
+            if session is None:
+                return None
+            activities = connection.execute(
+                """
+                SELECT event.*
+                FROM activity_event event
+                WHERE event.tenant_id = %s::uuid AND event.session_key = %s
+                ORDER BY event.occurred_at, event.completed_at NULLS LAST,
+                         event.trace_uid, event.span_uid, event.id
+                LIMIT %s
+                """,
+                (tenant_id, session_key, activity_limit),
+            ).fetchall()
+            activity_ids = [str(row["id"]) for row in activities]
+            entities = connection.execute(
+                """
+                SELECT entity.*, asset.lifecycle_state, asset.governance_status,
+                       view.display_name AS asset_display_name
+                FROM activity_entity entity
+                JOIN activity_event event
+                  ON event.tenant_id = entity.tenant_id AND event.id = entity.activity_id
+                LEFT JOIN asset ON asset.tenant_id = entity.tenant_id
+                               AND asset.id = entity.asset_id
+                LEFT JOIN LATERAL (
+                    SELECT assertion.display_name
+                    FROM asset_assertion assertion
+                    WHERE assertion.tenant_id = entity.tenant_id
+                      AND assertion.asset_id = entity.asset_id
+                      AND assertion.withdrawn_at IS NULL
+                    ORDER BY assertion.confidence DESC, assertion.last_seen_at DESC
+                    LIMIT 1
+                ) view ON true
+                WHERE entity.tenant_id = %s::uuid
+                  AND event.session_key = %s
+                  AND entity.activity_id = ANY(%s::uuid[])
+                ORDER BY event.occurred_at, entity.activity_id, entity.position
+                """,
+                (tenant_id, session_key, activity_ids),
+            ).fetchall()
+            detections = connection.execute(
+                """
+                SELECT DISTINCT detection.id, detection.rule_uid, detection.title,
+                       detection.severity, detection.state, detection.confidence,
+                       detection.first_seen_at, detection.last_seen_at
+                FROM runtime_detection detection
+                JOIN runtime_detection_activity link
+                  ON link.tenant_id = detection.tenant_id
+                 AND link.detection_id = detection.id
+                JOIN activity_event event
+                  ON event.tenant_id = link.tenant_id AND event.id = link.activity_id
+                WHERE detection.tenant_id = %s::uuid AND event.session_key = %s
+                ORDER BY detection.last_seen_at DESC, detection.id
+                LIMIT 500
+                """,
+                (tenant_id, session_key),
+            ).fetchall()
+            coverage = connection.execute(
+                """
+                SELECT DISTINCT ON (coverage.connector_id, coverage.connection_id,
+                                    coverage.plane, coverage.scope)
+                       coverage.connector_id, coverage.connection_id, coverage.run_id,
+                       coverage.plane, coverage.state, coverage.scope, coverage.detail,
+                       coverage.collected_at
+                FROM collection_coverage coverage
+                WHERE coverage.tenant_id = %s::uuid
+                  AND coverage.connection_id = %s
+                  AND coverage.plane = 'aws_agent_runtime_activity'
+                ORDER BY coverage.connector_id, coverage.connection_id,
+                         coverage.plane, coverage.scope, coverage.collected_at DESC
+                """,
+                (tenant_id, session["connection_id"]),
+            ).fetchall()
+
+        entities_by_activity: dict[str, list[dict[str, Any]]] = {}
+        for entity in entities:
+            entities_by_activity.setdefault(str(entity["activity_id"]), []).append(dict(entity))
+        activity_items = []
+        for activity in activities:
+            item = dict(activity)
+            item["entities"] = entities_by_activity.get(str(activity["id"]), [])
+            activity_items.append(item)
+        result = dict(session)
+        result["activities"] = activity_items
+        result["detections"] = [dict(row) for row in detections]
+        result["coverage"] = [dict(row) for row in coverage]
+        result["truncated"] = int(session["activity_count"]) > len(activity_ids)
+        return result
+
+    @staticmethod
+    def _runtime_session_summary_sql(where: str) -> str:
+        return f"""
+            WITH scoped AS (
+                SELECT event.*
+                FROM activity_event event
+                WHERE {where}
+            ), grouped AS (
+                SELECT event.session_key, event.provider, event.connection_id,
+                       min(event.session_uid) AS session_uid,
+                       min(event.account_uid) AS account_uid,
+                       min(event.region) AS region,
+                       min(event.occurred_at) AS started_at,
+                       max(COALESCE(event.completed_at, event.occurred_at)) AS completed_at,
+                       max(event.ingested_at) AS last_ingested_at,
+                       count(*) AS activity_count,
+                       count(DISTINCT event.trace_uid) AS trace_count,
+                       count(*) FILTER (WHERE event.category = 'agent_invocation')
+                           AS agent_invocation_count,
+                       count(*) FILTER (WHERE event.category = 'model_invocation')
+                           AS model_invocation_count,
+                       count(*) FILTER (WHERE event.category = 'tool_invocation')
+                           AS tool_invocation_count,
+                       count(*) FILTER (WHERE event.category = 'retrieval')
+                           AS retrieval_count,
+                       count(*) FILTER (WHERE event.outcome = 'failure') AS failure_count,
+                       count(*) FILTER (WHERE event.outcome = 'success') AS success_count,
+                       sum(event.duration_ms) AS total_duration_ms,
+                       bool_and(event.content_policy = 'metadata_only') AS metadata_only
+                FROM scoped event
+                GROUP BY event.session_key, event.provider, event.connection_id
+            )
+            SELECT grouped.*,
+                   CASE WHEN grouped.failure_count > 0 THEN 'failure'
+                        WHEN grouped.success_count = grouped.activity_count THEN 'success'
+                        ELSE 'unknown' END AS outcome,
+                   (SELECT count(DISTINCT entity.asset_id)
+                    FROM activity_entity entity
+                    JOIN scoped event ON event.id = entity.activity_id
+                    WHERE entity.tenant_id = %s::uuid
+                      AND event.session_key = grouped.session_key
+                      AND entity.asset_id IS NOT NULL) AS correlated_entity_count,
+                   (SELECT count(DISTINCT link.detection_id)
+                    FROM runtime_detection_activity link
+                    JOIN scoped event ON event.id = link.activity_id
+                    WHERE link.tenant_id = %s::uuid
+                      AND event.session_key = grouped.session_key) AS detection_count,
+                   (SELECT array_agg(DISTINCT COALESCE(view.display_name, entity.display_name)
+                                     ORDER BY COALESCE(view.display_name, entity.display_name))
+                    FROM activity_entity entity
+                    JOIN scoped event ON event.id = entity.activity_id
+                    LEFT JOIN LATERAL (
+                        SELECT assertion.display_name
+                        FROM asset_assertion assertion
+                        WHERE assertion.tenant_id = entity.tenant_id
+                          AND assertion.asset_id = entity.asset_id
+                          AND assertion.withdrawn_at IS NULL
+                        ORDER BY assertion.confidence DESC, assertion.last_seen_at DESC
+                        LIMIT 1
+                    ) view ON true
+                    WHERE entity.tenant_id = %s::uuid
+                      AND event.session_key = grouped.session_key
+                      AND entity.role = 'agent') AS agent_names
+            FROM grouped
+            WHERE (%s::text IS NULL OR
+                   CASE WHEN grouped.failure_count > 0 THEN 'failure'
+                        WHEN grouped.success_count = grouped.activity_count THEN 'success'
+                        ELSE 'unknown' END = %s::text)
+        """
+
     def evaluate_runtime_detections(self, tenant_id: str) -> dict[str, Any]:
         """Evaluate explainable detections without mutating their source observations."""
 
@@ -621,16 +880,67 @@ class PostgresInventoryRepository:
                     tenant_id,
                     ("entra_ai_directory_audits", "entra_ai_application_inventory"),
                 )
-                model_activity_coverage = self._detection_coverage_state(
-                    connection, tenant_id, ("vertex_cloud_audit_activity",)
+                model_activity_coverage = self._detection_any_coverage_state(
+                    connection,
+                    tenant_id,
+                    ("vertex_cloud_audit_activity", "aws_agent_runtime_activity"),
                 )
+                aws_runtime_coverage = self._detection_coverage_state(
+                    connection, tenant_id, ("aws_agent_runtime_activity",)
+                )
+                aws_model_drift_coverage = self._detection_coverage_state(
+                    connection,
+                    tenant_id,
+                    ("aws_agent_runtime_activity", "aws_agentcore_runtime_inventory"),
+                )
+                aws_tool_coverage = self._detection_coverage_state(
+                    connection,
+                    tenant_id,
+                    (
+                        "aws_agent_runtime_activity",
+                        "aws_agentcore_runtime_inventory",
+                        "aws_agentcore_gateway_target_inventory",
+                    ),
+                )
+                if snapshot.truncated:
+                    sign_in_coverage = self._partial_if_complete(sign_in_coverage)
+                    consent_coverage = self._partial_if_complete(consent_coverage)
+                    model_activity_coverage = self._partial_if_complete(
+                        model_activity_coverage
+                    )
+                    aws_runtime_coverage = self._partial_if_complete(aws_runtime_coverage)
+                    aws_model_drift_coverage = self._partial_if_complete(
+                        aws_model_drift_coverage
+                    )
+                    aws_tool_coverage = self._partial_if_complete(aws_tool_coverage)
                 evaluations = (
                     evaluate_repeated_failed_ai_signins(snapshot, coverage_state=sign_in_coverage),
                     evaluate_unreviewed_ai_consent(snapshot, coverage_state=consent_coverage),
                     evaluate_unreviewed_model_invocation(
                         snapshot, coverage_state=model_activity_coverage
                     ),
+                    evaluate_aws_undeclared_model_invocation(
+                        snapshot, coverage_state=aws_model_drift_coverage
+                    ),
+                    evaluate_aws_unapproved_tool_invocation(
+                        snapshot, coverage_state=aws_tool_coverage
+                    ),
+                    evaluate_aws_risky_action_sequence(
+                        snapshot, coverage_state=aws_runtime_coverage
+                    ),
                 )
+                if snapshot.truncated:
+                    evaluations = tuple(
+                        replace(
+                            evaluation,
+                            detail=(
+                                "The bounded detection snapshot reached its safety limit; "
+                                "rule coverage is partial."
+                                + (f" {evaluation.detail}" if evaluation.detail else "")
+                            ),
+                        )
+                        for evaluation in evaluations
+                    )
                 for evaluation in evaluations:
                     active_keys: set[str] = set()
                     for candidate in evaluation.candidates:
@@ -776,9 +1086,180 @@ class PostgresInventoryRepository:
                 """,
                 (tenant_id, detection_id),
             ).fetchall()
+            responses = connection.execute(
+                """
+                SELECT response.id, response.detection_id, response.target_asset_id,
+                       response.action_type, response.justification, response.state,
+                       response.execution_mode, response.requested_by, response.reviewed_by,
+                       response.review_note, response.requested_at, response.reviewed_at,
+                       target.kind AS target_kind,
+                       target.natural_key AS target_natural_key,
+                       target_view.display_name AS target_name
+                FROM runtime_response_request response
+                LEFT JOIN asset target
+                  ON target.tenant_id = response.tenant_id
+                 AND target.id = response.target_asset_id
+                LEFT JOIN LATERAL (
+                    SELECT assertion.display_name
+                    FROM asset_assertion assertion
+                    WHERE assertion.tenant_id = target.tenant_id
+                      AND assertion.asset_id = target.id
+                      AND assertion.withdrawn_at IS NULL
+                    ORDER BY assertion.confidence DESC, assertion.last_seen_at DESC
+                    LIMIT 1
+                ) target_view ON true
+                WHERE response.tenant_id = %s::uuid
+                  AND response.detection_id = %s::uuid
+                ORDER BY response.requested_at DESC, response.id
+                """,
+                (tenant_id, detection_id),
+            ).fetchall()
         result = dict(detection)
         result["activities"] = [dict(row) for row in activities]
         result["assets"] = [dict(row) for row in assets]
+        result["responses"] = [dict(row) for row in responses]
+        return result
+
+    def create_runtime_response_request(
+        self,
+        tenant_id: str,
+        detection_id: str,
+        *,
+        action_type: str,
+        target_asset_id: str | None,
+        justification: str,
+        requested_by: str,
+    ) -> dict[str, Any] | None:
+        """Record a manual response proposal bound to exact detection evidence."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            detection = connection.execute(
+                """
+                SELECT 1 FROM runtime_detection
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                """,
+                (tenant_id, detection_id),
+            ).fetchone()
+            if detection is None:
+                return None
+            expected_kind = _RUNTIME_RESPONSE_TARGET_KINDS.get(action_type)
+            if action_type != "preserve_and_investigate" and expected_kind is None:
+                return None
+            if expected_kind is not None and target_asset_id is None:
+                return None
+            if target_asset_id is not None:
+                target = connection.execute(
+                    """
+                    SELECT target.kind
+                    FROM runtime_detection_asset linked
+                    JOIN asset target
+                      ON target.tenant_id = linked.tenant_id
+                     AND target.id = linked.asset_id
+                    WHERE linked.tenant_id = %s::uuid
+                      AND linked.detection_id = %s::uuid
+                      AND linked.asset_id = %s::uuid
+                    LIMIT 1
+                    """,
+                    (tenant_id, detection_id, target_asset_id),
+                ).fetchone()
+                if target is None or (expected_kind and target["kind"] != expected_kind):
+                    return None
+            try:
+                row = connection.execute(
+                    """
+                    INSERT INTO runtime_response_request
+                      (tenant_id, detection_id, target_asset_id, action_type,
+                       justification, requested_by)
+                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (
+                        tenant_id,
+                        detection_id,
+                        target_asset_id,
+                        action_type,
+                        justification,
+                        requested_by,
+                    ),
+                ).fetchone()
+            except psycopg.errors.UniqueViolation as error:
+                raise ValueError("an equivalent response is already awaiting approval") from error
+            return None if row is None else self._runtime_response_result(connection, row)
+
+    def review_runtime_response_request(
+        self,
+        tenant_id: str,
+        detection_id: str,
+        response_id: str,
+        *,
+        decision: str,
+        review_note: str | None,
+        reviewed_by: str,
+    ) -> dict[str, Any] | None:
+        """Capture an independent approval decision without executing provider changes."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                UPDATE runtime_response_request
+                SET state = %s, reviewed_by = %s, review_note = %s, reviewed_at = now()
+                WHERE tenant_id = %s::uuid AND detection_id = %s::uuid
+                  AND id = %s::uuid AND state = 'awaiting_approval'
+                  AND requested_by <> %s
+                RETURNING *
+                """,
+                (
+                    decision,
+                    reviewed_by,
+                    review_note,
+                    tenant_id,
+                    detection_id,
+                    response_id,
+                    reviewed_by,
+                ),
+            ).fetchone()
+            return None if row is None else self._runtime_response_result(connection, row)
+
+    @staticmethod
+    def _runtime_response_result(connection, row: dict[str, Any]) -> dict[str, Any]:
+        """Return one response without tenant internals and with a consistent target view."""
+
+        result = dict(row)
+        tenant_id = result.pop("tenant_id", None)
+        result.update(
+            {
+                "target_kind": None,
+                "target_natural_key": None,
+                "target_name": None,
+            }
+        )
+        if result.get("target_asset_id") is None or tenant_id is None:
+            return result
+        target = connection.execute(
+            """
+            SELECT asset.kind, asset.natural_key, view.display_name
+            FROM asset
+            LEFT JOIN LATERAL (
+                SELECT assertion.display_name
+                FROM asset_assertion assertion
+                WHERE assertion.tenant_id = asset.tenant_id
+                  AND assertion.asset_id = asset.id
+                  AND assertion.withdrawn_at IS NULL
+                ORDER BY assertion.confidence DESC, assertion.last_seen_at DESC
+                LIMIT 1
+            ) view ON true
+            WHERE asset.tenant_id = %s::uuid AND asset.id = %s::uuid
+            """,
+            (tenant_id, result["target_asset_id"]),
+        ).fetchone()
+        if target is not None:
+            result.update(
+                {
+                    "target_kind": target["kind"],
+                    "target_natural_key": target["natural_key"],
+                    "target_name": target["display_name"],
+                }
+            )
         return result
 
     def runtime_detection_summary(self, tenant_id: str) -> dict[str, Any]:
@@ -1613,9 +2094,20 @@ class PostgresInventoryRepository:
                         'confidence', tool_rel.confidence,
                         'provider', tool_view.attributes->>'provider',
                         'operation', tool_view.attributes->>'operation',
-                        'execution_status', COALESCE(
+                        'execution_status', CASE WHEN EXISTS (
+                            SELECT 1
+                            FROM activity_entity observed_tool
+                            JOIN activity_event observed_event
+                              ON observed_event.tenant_id = observed_tool.tenant_id
+                             AND observed_event.id = observed_tool.activity_id
+                            WHERE observed_tool.tenant_id = tool.tenant_id
+                              AND observed_tool.asset_id = tool.id
+                              AND observed_tool.role = 'tool'
+                              AND observed_event.category = 'tool_invocation'
+                              AND observed_event.outcome = 'success'
+                        ) THEN 'observed' ELSE COALESCE(
                             tool_view.attributes->>'execution_status', 'not_observed'
-                        ),
+                        ) END,
                         'actions', COALESCE(actions.items, '[]'::jsonb)
                     ) ORDER BY tool_view.display_name) AS items
                     FROM relationship_assertion tool_rel
@@ -1639,9 +2131,25 @@ class PostgresInventoryRepository:
                             'target_kind', target.kind,
                             'target_natural_key', target.natural_key,
                             'target_name', target_view.display_name,
-                            'execution_status', COALESCE(
+                            'execution_status', CASE WHEN EXISTS (
+                                SELECT 1
+                                FROM activity_entity observed_tool
+                                JOIN activity_entity observed_target
+                                  ON observed_target.tenant_id = observed_tool.tenant_id
+                                 AND observed_target.activity_id = observed_tool.activity_id
+                                JOIN activity_event observed_event
+                                  ON observed_event.tenant_id = observed_tool.tenant_id
+                                 AND observed_event.id = observed_tool.activity_id
+                                WHERE observed_tool.tenant_id = tool.tenant_id
+                                  AND observed_tool.asset_id = tool.id
+                                  AND observed_tool.role = 'tool'
+                                  AND observed_target.asset_id = target.id
+                                  AND observed_target.role = 'resource'
+                                  AND observed_event.category = 'tool_invocation'
+                                  AND observed_event.outcome = 'success'
+                            ) THEN 'observed' ELSE COALESCE(
                                 action_rel.attributes->>'execution_status', 'not_observed'
-                            )
+                            ) END
                         ) ORDER BY action_rel.kind, target_view.display_name) AS items
                         FROM relationship_assertion action_rel
                         JOIN asset target ON target.id = action_rel.target_asset_id
@@ -2263,6 +2771,74 @@ class PostgresInventoryRepository:
         if active is None:
             raise RuntimeError("unable to create or find the connection collection job")
         return dict(active), False
+
+    def list_due_aws_agent_runtime_connections(
+        self, *, interval_minutes: int = 5, limit: int = 200
+    ) -> list[dict[str, str]]:
+        """Return bounded identifier-only AWS runtime targets due for durable collection."""
+
+        if not 1 <= interval_minutes <= 60:
+            raise ValueError("runtime collection interval must be between 1 and 60 minutes")
+        if not 1 <= limit <= 500:
+            raise ValueError("runtime collection target limit must be between 1 and 500")
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """
+                SELECT provider.tenant_id, provider.id AS connection_id
+                FROM provider_connection provider
+                WHERE provider.provider = 'aws'
+                  AND provider.lifecycle_state = 'active'
+                  AND provider.health_state = 'healthy'
+                  AND provider.declared_scopes ? 'aws.agent_runtime_activity'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM connection_collection_job active
+                      WHERE active.tenant_id = provider.tenant_id
+                        AND active.connection_id = provider.id
+                        AND active.collection_kind = 'aws_agent_runtime'
+                        AND active.state IN ('queued', 'running')
+                  )
+                  AND COALESCE((
+                      SELECT max(previous.created_at)
+                      FROM connection_collection_job previous
+                      WHERE previous.tenant_id = provider.tenant_id
+                        AND previous.connection_id = provider.id
+                        AND previous.collection_kind = 'aws_agent_runtime'
+                  ), '-infinity'::timestamptz) <
+                      now() - make_interval(mins => %s)
+                ORDER BY provider.tenant_id, provider.id
+                LIMIT %s
+                """,
+                (interval_minutes, limit + 1),
+            ).fetchall()
+        if len(rows) > limit:
+            raise RuntimeError("runtime collection target boundary exceeds the configured limit")
+        return [
+            {
+                "tenant_id": str(row["tenant_id"]),
+                "connection_id": str(row["connection_id"]),
+            }
+            for row in rows
+        ]
+
+    def latest_aws_agent_runtime_cursor(
+        self, tenant_id: str, connection_id: str
+    ) -> datetime | None:
+        """Return the last window end that is safe to advance for one tenant connection."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                SELECT max((result->>'window_end')::timestamptz) AS cursor
+                FROM connection_collection_job
+                WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                  AND collection_kind = 'aws_agent_runtime'
+                  AND state = 'succeeded'
+                  AND result->>'cursor_advance_safe' = 'true'
+                  AND result ? 'window_end'
+                """,
+                (tenant_id, connection_id),
+            ).fetchone()
+        return row["cursor"] if row is not None else None
 
     def claim_connection_collection_job(
         self, job_id: str, *, lease_seconds: int
@@ -4002,6 +4578,40 @@ class PostgresInventoryRepository:
             return CoverageState.PARTIAL
         return CoverageState.UNKNOWN
 
+    @staticmethod
+    def _detection_any_coverage_state(
+        connection, tenant_id: str, planes: tuple[str, ...]
+    ) -> CoverageState:
+        """Aggregate alternative telemetry planes without requiring every provider."""
+
+        row = connection.execute(
+            """
+            WITH latest AS (
+              SELECT DISTINCT ON (connector_id, connection_id, plane, scope)
+                     state
+              FROM collection_coverage
+              WHERE tenant_id = %s::uuid AND plane = ANY(%s::text[])
+              ORDER BY connector_id, connection_id, plane, scope, collected_at DESC
+            )
+            SELECT array_agg(state ORDER BY state) AS states FROM latest
+            """,
+            (tenant_id, list(planes)),
+        ).fetchone()
+        states = set(row["states"] or []) if row is not None else set()
+        if states == {CoverageState.COMPLETE.value}:
+            return CoverageState.COMPLETE
+        if states and states <= {CoverageState.FAILED.value}:
+            return CoverageState.FAILED
+        if states and states <= {CoverageState.NOT_SUPPORTED.value}:
+            return CoverageState.NOT_SUPPORTED
+        if CoverageState.FAILED.value in states or CoverageState.PARTIAL.value in states:
+            return CoverageState.PARTIAL
+        return CoverageState.UNKNOWN
+
+    @staticmethod
+    def _partial_if_complete(state: CoverageState) -> CoverageState:
+        return CoverageState.PARTIAL if state is CoverageState.COMPLETE else state
+
     @classmethod
     def _cross_signal_issue_coverage_state(cls, connection, tenant_id: str) -> CoverageState:
         """Combine sign-in collection coverage with consent-rule evaluation coverage."""
@@ -4088,7 +4698,16 @@ class PostgresInventoryRepository:
         asset_rows = connection.execute(
             f"""
             SELECT asset.id, asset.kind, asset.natural_key, asset.governance_status,
-                   asset.lifecycle_state, winner.display_name, winner.attributes
+                   asset.lifecycle_state, winner.display_name,
+                   winner.attributes || jsonb_build_object(
+                       '_denali_declared', EXISTS (
+                           SELECT 1 FROM asset_assertion declared
+                           WHERE declared.tenant_id = asset.tenant_id
+                             AND declared.asset_id = asset.id
+                             AND declared.assertion_type = 'declared'
+                             AND declared.withdrawn_at IS NULL
+                       )
+                   ) AS attributes
             FROM asset
             JOIN LATERAL (
                 SELECT aa.display_name, aa.attributes
@@ -4101,21 +4720,34 @@ class PostgresInventoryRepository:
                 LIMIT 1
             ) winner ON true
             WHERE asset.tenant_id = %s::uuid AND asset.lifecycle_state = 'active'
+            ORDER BY asset.id
+            LIMIT %s
             """,
-            (tenant_id,),
+            (tenant_id, _MAX_DETECTION_ASSETS + 1),
         ).fetchall()
         activity_rows = connection.execute(
             """
-            SELECT id, category, outcome, title, occurred_at, trace_uid,
+            SELECT id, category, outcome, title, occurred_at, provider,
+                   connection_id, session_key, session_uid, trace_uid,
+                   span_uid, parent_span_uid,
                    attributes, evidence
             FROM activity_event
             WHERE tenant_id = %s::uuid
-              AND category IN ('ai_app_sign_in', 'admin_change', 'model_invocation')
+              AND category IN (
+                  'ai_app_sign_in', 'admin_change', 'agent_invocation',
+                  'model_invocation', 'tool_invocation', 'retrieval'
+              )
               AND attributes->>'fixture' IS DISTINCT FROM 'true'
-            ORDER BY occurred_at, id
+            ORDER BY occurred_at DESC, id DESC
+            LIMIT %s
             """,
-            (tenant_id,),
+            (tenant_id, _MAX_DETECTION_ACTIVITIES + 1),
         ).fetchall()
+        assets_truncated = len(asset_rows) > _MAX_DETECTION_ASSETS
+        activities_truncated = len(activity_rows) > _MAX_DETECTION_ACTIVITIES
+        asset_rows = asset_rows[:_MAX_DETECTION_ASSETS]
+        activity_rows = list(reversed(activity_rows[:_MAX_DETECTION_ACTIVITIES]))
+        activity_ids = [str(row["id"]) for row in activity_rows]
         entity_rows = connection.execute(
             """
             SELECT entity.activity_id, entity.role, entity.external_uid,
@@ -4124,11 +4756,15 @@ class PostgresInventoryRepository:
             JOIN activity_event event
               ON event.tenant_id = entity.tenant_id AND event.id = entity.activity_id
             WHERE entity.tenant_id = %s::uuid
-              AND event.category IN ('ai_app_sign_in', 'admin_change', 'model_invocation')
+              AND event.category IN (
+                  'ai_app_sign_in', 'admin_change', 'agent_invocation',
+                  'model_invocation', 'tool_invocation', 'retrieval'
+              )
               AND event.attributes->>'fixture' IS DISTINCT FROM 'true'
+              AND entity.activity_id = ANY(%s::uuid[])
             ORDER BY entity.activity_id, entity.position
             """,
-            (tenant_id,),
+            (tenant_id, activity_ids),
         ).fetchall()
         entities: dict[str, list[DetectionActivityEntity]] = {}
         for row in entity_rows:
@@ -4148,7 +4784,13 @@ class PostgresInventoryRepository:
                     outcome=row["outcome"],
                     title=row["title"],
                     occurred_at=row["occurred_at"],
+                    provider=row["provider"],
+                    connection_id=row["connection_id"],
+                    session_key=row["session_key"],
+                    session_uid=row["session_uid"],
                     trace_uid=row["trace_uid"],
+                    span_uid=row["span_uid"],
+                    parent_span_uid=row["parent_span_uid"],
                     attributes=dict(row["attributes"]),
                     evidence=dict(row["evidence"]),
                     entities=tuple(entities.get(str(row["id"]), ())),
@@ -4167,6 +4809,7 @@ class PostgresInventoryRepository:
                 )
                 for row in asset_rows
             ),
+            truncated=assets_truncated or activities_truncated,
         )
 
     @staticmethod

@@ -172,6 +172,14 @@ def test_members_can_read_but_only_admins_can_mutate() -> None:
             headers={"Authorization": "Bearer alpha-member"},
             json={"status": "approved"},
         )
+        denied_response = client.post(
+            "/v1/detections/22222222-2222-4222-8222-222222222222/responses",
+            headers={"Authorization": "Bearer alpha-member"},
+            json={
+                "action_type": "preserve_and_investigate",
+                "justification": "Members cannot propose response actions.",
+            },
+        )
         allowed = client.patch(
             f"/v1/inventory/assets/{ASSET_ID}/governance",
             headers={"Authorization": "Bearer alpha-admin"},
@@ -180,6 +188,7 @@ def test_members_can_read_but_only_admins_can_mutate() -> None:
 
     assert read.status_code == 200
     assert denied.status_code == 403
+    assert denied_response.status_code == 403
     assert allowed.status_code == 200
     assert repository.governance_updates == 1
 

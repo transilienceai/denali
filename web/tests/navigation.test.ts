@@ -83,6 +83,7 @@ test("invalid overlay parameters are removed or normalized", () => {
     },
   );
   assert.deepEqual(drawerTabs("finding"), ["overview", "evidence", "history"]);
+  assert.deepEqual(drawerTabs("session"), ["overview"]);
 });
 
 test("provider callbacks always return to the selected connection", () => {
@@ -134,6 +135,20 @@ test("a pasted deep link closes in place without navigating outside Denali", () 
   assert.ok(changedTab);
   assert.equal(changedTab.mode, "replace");
   assert.equal(changedTab.state.overlayDepth, 0);
+  assert.deepEqual(closeDrawerTransition(direct, null), {
+    page: "runtime",
+    query: {},
+    mode: "replace",
+    state: { overlayDepth: 0 },
+  });
+});
+
+test("AWS session investigations are refresh-safe deep links", () => {
+  const session = "a".repeat(64);
+  const direct = navigationFromUrl(
+    `https://denali.test/runtime-activity?drawer=session&id=${session}`,
+  );
+  assert.deepEqual(direct.drawer, { kind: "session", id: session, tab: "overview" });
   assert.deepEqual(closeDrawerTransition(direct, null), {
     page: "runtime",
     query: {},
