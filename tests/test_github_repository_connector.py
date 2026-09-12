@@ -32,6 +32,13 @@ def test_github_snapshot_selects_gcp_iac_inputs() -> None:
     assert _eligible_path("deploy/service.yml")
 
 
+def test_github_snapshot_selects_ai_dependency_manifests() -> None:
+    assert _eligible_path("package.json")
+    assert _eligible_path("services/agent/pyproject.toml")
+    assert _eligible_path("services/agent/requirements-prod.txt")
+    assert not _eligible_path("services/agent/requirements.lock")
+
+
 def test_github_snapshot_excludes_generated_source_artifacts() -> None:
     assert not _eligible_path("src/render/screenshots.generated.ts")
     assert not _eligible_path("src/client.generated.js")

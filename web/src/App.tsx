@@ -80,7 +80,7 @@ import {
   type NavigationLocation,
   type Page,
 } from "./navigation";
-import { applicableDetectionEvaluations } from "./presentation";
+import { applicableDetectionEvaluations, inventoryEvidenceSummary } from "./presentation";
 import type {
   Asset,
   AssetDetail,
@@ -3904,7 +3904,14 @@ function OverviewTab({
   onOpenActivity: (id: string) => void;
 }) {
   const assertion = detail.assertions[0];
-  return <div className="detail-stack"><div className="insight-strip"><Sparkles /><div><span>DENALI INSIGHT</span><strong>This resource is externally verified and linked to {detail.relationships.length} parts of the AI system.</strong><p>Security conclusions remain separate from this inventory assertion.</p></div></div><DetailSection title="Properties"><div className="property-grid"><Property label="Resource type" value={meta(detail.kind).label} /><Property label="Lifecycle" value={titleCase(detail.lifecycle_state)} /><Property label="Assertion" value={titleCase(assertion.assertion_type)} /><Property label="Confidence" value={`${Math.round(assertion.confidence * 100)}%`} /><Property label="First seen" value={formatTime(detail.first_seen_at)} /><Property label="Last changed" value={formatTime(detail.last_changed_at)} /><Property label="Connector" value={assertion.connector_id} /><Property label="Collection scope" value={assertion.scope_key} /></div></DetailSection>{Object.keys(assertion.attributes).length > 0 && <DetailSection title="Normalized attributes"><div className="attribute-list">{Object.entries(assertion.attributes).map(([key, value]) => <div key={key}><span>{titleCase(key)}</span><AttributeValue value={value} /></div>)}</div></DetailSection>}{detail.kind === "ai_application" && <ApplicationIdentityContext detail={detail} activities={activities} onOpenActivity={onOpenActivity} />}<DetailSection title="Connected system"><div className="relationship-preview">{detail.relationships.slice(0, 5).map((relation) => <RelationshipRow key={relation.id} relation={relation} currentId={detail.id} onOpenAsset={onOpenAsset} />)}</div></DetailSection></div>;
+  const evidenceSummary = inventoryEvidenceSummary(
+    assertion.assertion_type,
+    detail.relationships.length,
+  );
+  const hasEntraIdentityContext = detail.assertions.some(
+    (item) => item.connector_id === "denali.entra_ai",
+  );
+  return <div className="detail-stack"><div className="insight-strip"><Sparkles /><div><span>DENALI INSIGHT</span><strong>{evidenceSummary.headline}</strong><p>{evidenceSummary.detail}</p></div></div><DetailSection title="Properties"><div className="property-grid"><Property label="Resource type" value={meta(detail.kind).label} /><Property label="Lifecycle" value={titleCase(detail.lifecycle_state)} /><Property label="Assertion" value={titleCase(assertion.assertion_type)} /><Property label="Confidence" value={`${Math.round(assertion.confidence * 100)}%`} /><Property label="First seen" value={formatTime(detail.first_seen_at)} /><Property label="Last changed" value={formatTime(detail.last_changed_at)} /><Property label="Connector" value={assertion.connector_id} /><Property label="Collection scope" value={assertion.scope_key} /></div></DetailSection>{Object.keys(assertion.attributes).length > 0 && <DetailSection title="Normalized attributes"><div className="attribute-list">{Object.entries(assertion.attributes).map(([key, value]) => <div key={key}><span>{titleCase(key)}</span><AttributeValue value={value} /></div>)}</div></DetailSection>}{detail.kind === "ai_application" && hasEntraIdentityContext && <ApplicationIdentityContext detail={detail} activities={activities} onOpenActivity={onOpenActivity} />}<DetailSection title="Connected system"><div className="relationship-preview">{detail.relationships.slice(0, 5).map((relation) => <RelationshipRow key={relation.id} relation={relation} currentId={detail.id} onOpenAsset={onOpenAsset} />)}</div></DetailSection></div>;
 }
 
 function AttributeValue({ value }: { value: unknown }) {

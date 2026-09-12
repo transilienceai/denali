@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applicableDetectionEvaluations } from "../src/presentation.ts";
+import {
+  applicableDetectionEvaluations,
+  inventoryEvidenceSummary,
+} from "../src/presentation.ts";
 import type {
   Coverage,
   RuntimeDetection,
@@ -41,4 +44,15 @@ test("AWS AgentCore rules require runtime coverage or a retained detection", () 
 
   const detections = [{ rule_uid: awsEvaluation.rule_uid }] as RuntimeDetection[];
   assert.deepEqual(applicableDetectionEvaluations([awsEvaluation], detections, []), [awsEvaluation]);
+});
+
+test("inventory evidence wording does not present source declarations as verified runtime", () => {
+  const declared = inventoryEvidenceSummary("declared", 1);
+  assert.match(declared.headline, /declared by source evidence/);
+  assert.match(declared.detail, /does not establish deployment, runtime use/);
+  assert.doesNotMatch(declared.headline, /externally verified/);
+
+  const verified = inventoryEvidenceSummary("externally_verified", 2);
+  assert.match(verified.headline, /externally verified/);
+  assert.match(verified.headline, /2 parts/);
 });

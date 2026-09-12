@@ -35,6 +35,122 @@ def test_framework_and_azure_models_are_declared_with_source_evidence(tmp_path: 
     assert by_key["azure_openai:env:AZURE_OPENAI_CHAT_DEPLOYMENT"].confidence == 0.6
 
 
+def test_package_manifest_builds_git_only_ai_estate_without_cloud_claims(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        "{\n"
+        '  "dependencies": {\n'
+        '    "@anthropic-ai/sdk": "^0.61.0",\n'
+        '    "@langchain/langgraph": "^0.4.0",\n'
+        '    "express": "^5.0.0"\n'
+        "  }\n"
+        "}\n"
+    )
+
+    batch = RepositoryConnector(
+        tmp_path,
+        repository_name="github.com/acme/support-copilot",
+        commit="a" * 40,
+        dirty=False,
+        source_type="github_repository_snapshot",
+        source_locator="github://repositories/42/commits/" + "a" * 40,
+    ).collect()
+    by_kind = {
+        kind: [item for item in batch.assets if item.asset.kind is kind] for kind in AssetKind
+    }
+
+    [application] = by_kind[AssetKind.AI_APPLICATION]
+    [framework] = by_kind[AssetKind.AI_FRAMEWORK]
+    [component] = by_kind[AssetKind.SOFTWARE_COMPONENT]
+    assert application.asset.natural_key == (
+        "repository:github.com/acme/support-copilot:ai_application"
+    )
+    assert application.assertion_type is AssertionType.DECLARED
+    assert application.attributes["evidence_basis"] == "source_declaration"
+    assert application.attributes["deployment_status"] == "not_observed"
+    assert application.attributes["runtime_status"] == "not_observed"
+    assert framework.asset.natural_key == "npm:langgraph"
+    assert component.asset.natural_key == "dependency:npm:@anthropic-ai/sdk"
+    assert component.attributes["provider"] == "anthropic"
+    assert component.attributes["version_constraint"] == "^0.61.0"
+    assert all(
+        item.evidence.locator.startswith("repo://github.com/acme/support-copilot@" + "a" * 40)
+        for item in (application, framework, component)
+    )
+    assert any(
+        relationship.source == application.asset
+        and relationship.kind is RelationshipKind.DEFINED_IN
+        for relationship in batch.relationships
+    )
+    assert any(
+        relationship.target == component.asset and relationship.kind is RelationshipKind.DEPENDS_ON
+        for relationship in batch.relationships
+    )
+    assert not any("express" in item.asset.natural_key for item in batch.assets)
+
+
+def test_python_manifests_discover_frameworks_and_provider_sdks(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "research-assistant"\n'
+        'dependencies = ["openai>=1.100", "pydantic-ai~=0.7"]\n'
+        "[project.optional-dependencies]\n"
+        'google = ["google-genai>=1.0"]\n'
+    )
+    (tmp_path / "requirements-dev.txt").write_text("semantic-kernel==1.36.0\npytest\n")
+
+    batch = RepositoryConnector(
+        tmp_path, repository_name="github.com/acme/research-assistant"
+    ).collect()
+    by_key = {item.asset.natural_key: item for item in batch.assets}
+
+    assert "repository:github.com/acme/research-assistant:ai_application" in by_key
+    assert "pypi:pydantic_ai" in by_key
+    assert "pypi:semantic_kernel" in by_key
+    assert "dependency:pypi:openai" in by_key
+    assert "dependency:pypi:google-genai" in by_key
+    assert by_key["pypi:semantic_kernel"].attributes["dependency_scope"] == "development"
+    assert by_key["dependency:pypi:google-genai"].attributes["dependency_scope"] == (
+        "optional:google"
+    )
+    assert "pytest" not in by_key
+
+
+def test_ordinary_dependencies_do_not_create_ai_application(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"dependencies":{"express":"^5.0.0","zod":"^4.0.0"}}')
+
+    batch = RepositoryConnector(tmp_path, repository_name="github.com/acme/web").collect()
+
+    assert {item.asset.kind for item in batch.assets} == {AssetKind.CODE_REPOSITORY}
+
+
+def test_invalid_dependency_manifest_makes_coverage_partial(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"dependencies":')
+
+    batch = RepositoryConnector(tmp_path, repository_name="github.com/acme/broken").collect()
+
+    assert {item.state for item in batch.coverage} == {CoverageState.PARTIAL}
+    assert "package.json: JSONDecodeError" in (batch.coverage[0].detail or "")
+
+
+def test_dependency_evidence_does_not_retain_non_registry_source_credentials(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"dependencies":{"openai":"https://user:never-store-this@example.test/sdk.tgz"}}'
+    )
+
+    batch = RepositoryConnector(tmp_path, repository_name="github.com/acme/private-sdk").collect()
+    component = next(
+        item for item in batch.assets if item.asset.kind is AssetKind.SOFTWARE_COMPONENT
+    )
+
+    assert "version_constraint" not in component.attributes
+    assert component.evidence.payload["snippet"] == "dependency openai (runtime)"
+    assert "never-store-this" not in str(batch)
+
+
 def test_dynamic_model_placeholders_do_not_become_canonical_inventory(
     tmp_path: Path,
 ) -> None:
@@ -46,9 +162,7 @@ def test_dynamic_model_placeholders_do_not_become_canonical_inventory(
         "client.responses.create(model='gpt-4o-mini')\n"
     )
 
-    batch = RepositoryConnector(
-        tmp_path, repository_name="github.com/acme/placeholders"
-    ).collect()
+    batch = RepositoryConnector(tmp_path, repository_name="github.com/acme/placeholders").collect()
     models = [item for item in batch.assets if item.asset.kind is AssetKind.AI_MODEL]
 
     assert [item.asset.natural_key for item in models] == ["openai:gpt-4o-mini"]
@@ -142,9 +256,7 @@ def test_vertex_rest_fallback_and_declared_action_capabilities_are_discovered(
         "{ method: 'POST' });\n"
     )
 
-    batch = RepositoryConnector(
-        tmp_path, repository_name="github.com/acme/summit"
-    ).collect()
+    batch = RepositoryConnector(tmp_path, repository_name="github.com/acme/summit").collect()
 
     model = next(item for item in batch.assets if item.asset.kind is AssetKind.AI_MODEL)
     agent = next(item for item in batch.assets if item.asset.kind is AssetKind.AI_AGENT)
