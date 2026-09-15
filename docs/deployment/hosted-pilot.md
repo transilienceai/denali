@@ -240,7 +240,8 @@ isolated hosted development stack named `denali-dev`:
 2. Create a Modal environment named `denali-dev`, then create a Secret named `denali-dev` inside
    it with those DSNs, the Clerk development `sk_test_...` key and matching development JWKS PEM,
    and the exact stable Vercel preview origin in `CLERK_AUTHORIZED_PARTIES`, `DENALI_WEB_URL`, and
-   `DENALI_CORS_ORIGINS`.
+   `DENALI_CORS_ORIGINS`. If the Clerk session template includes an `aud` claim, set
+   `CLERK_AUDIENCE` to that exact value as well.
 3. Deploy and migrate the separate Modal application with the checked-in helper:
 
    ```bash

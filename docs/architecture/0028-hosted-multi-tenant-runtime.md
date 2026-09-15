@@ -153,6 +153,7 @@ Modal receives core backend configuration:
 | `CLERK_SECRET_KEY` | Clerk backend operations | Yes |
 | `CLERK_JWT_KEY` | Offline Clerk JWT verification key | Public key material, backend-only |
 | `CLERK_AUTHORIZED_PARTIES` | Allowed production browser origins | No |
+| `CLERK_AUDIENCE` | Expected Clerk session `aud` claim when the instance adds one; comma-separated | No |
 | `DENALI_WEB_URL`, `DENALI_CORS_ORIGINS` | Canonical web and controlled direct-call origins | No |
 
 Provider values in Modal describe Denali-operated integrations: the GitHub App, Azure multi-tenant

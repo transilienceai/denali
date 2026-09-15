@@ -43,6 +43,7 @@ class ClerkAuthenticator:
         secret_key: str,
         jwt_key: str | None,
         authorized_parties: list[str],
+        audience: str | list[str] | None = None,
         allowed_organizations: set[str] | None = None,
     ):
         if not secret_key:
@@ -54,16 +55,19 @@ class ClerkAuthenticator:
         self._secret_key = secret_key
         self._jwt_key = jwt_key
         self._authorized_parties = authorized_parties
+        self._audience = audience
         self._allowed_organizations = allowed_organizations
 
     @classmethod
     def from_environment(cls) -> ClerkAuthenticator:
         organizations = _csv_environment("DENALI_CLERK_ORGANIZATIONS")
+        audiences = _csv_environment("CLERK_AUDIENCE")
         jwt_key = os.environ.get("CLERK_JWT_KEY")
         return cls(
             secret_key=os.environ.get("CLERK_SECRET_KEY", ""),
             jwt_key=jwt_key.replace("\\n", "\n") if jwt_key else None,
             authorized_parties=_csv_environment("CLERK_AUTHORIZED_PARTIES"),
+            audience=audiences or None,
             allowed_organizations=set(organizations) if organizations else None,
         )
 
@@ -76,6 +80,7 @@ class ClerkAuthenticator:
             AuthenticateRequestOptions(
                 secret_key=self._secret_key,
                 jwt_key=self._jwt_key,
+                audience=self._audience,
                 authorized_parties=self._authorized_parties,
                 accepts_token=["session_token"],
             ),

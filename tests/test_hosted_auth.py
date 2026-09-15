@@ -334,6 +334,7 @@ def test_clerk_authenticator_passes_authorized_parties_and_rejects_pending_sessi
         secret_key="sk_test_fixture",
         jwt_key="public-key",
         authorized_parties=["https://denali.example"],
+        audience=["denali-api"],
         allowed_organizations={"org_alpha"},
     )
     request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
@@ -343,7 +344,21 @@ def test_clerk_authenticator_passes_authorized_parties_and_rejects_pending_sessi
 
     options = captured["options"]
     assert options.authorized_parties == ["https://denali.example"]
+    assert options.audience == ["denali-api"]
     assert options.accepts_token == ["session_token"]
+
+
+def test_clerk_authenticator_reads_audience_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_fixture")
+    monkeypatch.setenv("CLERK_JWT_KEY", "public-key")
+    monkeypatch.setenv("CLERK_AUTHORIZED_PARTIES", "https://denali.example")
+    monkeypatch.setenv("CLERK_AUDIENCE", "denali-api,denali-cli")
+
+    authenticator = ClerkAuthenticator.from_environment()
+
+    assert authenticator._audience == ["denali-api", "denali-cli"]
 
 
 def test_clerk_authenticator_rejects_expired_or_unapproved_sessions(
