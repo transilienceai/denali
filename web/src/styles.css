@@ -6,6 +6,8 @@
   color: var(--color-role-text-content-body);
   background: var(--color-role-surface-page-default);
   font-synthesis: none;
+  --denali-brand-primary: #895bf7;
+  --color-role-foreground-brand: var(--denali-brand-primary);
   --ink: var(--color-role-text-content-heading);
   --muted: var(--color-role-text-content-muted);
   --line: var(--color-role-border-subtle);
@@ -31,6 +33,10 @@
   --shadow-400: 0 6px 14px 4px rgba(0, 0, 0, 0.1), 0 1px 3px 0 rgba(0, 0, 0, 0.04);
   --shadow-500: 0 1px 4px rgba(0, 0, 0, 0.04), 0 8px 18px 6px rgba(0, 0, 0, 0.1);
   --shadow-600: 0 8px 20px 6px rgba(0, 0, 0, 0.1), 0 4px 20px 10px rgba(0, 0, 0, 0.04);
+}
+
+:root.dark {
+  --color-role-foreground-brand: var(--denali-brand-primary);
 }
 
 * { box-sizing: border-box; }
