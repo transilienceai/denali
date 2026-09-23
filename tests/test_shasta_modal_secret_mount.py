@@ -34,3 +34,32 @@ def test_development_bridge_keeps_the_same_dependency_graph(monkeypatch):
         "test-provider",
         "shasta-denali-bridge",
     ]
+
+
+def test_shared_connections_secret_is_mounted_only_for_dev_app(monkeypatch):
+    monkeypatch.setenv("DENALI_MODAL_SECRET_NAME", "test-core")
+    monkeypatch.setenv("DENALI_MODAL_PROVIDER_SECRET_NAME", "test-provider")
+    monkeypatch.setenv(
+        "DENALI_MODAL_SHARED_CONNECTIONS_SECRET_NAME", "denali-platform-connections-dev"
+    )
+    monkeypatch.setenv("DENALI_MODAL_APP_NAME", "denali-dev")
+
+    module = runpy.run_path(str(MODAL_APP))
+
+    assert [secret.name for secret in module["shared_connections_secrets"]] == [
+        "test-core",
+        "test-provider",
+        "denali-platform-connections-dev",
+    ]
+    assert [secret.name for secret in module["shasta_bridge_secrets"]] == [
+        "test-core",
+        "test-provider",
+        "shasta-denali-bridge",
+    ]
+
+    monkeypatch.setenv("DENALI_MODAL_APP_NAME", "denali-production")
+    module = runpy.run_path(str(MODAL_APP))
+    assert [secret.name for secret in module["shared_connections_secrets"]] == [
+        "test-core",
+        "test-provider",
+    ]
