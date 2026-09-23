@@ -14,11 +14,21 @@ Modal app, provision a Clerk development machine for Denali and grant its M2M
 tokens access only to the platform receiver machine. In the platform registry,
 enable `registered_app(app_id='denali', clerk_machine_id=<Denali machine ID>)`
 and an explicit `app_entitlement` for each pilot Clerk org. Configure only the
-Denali **development** Modal core Secret with:
+Denali **development** Modal environment with:
 
-- `DENALI_PLATFORM_CONNECTIONS_ORIGIN`: HTTPS origin of the dev platform API.
-- `DENALI_PLATFORM_MACHINE_SECRET_KEY`: Denali's dedicated Clerk development
-  machine secret. Do not reuse the human Clerk secret or store this in Git/Vercel.
+- `DENALI_PLATFORM_CONNECTIONS_ORIGIN` in the separate
+  `denali-platform-connections-dev` Secret: HTTPS origin of the dev platform API.
+  The reviewed `dev` deployment mounts it on the API and opt-in sync function,
+  without overwriting the existing multi-key core Secret.
+- `DENALI_PLATFORM_MACHINE_SECRET_KEY` in the existing `denali-dev` core Secret:
+  Denali's dedicated Clerk development machine secret. Do not reuse the human
+  Clerk secret or store this in Git/Vercel.
+
+The isolated platform API, Denali machine authentication, pilot-org isolation,
+and CloudFormation template were verified on 2026-09-24. The new shared AWS
+binding remains unvalidated until its customer-side read-only role is created
+and the live STS check succeeds. The Denali feature branch has not been
+deployed to the shared `denali-dev` app.
 
 Run `sync_shared_aws_connections` with an exact Clerk `org_...` ID in the
 `denali-dev` Modal environment after the PR is reviewed and deployed through the

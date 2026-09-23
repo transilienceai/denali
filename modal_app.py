@@ -24,6 +24,15 @@ runtime_secrets = [
     modal.Secret.from_name(SECRET_NAME),
     modal.Secret.from_name(PROVIDER_SECRET_NAME),
 ]
+shared_connections_secret_name = os.environ.get("DENALI_MODAL_SHARED_CONNECTIONS_SECRET_NAME", "")
+shared_connections_secrets = [
+    *runtime_secrets,
+    *(
+        [modal.Secret.from_name(shared_connections_secret_name)]
+        if APP_NAME == "denali-dev" and shared_connections_secret_name
+        else []
+    ),
+]
 app = modal.App(APP_NAME)
 
 
@@ -32,7 +41,7 @@ def _region_options() -> dict[str, str]:
     return {"region": region} if region else {}
 
 
-@app.function(image=image, secrets=runtime_secrets, **_region_options())
+@app.function(image=image, secrets=shared_connections_secrets, **_region_options())
 def sync_shared_aws_connections(clerk_org_id: str) -> dict[str, int]:
     """Operator-triggered pilot; no change to Denali's AWS execution path."""
 
@@ -361,7 +370,7 @@ def _dispatch_vulnerability_import(job_id: str) -> str:
 
 @app.function(
     image=image,
-    secrets=runtime_secrets,
+    secrets=shared_connections_secrets,
     min_containers=1,
     scaledown_window=600,
     timeout=300,
