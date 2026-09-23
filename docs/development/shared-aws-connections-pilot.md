@@ -1,7 +1,7 @@
 # Shared AWS connections: Denali development pilot
 
-This is an **opt-in metadata sync**, not a replacement for Denali's AWS role or
-scanning path. The shared registry identifies an AWS account by Clerk org,
+This is an **opt-in shared-service pilot**, not a replacement for Denali's AWS
+role or scanning path. The shared registry identifies an AWS account by Clerk org,
 partition, and account ID. It marks Denali's own validated connection as
 `legacy_validated`; other apps see `requires_shared_setup` until a separate
 platform-owned trust path is validated. No app may use a legacy Denali role as
@@ -34,5 +34,15 @@ metadata, another entitled app cannot use it as shared AWS access, and a
 subsequent empty snapshot removes deleted connections. Do not expose role ARNs,
 external IDs, machine secrets, or customer credentials in API responses/logs.
 
-No production deployment, API reverse-proxy route, MCP endpoint, new customer
-role, or automatic synchronization is included in this PR.
+Denali also has separate same-origin `/v1/shared/connections/*` routes. They
+derive the org from its verified Clerk session; write routes require an org
+admin. They let a dev admin create a **new platform-owned** AWS connection,
+download its read-only CloudFormation template, queue/check validation, and disable
+it. The template trusts a dedicated platform principal, not Denali's legacy
+principal. Existing Denali stacks require a one-time trust update; simply
+importing their metadata does not make them usable by other apps.
+
+No production deployment, public `api.transilience.cloud` reverse proxy, MCP
+endpoint, automatic synchronization, or switch of Denali collectors is included
+in this PR. The shared platform IAM role and a live customer-role validation
+are prerequisites for enabling the new path in dev.
