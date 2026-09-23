@@ -73,6 +73,11 @@ def test_admin_creation_uses_server_resolved_clerk_org_not_client_input():
             json={**payload, "clerk_org_id": "org_beta"},
             headers={"Authorization": "Bearer alpha-admin"},
         ).status_code == 422
+        assert client.post(
+            path,
+            json={**payload, "role_name": "OtherRole"},
+            headers={"Authorization": "Bearer alpha-admin"},
+        ).status_code == 422
         response = client.post(path, json=payload, headers={"Authorization": "Bearer alpha-admin"})
         assert response.status_code == 201
         assert shared.calls[-1][2] == "org_alpha"

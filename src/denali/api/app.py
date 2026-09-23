@@ -604,12 +604,7 @@ class SharedAwsConnectionCreate(BaseModel):
 
     account_id: str = Field(pattern=r"^[0-9]{12}$")
     partition: Literal["aws", "aws-us-gov", "aws-cn"] = "aws"
-    role_name: str = Field(
-        default="TransilienceSecurityAuditRole",
-        min_length=1,
-        max_length=64,
-        pattern=r"^[A-Za-z0-9+=,.@_-]+$",
-    )
+    role_name: Literal["TransilienceSecurityAuditRole"] = "TransilienceSecurityAuditRole"
     deployment_region: str = "us-east-1"
     coverage_mode: Literal["automatic", "selected"] = AWS_COVERAGE_AUTOMATIC
     regions: list[str] = Field(default_factory=list, max_length=40)
