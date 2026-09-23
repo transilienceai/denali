@@ -37,6 +37,15 @@ def _region_options() -> dict[str, str]:
     return {"region": region} if region else {}
 
 
+@app.function(image=image, secrets=runtime_secrets, **_region_options())
+def sync_shared_aws_connections(clerk_org_id: str) -> dict[str, int]:
+    """Operator-triggered pilot; no change to Denali's AWS execution path."""
+
+    from denali.integrations.shared_connections import publish_aws_snapshot
+
+    return publish_aws_snapshot(clerk_org_id)
+
+
 def _configure_aws_oidc() -> None:
     """Expose Modal's short-lived identity token through boto's standard provider chain."""
 
