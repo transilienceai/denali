@@ -16,10 +16,11 @@ enable `registered_app(app_id='denali', clerk_machine_id=<Denali machine ID>)`
 and an explicit `app_entitlement` for each pilot Clerk org. Configure only the
 Denali **development** Modal environment with:
 
-- `DENALI_PLATFORM_CONNECTIONS_ORIGIN` in the separate
-  `denali-platform-connections-dev` Secret: HTTPS origin of the dev platform API.
-  The reviewed `dev` deployment mounts it on the API and opt-in sync function,
-  without overwriting the existing multi-key core Secret.
+- `DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN` in the dev deploy shell: public HTTPS
+  origin of the dev platform API. Modal injects it as
+  `DENALI_PLATFORM_CONNECTIONS_ORIGIN` into every function so its dependency graph
+  is stable and workers can import the API module, without overwriting the
+  existing multi-key core Secret.
 - `DENALI_PLATFORM_MACHINE_SECRET_KEY` in the existing `denali-dev` core Secret:
   Denali's dedicated Clerk development machine secret. Do not reuse the human
   Clerk secret or store this in Git/Vercel.
@@ -66,7 +67,8 @@ conclusion. Existing Denali collectors remain unchanged.
 Before the Denali backend PR is reviewed and deployed, the isolated one-off
 `scripts/verify_shared_aws_dev.py` Modal runner can exercise the same lease and
 read implementation against the pilot binding. It mounts only the existing
-Denali development Secrets and does not replace the shared `denali-dev` API.
+Denali development core Secret and a public origin configuration object; it
+does not replace the shared `denali-dev` API.
 Before the role was created, the runner returned `lease_status: 409`. After
 validation became healthy, it returned `read_state: passed` for `us-east-1`,
 with only the bounded read summary and no AWS identifiers or credentials.
