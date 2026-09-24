@@ -52,7 +52,24 @@ it. The template trusts a dedicated platform principal, not Denali's legacy
 principal. Existing Denali stacks require a one-time trust update; simply
 importing their metadata does not make them usable by other apps.
 
+The Connections page includes a small shared-AWS pilot panel when the dev
+backend has these routes configured. For the first end-to-end check, select one
+commercial AWS Region and the `aws.bedrock_agents` scope, deploy the template,
+validate, then click **Test scoped AWS read**. Denali asks the platform for a
+15-minute scoped lease and performs a bounded `ListAgents(maxResults=1)` call
+server-side. The response contains only the Region, pass state, and a zero-or-one
+sample count; it never returns temporary keys or agent identifiers to the
+browser. The platform rejects a lease for a Region outside selected coverage.
+This proves the identity and read path, not evidence collection or a safety
+conclusion. Existing Denali collectors remain unchanged.
+
+No additional Clerk key is required for this path beyond the existing Denali
+dev sender machine secret and platform dev receiver machine secret. Keep both
+in their respective Modal Secrets; Vercel and the browser receive neither.
+The stable `denali-dev.transilience.cloud` domain may require Vercel SSO for
+browser testing, while the backend's direct health endpoint remains separate.
+
 No production deployment, public `api.transilience.cloud` reverse proxy, MCP
 endpoint, automatic synchronization, or switch of Denali collectors is included
-in this PR. The shared platform IAM role and a live customer-role validation
-are prerequisites for enabling the new path in dev.
+in this PR. The customer-side dev test role, live validation, and successful
+scoped read are prerequisites before claiming the pilot works end-to-end.

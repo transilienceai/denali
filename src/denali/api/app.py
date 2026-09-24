@@ -108,6 +108,7 @@ from denali.connectors.github_repository import GitHubRepositoryCollector
 from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
 from denali.domain import ActivityBatch, FindingBatch, InventoryBatch
 from denali.domain.inventory import ASSET_CATEGORY_KINDS, InventoryCategory
+from denali.integrations.shared_aws_probe import probe_shared_bedrock_agents
 from denali.integrations.shared_connections_client import (
     SharedConnectionsClient,
     SharedConnectionsError,
@@ -611,6 +612,12 @@ class SharedAwsConnectionCreate(BaseModel):
     declared_scopes: list[str] = Field(
         default_factory=lambda: list(AWS_SCOPES), min_length=1, max_length=len(AWS_SCOPES)
     )
+
+
+class SharedAwsReadProbeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    region: str = Field(min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
 
 
 class AzureConnectionCreate(BaseModel):
@@ -1649,6 +1656,28 @@ def create_app(
         return _shared_request(
             request, "GET", f"/internal/v1/connections/aws/{connection_id}/validation"
         )  # type: ignore[return-value]
+
+    @app.post("/v1/shared/connections/aws/{connection_id}/probe")
+    def probe_shared_aws_connection(
+        request: Request,
+        connection_id: UUID,
+        payload: SharedAwsReadProbeInput,
+        response: Response,
+    ) -> dict[str, Any]:
+        leased = _shared_request(
+            request,
+            "POST",
+            f"/internal/v1/connections/aws/{connection_id}/credentials",
+            payload={"scopes": ["aws.bedrock_agents"], "region": payload.region},
+        )
+        if not isinstance(leased, dict):
+            raise HTTPException(status_code=502, detail="shared AWS lease failed")
+        try:
+            result = probe_shared_bedrock_agents(leased, payload.region)
+        except Exception as error:  # noqa: BLE001 - never expose AWS errors or temporary keys.
+            raise HTTPException(status_code=502, detail="shared AWS read failed") from error
+        response.headers["Cache-Control"] = "no-store"
+        return result
 
     @app.post("/v1/shared/connections/aws/{connection_id}/disable")
     def disable_shared_aws_connection(request: Request, connection_id: UUID) -> dict[str, Any]:
