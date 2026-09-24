@@ -3344,7 +3344,7 @@ function ConnectionsPage({
     </section>
     {!canWrite && <section className="read-only-banner"><ShieldCheck /><div><strong>Read-only organization role</strong><span>An organization admin must create, validate, disable, or delete connections.</span></div></section>}
     <section className="connection-boundary"><ShieldCheck /><div><strong>Connection health is not a risk verdict.</strong><span>A healthy connection means the configured role and declared validation calls worked. It does not mean collection is complete, findings are absent, or the connected environment is safe.</span></div></section>
-    <SharedAwsPilot canWrite={canWrite} />
+    <SharedAwsPilot canWrite={canWrite} onChanged={onChanged} />
     {entraSetupReturn && <div className={`connection-consent-return ${entraSetupReturn.state}`}>
       {entraSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{entraSetupReturn.state === "succeeded" ? "Microsoft Entra admin consent recorded" : "Microsoft Entra admin consent was not completed"}</strong><small>{entraSetupReturn.state === "succeeded" ? "Denali verified the one-time callback, bound the exact customer tenant, discarded the setup state, and started read-only Microsoft Graph validation." : entraSetupReturn.detail ?? "Return to this connection and launch consent again. No tenant access was recorded."}</small></span>
@@ -3519,6 +3519,21 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
   if (connection.provider === "gcp") return <GcpConnectionDetail connection={connection} busy={busy} launch={gcpLaunch} completionCode={gcpCompletionCode} onCompletionCode={onGcpCompletionCode} onPrepare={onPrepareGcp} onComplete={onCompleteGcp} onCollect={onCollectGcp} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "github") return <GitHubConnectionDetail connection={connection} busy={busy} navigation={navigation} onPrepare={onPrepareGitHub} onCollect={onCollectGitHub} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "azure_repos") return <AzureReposConnectionDetail connection={connection} busy={busy} onPrepare={onPrepareAzureRepos} onComplete={onCompleteAzureRepos} onCollect={onCollectAzureRepos} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
+  if (connection.credential_reference.type === "platform_shared_aws") {
+    const validating = connection.validation_state === "running" || busy === `validate:${connection.id}`;
+    const collecting = connection.deployment_collection_state === "running" || busy === `collect-aws:${connection.id}`;
+    return <section className="panel connection-detail" aria-label="Platform shared AWS connection">
+      <div className="connection-detail-head"><div><span>PLATFORM SHARED AWS</span><h3>{connection.display_name}</h3><small>Account {connection.configuration.account_id} · {(connection.configuration.regions ?? []).join(", ")} · {connection.declared_scopes.join(", ")}</small></div><ConnectionHealth state={connection.health_state} /></div>
+      <p>The read-only role is managed by the shared platform. Denali requests a fresh, scope-limited lease for validation and collection; it does not hold the role trust or AWS keys.</p>
+      <div className="connection-launch-actions">
+        {connection.lifecycle_state === "active" && <button className="primary-action" disabled={validating || collecting} onClick={onValidate}>{validating ? "Validating…" : "Validate in Denali"}</button>}
+        {connection.lifecycle_state === "active" && <button className="primary-action" disabled={validating || collecting || connection.health_state !== "healthy"} onClick={onCollectAws}>{collecting ? "Collecting…" : "Collect AWS evidence"}</button>}
+      </div>
+      {connection.last_validation && <p role="status">Validation: {connection.last_validation.health_state} · {connection.last_validation.summary}</p>}
+      <p>Connection health proves read access only. Collection creates separate evidence and coverage records.</p>
+      <div className="connection-safeguards"><div><strong>Denali use of this connection</strong><span>Disabling here stops Denali collection. Global disconnect remains in the shared platform and may leave already issued sessions valid for up to 15 minutes.</span></div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disable</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete Denali configuration</button>}</div>
+    </section>;
+  }
   const validation = connection.last_validation;
   const awsCredential = connection.credential_reference.type === "aws_assume_role" ? connection.credential_reference : null;
   const launching = busy === `launch:${connection.id}`;

@@ -182,6 +182,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ region }),
     }),
+  useSharedAwsInDenali: (id: string, region: string) =>
+    request<Connection>(`/v1/shared/connections/aws/${encodeURIComponent(id)}/use-in-denali`, {
+      method: "POST",
+      body: JSON.stringify({ region, declared_scopes: ["aws.bedrock_agents"] }),
+    }),
   disableSharedAws: (id: string) =>
     request<{ status: string }>(
       `/v1/shared/connections/aws/${encodeURIComponent(id)}/disable`, { method: "POST" },
