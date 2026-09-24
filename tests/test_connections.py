@@ -722,11 +722,14 @@ def test_shared_aws_validation_uses_platform_lease_not_denali_role(monkeypatch) 
     }
     validation = AwsConnectionValidator(
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy role was used")),
-        max_workers=1,
+        max_workers=2,
     ).validate(target)
     assert validation["credential_state"] == "passed"
+    assert validation["health_state"] == "healthy"
     assert leased == [("us-east-1", [AWS_SCOPE_BEDROCK_AGENTS])]
     assert "sts.assume_role" not in calls
+    assert "bedrock-agent.list_agents" in calls
+    assert "bedrock.list_guardrails" in calls
 
 
 def test_aws_validation_is_per_plane_and_reduces_sdk_errors() -> None:
