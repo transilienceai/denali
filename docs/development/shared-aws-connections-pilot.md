@@ -16,19 +16,19 @@ enable `registered_app(app_id='denali', clerk_machine_id=<Denali machine ID>)`
 and an explicit `app_entitlement` for each pilot Clerk org. Configure only the
 Denali **development** Modal environment with:
 
-- `DENALI_PLATFORM_CONNECTIONS_ORIGIN` in the separate
-  `denali-platform-connections-dev` Secret: HTTPS origin of the dev platform API.
-  The reviewed `dev` deployment mounts it on the API and opt-in sync function,
-  without overwriting the existing multi-key core Secret.
+- `DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN` in the dev deploy shell: public HTTPS
+  origin of the dev platform API. Modal injects it as
+  `DENALI_PLATFORM_CONNECTIONS_ORIGIN` into every function so its dependency graph
+  is stable and workers can import the API module, without overwriting the
+  existing multi-key core Secret.
 - `DENALI_PLATFORM_MACHINE_SECRET_KEY` in the existing `denali-dev` core Secret:
   Denali's dedicated Clerk development machine secret. Do not reuse the human
   Clerk secret or store this in Git/Vercel.
 
 The isolated platform API, Denali machine authentication, pilot-org isolation,
-and CloudFormation template were verified on 2026-09-24. The new shared AWS
-binding remains unvalidated until its customer-side read-only role is created
-and the live STS check succeeds. The Denali feature branch has not been
-deployed to the shared `denali-dev` app.
+CloudFormation role, live validation, and bounded AWS read were verified on
+2026-09-24. The staging backend still needs a successful deployment and
+authenticated Connections-page check before the browser pilot is accepted.
 
 Run `sync_shared_aws_connections` with an exact Clerk `org_...` ID in the
 `denali-dev` Modal environment after the PR is reviewed and deployed through the
@@ -66,11 +66,10 @@ conclusion. Existing Denali collectors remain unchanged.
 Before the Denali backend PR is reviewed and deployed, the isolated one-off
 `scripts/verify_shared_aws_dev.py` Modal runner can exercise the same lease and
 read implementation against the pilot binding. It mounts only the existing
-Denali development Secrets and does not replace the shared `denali-dev` API.
-It currently returns `lease_status: 409`, as expected while the test role is
-absent. After the role exists and validation is healthy, run it again with the
-pilot connection UUID and selected Region; success returns only the bounded
-read summary.
+Denali development core Secret and a public origin configuration object; it
+does not replace the shared `denali-dev` API.
+The pilot role exists and its successful bounded read returns only a pass state
+and sample count; no temporary credentials or agent identifiers are returned.
 
 No additional Clerk key is required for this path beyond the existing Denali
 dev sender machine secret and platform dev receiver machine secret. Keep both
@@ -80,5 +79,5 @@ browser testing, while the backend's direct health endpoint remains separate.
 
 No production deployment, public `api.transilience.cloud` reverse proxy, MCP
 endpoint, automatic synchronization, or switch of Denali collectors is included
-in this PR. The customer-side dev test role, live validation, and successful
-scoped read are prerequisites before claiming the pilot works end-to-end.
+in this PR. The customer-side dev read works, but the signed-in staging UI
+must also display and use the shared connection before this pilot is complete.

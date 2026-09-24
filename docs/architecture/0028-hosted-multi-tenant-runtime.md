@@ -209,6 +209,11 @@ configuration because Modal resolves image/function declarations before runtime 
 attached. Every function mounts one core Secret and one environment-local provider Secret; keeping
 those resources stable is required for consistent local and remote Modal module evaluation. The
 provider Secret is mounted after the core Secret and must not repeat core Clerk or Neon keys.
+The shared-connections pilot also mounts one deployment-scoped configuration object for its
+public platform origin on every function, including workers that import the API module. That
+object remains present when unset, so the dependency count stays identical on remote import;
+the machine key remains in the core Secret. Production has neither platform origin nor machine
+access until its separate rollout is approved.
 Production normally uses `custom-secret` plus `denali-github-provider`; the Shasta Workspace pilot
 function additionally mounts a fixed-name `shasta-denali-bridge` for its per-source signing key and
 bindings, while retaining the provider Secret's Google Workspace operator identity. The fixed name
