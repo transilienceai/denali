@@ -202,6 +202,12 @@ after the core Secret and must not repeat core Clerk or Neon keys. Production cu
 `denali-github-provider`, which may contain only a non-sensitive disabled marker until a development
 GitHub App is configured.
 
+The shared-connections pilot also mounts one deployment-scoped configuration object for its
+public platform origin on every function, including workers that import the API module. That
+object remains present when unset, so the dependency count stays identical on remote import;
+the machine key remains in the core Secret. Production has neither platform origin nor machine
+access until its separate rollout is approved.
+
 Local Compose mode remains supported for development with one configured tenant and no Clerk
 authorization. Local mode is not a production topology and must not weaken hosted defaults.
 
