@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { api, type SharedAwsConnection, type SharedAwsValidation } from "./api";
 
-export function SharedAwsPilot({ canWrite }: { canWrite: boolean }) {
+export function SharedAwsPilot({ canWrite, onChanged }: { canWrite: boolean; onChanged: () => Promise<void> }) {
   const [available, setAvailable] = useState(false);
   const [items, setItems] = useState<SharedAwsConnection[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -98,6 +98,15 @@ export function SharedAwsPilot({ canWrite }: { canWrite: boolean }) {
     });
   }
 
+  function useInDenali() {
+    if (!selected) return;
+    void perform("use", async () => {
+      await api.useSharedAwsInDenali(selected.id, region.trim());
+      await onChanged();
+      setMessage("Shared AWS is available in Denali connections. Validate it there, then collect the selected Region and scope.");
+    });
+  }
+
   function disable() {
     if (!selected || !window.confirm("Disable this shared AWS connection for this organization?")) return;
     void perform("disable", async () => {
@@ -110,7 +119,7 @@ export function SharedAwsPilot({ canWrite }: { canWrite: boolean }) {
   if (!available) return null;
   return <section className="panel shared-aws-pilot" aria-label="Shared AWS pilot">
     <div className="shared-aws-pilot-heading">
-      <div><span className="eyebrow">SHARED CONNECTION PILOT</span><h3>Shared AWS connection</h3><p>This opt-in path creates a separate read-only platform role for future reuse. Existing Denali connections and collectors are unchanged.</p></div>
+      <div><span className="eyebrow">SHARED CONNECTION PILOT</span><h3>Shared AWS connection</h3><p>This opt-in path creates a reusable read-only platform role. Add a ready connection to Denali to validate and collect with scoped temporary access; existing Denali roles remain unchanged.</p></div>
       <button type="button" onClick={() => void refresh()}>Refresh</button>
     </div>
     {canWrite && <form className="shared-aws-pilot-form" onSubmit={create}>
@@ -127,6 +136,7 @@ export function SharedAwsPilot({ canWrite }: { canWrite: boolean }) {
           <button type="button" disabled={busy !== null} onClick={download}>Download role template</button>
           <button type="button" disabled={busy !== null || selected.availability === "disabled"} onClick={validate}>Validate</button>
           <button type="button" disabled={busy !== null || selected.availability !== "ready"} onClick={probe}>Test scoped AWS read</button>
+          <button type="button" disabled={busy !== null || selected.availability !== "ready"} onClick={useInDenali}>Use in Denali</button>
           <button type="button" disabled={busy !== null || selected.availability === "disabled"} onClick={disable}>Disable</button>
         </div>}
         {validation && <p role="status">Validation: {validation.job_state ?? "not started"} · {validation.health_state}{validation.validation_summary ? ` · ${validation.validation_summary}` : ""}</p>}

@@ -219,6 +219,10 @@ export type Connection = {
         role_arn: string;
       }
     | {
+        type: "platform_shared_aws";
+        platform_connection_id: string;
+      }
+    | {
         type: "azure_multitenant_app";
         client_id: string;
         service_principal_id?: string;
