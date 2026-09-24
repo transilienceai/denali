@@ -26,9 +26,9 @@ Denali **development** Modal environment with:
   Clerk secret or store this in Git/Vercel.
 
 The isolated platform API, Denali machine authentication, pilot-org isolation,
-CloudFormation role, live validation, and bounded AWS read were verified on
-2026-09-24. The staging backend still needs a successful deployment and
-authenticated Connections-page check before the browser pilot is accepted.
+CloudFormation role, live validation, signed-in staging Connections panel, and
+bounded AWS read were verified on 2026-09-24. The new **Use in Denali** flow
+below still requires PR review, development deployment, and hosted acceptance.
 
 Run `sync_shared_aws_connections` with an exact Clerk `org_...` ID in the
 `denali-dev` Modal environment after the PR is reviewed and deployed through the
@@ -61,7 +61,19 @@ server-side. The response contains only the Region, pass state, and a zero-or-on
 sample count; it never returns temporary keys or agent identifiers to the
 browser. The platform rejects a lease for a Region outside selected coverage.
 This proves the identity and read path, not evidence collection or a safety
-conclusion. Existing Denali collectors remain unchanged.
+conclusion. Existing Denali-owned AWS roles remain unchanged.
+
+After the platform connection is ready, **Use in Denali** creates an org-scoped
+Denali connection that points at its platform UUID, with one selected Region and
+explicit scopes. It does not copy the platform role ARN, external ID, or temporary
+credentials into Denali Neon. Denali's durable validation and collection workers
+reload the server-resolved Clerk organization, obtain a fresh scoped lease for
+the connection and Region, verify the observed AWS account, and keep the
+temporary credentials inside the worker. The first UI path uses
+`aws.bedrock_agents` in the selected Region. A healthy Denali connection is not
+proof of completed collection; use **Collect AWS evidence** and inspect its
+separate collection status and coverage. Disable/delete Denali's local use
+separately from the platform's global connection lifecycle.
 
 Before the Denali backend PR is reviewed and deployed, the isolated one-off
 `scripts/verify_shared_aws_dev.py` Modal runner can exercise the same lease and
@@ -78,6 +90,8 @@ The stable `denali-dev.transilience.cloud` domain may require Vercel SSO for
 browser testing, while the backend's direct health endpoint remains separate.
 
 No production deployment, public `api.transilience.cloud` reverse proxy, MCP
-endpoint, automatic synchronization, or switch of Denali collectors is included
-in this PR. The customer-side dev read works, but the signed-in staging UI
-must also display and use the shared connection before this pilot is complete.
+endpoint, automatic synchronization, or switch of existing Denali-owned roles
+is included in this PR. The new Denali-use path is not accepted until its
+reviewed revision reaches `dev` and the signed-in staging flow completes
+attach -> Denali validation -> collection -> local disable/delete without
+cross-org access or credential exposure.
