@@ -108,6 +108,11 @@ from denali.connectors.github_repository import GitHubRepositoryCollector
 from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
 from denali.domain import ActivityBatch, FindingBatch, InventoryBatch
 from denali.domain.inventory import ASSET_CATEGORY_KINDS, InventoryCategory
+from denali.integrations.shared_aws_probe import probe_shared_bedrock_agents
+from denali.integrations.shared_connections_client import (
+    SharedConnectionsClient,
+    SharedConnectionsError,
+)
 from denali.store.db import migrate
 from denali.store.repository import PostgresInventoryRepository
 
@@ -595,6 +600,26 @@ class AwsConnectionCreate(BaseModel):
     )
 
 
+class SharedAwsConnectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str = Field(pattern=r"^[0-9]{12}$")
+    partition: Literal["aws", "aws-us-gov", "aws-cn"] = "aws"
+    role_name: Literal["TransilienceSecurityAuditRole"] = "TransilienceSecurityAuditRole"
+    deployment_region: str = "us-east-1"
+    coverage_mode: Literal["automatic", "selected"] = AWS_COVERAGE_AUTOMATIC
+    regions: list[str] = Field(default_factory=list, max_length=40)
+    declared_scopes: list[str] = Field(
+        default_factory=lambda: list(AWS_SCOPES), min_length=1, max_length=len(AWS_SCOPES)
+    )
+
+
+class SharedAwsReadProbeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    region: str = Field(min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+
+
 class AzureConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -755,6 +780,7 @@ def create_app(
     vulnerability_import_dispatcher: Callable[[str], str | None] | None = None,
     evidence_report_store: EvidenceReportStore | None = None,
     github_actions_token_verifier: GitHubActionsTokenVerifier | None = None,
+    shared_connections_client: SharedConnectionsClient | None = None,
     migrate_on_start: bool = True,
 ) -> FastAPI:
     configured_dsn = os.environ.get("DENALI_DSN")
@@ -785,6 +811,9 @@ def create_app(
     configured_github_app = github_app_client or _github_app_from_environment()
     configured_azure_repos_client = azure_repos_client or _azure_repos_client_from_environment()
     configured_evidence_store = evidence_report_store or _evidence_store_from_environment()
+    configured_shared_connections_client = (
+        shared_connections_client or SharedConnectionsClient.from_environment()
+    )
     configured_github_actions_verifier = github_actions_token_verifier
     if (
         configured_github_actions_verifier is None
@@ -828,6 +857,7 @@ def create_app(
         app.state.collection_dispatcher = collection_dispatcher
         app.state.vulnerability_import_dispatcher = vulnerability_import_dispatcher
         app.state.evidence_report_store = configured_evidence_store
+        app.state.shared_connections_client = configured_shared_connections_client
         app.state.github_actions_token_verifier = configured_github_actions_verifier
         app.state.connection_validator = connection_validator or AwsConnectionValidator()
         app.state.azure_connection_validator = (
@@ -1557,6 +1587,104 @@ def create_app(
         repo, current_tenant = _context(request)
         rows = repo.list_connections(current_tenant)
         return {"items": [_with_validation_state(request, current_tenant, row) for row in rows]}
+
+    def _shared_connections_context(request: Request) -> tuple[SharedConnectionsClient, str]:
+        _context(request)
+        if request.app.state.auth_mode != "clerk":
+            raise HTTPException(status_code=503, detail="shared connections require Clerk hosting")
+        client = request.app.state.shared_connections_client
+        if client is None:
+            raise HTTPException(status_code=503, detail="shared connections are not configured")
+        return client, request.state.denali_auth.organization_id
+
+    def _shared_request(
+        request: Request,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        expect_text: bool = False,
+    ) -> dict[str, Any] | str:
+        client, clerk_org_id = _shared_connections_context(request)
+        try:
+            return client.request(
+                method, path, clerk_org_id=clerk_org_id, payload=payload, expect_text=expect_text
+            )
+        except SharedConnectionsError as error:
+            raise HTTPException(
+                status_code=error.status_code, detail="shared connections request failed"
+            ) from error
+
+    @app.get("/v1/shared/connections")
+    def list_shared_connections(request: Request, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        return _shared_request(request, "GET", "/v1/connections")  # type: ignore[return-value]
+
+    @app.post("/v1/shared/connections/aws", status_code=201)
+    def create_shared_aws_connection(
+        request: Request, payload: SharedAwsConnectionCreate
+    ) -> dict[str, Any]:
+        return _shared_request(
+            request,
+            "POST",
+            "/internal/v1/connections/aws",
+            payload={
+                "external_account_id": payload.account_id,
+                **payload.model_dump(exclude={"account_id"}),
+            },
+        )  # type: ignore[return-value]
+
+    @app.get("/v1/shared/connections/aws/{connection_id}/cloudformation.yaml")
+    def shared_aws_cloudformation(request: Request, connection_id: UUID) -> PlainTextResponse:
+        template = _shared_request(
+            request,
+            "GET",
+            f"/internal/v1/connections/aws/{connection_id}/cloudformation.yaml",
+            expect_text=True,
+        )
+        return PlainTextResponse(
+            str(template), media_type="application/yaml", headers={"Cache-Control": "no-store"}
+        )
+
+    @app.post("/v1/shared/connections/aws/{connection_id}/validate", status_code=202)
+    def validate_shared_aws_connection(request: Request, connection_id: UUID) -> dict[str, Any]:
+        return _shared_request(
+            request, "POST", f"/internal/v1/connections/aws/{connection_id}/validate"
+        )  # type: ignore[return-value]
+
+    @app.get("/v1/shared/connections/aws/{connection_id}/validation")
+    def shared_aws_validation_status(request: Request, connection_id: UUID) -> dict[str, Any]:
+        return _shared_request(
+            request, "GET", f"/internal/v1/connections/aws/{connection_id}/validation"
+        )  # type: ignore[return-value]
+
+    @app.post("/v1/shared/connections/aws/{connection_id}/probe")
+    def probe_shared_aws_connection(
+        request: Request,
+        connection_id: UUID,
+        payload: SharedAwsReadProbeInput,
+        response: Response,
+    ) -> dict[str, Any]:
+        leased = _shared_request(
+            request,
+            "POST",
+            f"/internal/v1/connections/aws/{connection_id}/credentials",
+            payload={"scopes": ["aws.bedrock_agents"], "region": payload.region},
+        )
+        if not isinstance(leased, dict):
+            raise HTTPException(status_code=502, detail="shared AWS lease failed")
+        try:
+            result = probe_shared_bedrock_agents(leased, payload.region)
+        except Exception as error:  # noqa: BLE001 - never expose AWS errors or temporary keys.
+            raise HTTPException(status_code=502, detail="shared AWS read failed") from error
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    @app.post("/v1/shared/connections/aws/{connection_id}/disable")
+    def disable_shared_aws_connection(request: Request, connection_id: UUID) -> dict[str, Any]:
+        return _shared_request(
+            request, "POST", f"/internal/v1/connections/aws/{connection_id}/disable"
+        )  # type: ignore[return-value]
 
     @app.post("/v1/connections", status_code=201)
     def create_connection(request: Request, connection: ConnectionCreate) -> dict[str, Any]:

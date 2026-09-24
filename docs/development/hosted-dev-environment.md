@@ -79,6 +79,11 @@ DENALI_MIGRATION_DSN
 used only by the explicit migration function. Both must identify the isolated development
 database and role, never production.
 
+For the opt-in shared-connections pilot, `denali-platform-connections-dev` is a separate
+single-variable Modal Secret containing `DENALI_PLATFORM_CONNECTIONS_ORIGIN`. The dev deploy
+mounts it only on the API and manual shared-connection sync function. The existing core Secret
+holds `DENALI_PLATFORM_MACHINE_SECRET_KEY`; do not overwrite it just to add the origin.
+
 ## Automatic development deployment
 
 A push to `dev` starts the **Deploy Modal development** GitHub Actions workflow. It requires the

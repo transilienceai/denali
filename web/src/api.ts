@@ -71,6 +71,32 @@ export type CreatedOrganizationUser = {
   role: OrganizationRole;
 };
 
+export type SharedAwsConnection = {
+  id: string;
+  connection_kind: "shared_aws" | "legacy_metadata";
+  provider: "aws";
+  partition: string;
+  external_account_id: string;
+  availability: string;
+  validated_scopes: string[];
+  last_validated_at: string | null;
+};
+
+export type SharedAwsValidation = {
+  job_state: string | null;
+  health_state: string;
+  credential_state: string;
+  job_error_code: string | null;
+  validation_summary: string | null;
+};
+
+export type SharedAwsProbe = {
+  scope: "aws.bedrock_agents";
+  region: string;
+  read_state: "passed";
+  sample_count: number;
+};
+
 type TokenProvider = () => Promise<string | null>;
 let tokenProvider: TokenProvider = async () => null;
 
@@ -128,6 +154,38 @@ export const api = {
       body: JSON.stringify(account),
     }),
   connections: () => request<{ items: Connection[] }>("/v1/connections"),
+  sharedAwsConnections: () => request<{ items: SharedAwsConnection[] }>("/v1/shared/connections"),
+  createSharedAwsConnection: (accountId: string, region: string) =>
+    request<{ id: string; availability: string }>("/v1/shared/connections/aws", {
+      method: "POST",
+      body: JSON.stringify({
+        account_id: accountId,
+        partition: "aws",
+        deployment_region: region,
+        coverage_mode: "selected",
+        regions: [region],
+        declared_scopes: ["aws.bedrock_agents"],
+      }),
+    }),
+  sharedAwsTemplate: (id: string) =>
+    requestBlob(`/v1/shared/connections/aws/${encodeURIComponent(id)}/cloudformation.yaml`),
+  validateSharedAws: (id: string) =>
+    request<{ job_id: string; state: string }>(
+      `/v1/shared/connections/aws/${encodeURIComponent(id)}/validate`, { method: "POST" },
+    ),
+  sharedAwsValidation: (id: string) =>
+    request<SharedAwsValidation>(
+      `/v1/shared/connections/aws/${encodeURIComponent(id)}/validation`,
+    ),
+  probeSharedAws: (id: string, region: string) =>
+    request<SharedAwsProbe>(`/v1/shared/connections/aws/${encodeURIComponent(id)}/probe`, {
+      method: "POST",
+      body: JSON.stringify({ region }),
+    }),
+  disableSharedAws: (id: string) =>
+    request<{ status: string }>(
+      `/v1/shared/connections/aws/${encodeURIComponent(id)}/disable`, { method: "POST" },
+    ),
   connection: (id: string) => request<Connection>(`/v1/connections/${id}`),
   createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | AzureReposConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate) =>
     request<Connection>("/v1/connections", {
