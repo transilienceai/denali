@@ -100,6 +100,7 @@ def test_read_and_mutation_routes_keep_org_and_admin_boundaries():
             "/v1/shared/connections", headers={"Authorization": "Bearer alpha-member"}
         )
         assert listed.status_code == 200
+        assert listed.headers["cache-control"] == "no-store"
         assert shared.calls[-1][2] == "org_alpha"
         template = client.get(
             f"/v1/shared/connections/aws/{connection}/cloudformation.yaml",

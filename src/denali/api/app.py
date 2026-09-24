@@ -1616,7 +1616,8 @@ def create_app(
             ) from error
 
     @app.get("/v1/shared/connections")
-    def list_shared_connections(request: Request) -> dict[str, Any]:
+    def list_shared_connections(request: Request, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
         return _shared_request(request, "GET", "/v1/connections")  # type: ignore[return-value]
 
     @app.post("/v1/shared/connections/aws", status_code=201)
