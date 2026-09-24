@@ -107,6 +107,10 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
     credential_reference: dict[str, Any] = {"type": credential_type}
     if credential_type == "aws_assume_role":
         credential_reference["role_arn"] = internal_reference["role_arn"]
+    elif credential_type == "platform_shared_aws":
+        credential_reference["platform_connection_id"] = internal_reference[
+            "platform_connection_id"
+        ]
     elif credential_type == "azure_multitenant_app":
         credential_reference["client_id"] = internal_reference["client_id"]
         if internal_reference.get("service_principal_id"):
@@ -3645,10 +3649,13 @@ class PostgresInventoryRepository:
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             row = connection.execute(
                 """
-                SELECT id, provider, display_name, lifecycle_state, credential_type,
-                       credential_reference, declared_scopes, coverage_plan, configuration
-                FROM provider_connection
-                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                SELECT c.id, c.provider, c.display_name, c.lifecycle_state,
+                       c.credential_type, c.credential_reference, c.declared_scopes,
+                       c.coverage_plan, c.configuration,
+                       tenant.clerk_organization_id
+                FROM provider_connection AS c
+                LEFT JOIN denali_tenant AS tenant ON tenant.id = c.tenant_id
+                WHERE c.tenant_id = %s::uuid AND c.id = %s::uuid
                 """,
                 (tenant_id, connection_id),
             ).fetchone()

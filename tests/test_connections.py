@@ -694,6 +694,41 @@ class FakeSession:
         return FakeClient(service, self.calls, failure=service == self.failed_service)
 
 
+def test_shared_aws_validation_uses_platform_lease_not_denali_role(monkeypatch) -> None:
+    from denali.integrations import shared_aws_session
+
+    calls: list[str] = []
+    leased: list[tuple[str, list[str]]] = []
+
+    def fake_lease(connection, *, region, scopes, session_factory):
+        leased.append((region, scopes))
+        return FakeSession(calls)
+
+    monkeypatch.setattr(shared_aws_session, "leased_aws_session", fake_lease)
+    target = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "credential_type": "platform_shared_aws",
+        "credential_reference": {
+            "platform_connection_id": "11111111-1111-4111-8111-111111111111"
+        },
+        "clerk_organization_id": "org_alpha",
+        "declared_scopes": [AWS_SCOPE_BEDROCK_AGENTS],
+        "configuration": {
+            "account_id": "123456789012",
+            "coverage_mode": AWS_COVERAGE_SELECTED,
+            "regions": ["us-east-1"],
+        },
+        "coverage_plan": aws_coverage_plan([AWS_SCOPE_BEDROCK_AGENTS], ["us-east-1"]),
+    }
+    validation = AwsConnectionValidator(
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy role was used")),
+        max_workers=1,
+    ).validate(target)
+    assert validation["credential_state"] == "passed"
+    assert leased == [("us-east-1", [AWS_SCOPE_BEDROCK_AGENTS])]
+    assert "sts.assume_role" not in calls
+
+
 def test_aws_validation_is_per_plane_and_reduces_sdk_errors() -> None:
     calls: list[str] = []
     sessions = [FakeSession(calls), FakeSession(calls, failed_service="cloudtrail")]
