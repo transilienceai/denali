@@ -72,7 +72,7 @@ class SharedConnectionsClient:
                         if method == "GET" or payload is None
                         else None
                     ),
-                    json={"clerk_org_id": clerk_org_id, **payload} if payload is not None else None,
+                    json={**payload, "clerk_org_id": clerk_org_id} if payload is not None else None,
                     headers={"Authorization": f"Bearer {token}"},
                 )
         except (httpx.RequestError, ClerkBaseError) as error:
