@@ -63,6 +63,15 @@ browser. The platform rejects a lease for a Region outside selected coverage.
 This proves the identity and read path, not evidence collection or a safety
 conclusion. Existing Denali collectors remain unchanged.
 
+Before the Denali backend PR is reviewed and deployed, the isolated one-off
+`scripts/verify_shared_aws_dev.py` Modal runner can exercise the same lease and
+read implementation against the pilot binding. It mounts only the existing
+Denali development Secrets and does not replace the shared `denali-dev` API.
+It currently returns `lease_status: 409`, as expected while the test role is
+absent. After the role exists and validation is healthy, run it again with the
+pilot connection UUID and selected Region; success returns only the bounded
+read summary.
+
 No additional Clerk key is required for this path beyond the existing Denali
 dev sender machine secret and platform dev receiver machine secret. Keep both
 in their respective Modal Secrets; Vercel and the browser receive neither.
