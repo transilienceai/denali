@@ -86,8 +86,12 @@ def _validators():
         GitHubConnectionValidator,
         GoogleWorkspaceConnectionValidator,
     )
+    from denali.integrations.shared_connections_client import SharedConnectionsClient
+    from denali.integrations.shared_github import GitHubValidatorRouter
 
     github_app = _github_app_from_environment()
+    shared_connections = SharedConnectionsClient.from_environment()
+    legacy_github_validator = GitHubConnectionValidator(github_app) if github_app else None
     azure_repos_client = _azure_repos_client_from_environment()
     entra_client = _entra_consent_client_from_environment()
     workspace_operator = _google_workspace_operator_from_environment()
@@ -96,7 +100,11 @@ def _validators():
         "azure": AzureConnectionValidator(),
         "entra": EntraConnectionValidator(entra_client) if entra_client else None,
         "gcp": GcpConnectionValidator(),
-        "github": GitHubConnectionValidator(github_app) if github_app else None,
+        "github": (
+            GitHubValidatorRouter(legacy_github_validator, shared_connections)
+            if shared_connections
+            else legacy_github_validator
+        ),
         "azure_repos": (
             AzureReposConnectionValidator(azure_repos_client) if azure_repos_client else None
         ),
@@ -225,14 +233,18 @@ def collection_worker(job_id: str) -> None:
     from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
     from denali.connectors.github_repository import GitHubRepositoryCollector
     from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
+    from denali.integrations.shared_connections_client import SharedConnectionsClient
+    from denali.integrations.shared_github import GitHubCollectorRouter
     from denali.store.repository import PostgresInventoryRepository
 
     _configure_aws_oidc()
     _configure_gcp_oidc()
     entra_client = _entra_consent_client_from_environment()
     github_app = _github_app_from_environment()
+    shared_connections = SharedConnectionsClient.from_environment()
     azure_repos_client = _azure_repos_client_from_environment()
     workspace_operator = _google_workspace_operator_from_environment()
+    legacy_github_collector = GitHubRepositoryCollector(github_app) if github_app else None
     run_durable_collection_job(
         PostgresInventoryRepository(os.environ["DENALI_DSN"]),
         {
@@ -242,7 +254,14 @@ def collection_worker(job_id: str) -> None:
             "azure_agent_runtime": AzureConnectionAgentRuntimeCollector(),
             "entra_ai": EntraConnectionCollector(entra_client) if entra_client else None,
             "gcp_deployments": GcpConnectionDeploymentCollector(),
-            "github_source": GitHubRepositoryCollector(github_app) if github_app else None,
+            "github_source": (
+                GitHubCollectorRouter(
+                    legacy_github_collector,
+                    shared_connections,
+                )
+                if shared_connections
+                else legacy_github_collector
+            ),
             "azure_repos_source": (
                 AzureReposRepositoryCollector(azure_repos_client) if azure_repos_client else None
             ),

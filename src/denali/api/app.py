@@ -114,6 +114,11 @@ from denali.integrations.shared_connections_client import (
     SharedConnectionsClient,
     SharedConnectionsError,
 )
+from denali.integrations.shared_github import (
+    GitHubCollectorRouter,
+    GitHubValidatorRouter,
+    normalize_shared_repositories,
+)
 from denali.store.db import migrate
 from denali.store.repository import PostgresInventoryRepository
 
@@ -632,6 +637,16 @@ class SharedAwsUseInput(BaseModel):
     )
 
 
+class SharedGitHubUseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    declared_scopes: list[str] = Field(
+        default_factory=lambda: list(GITHUB_SCOPES),
+        min_length=1,
+        max_length=len(GITHUB_SCOPES),
+    )
+
+
 class AzureConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -908,15 +923,25 @@ def create_app(
             gcp_deployment_collector or GcpConnectionDeploymentCollector()
         )
         app.state.github_app_client = configured_github_app
-        app.state.github_connection_validator = github_connection_validator or (
+        legacy_github_validator = github_connection_validator or (
             GitHubConnectionValidator(configured_github_app)
             if configured_github_app is not None
             else None
         )
-        app.state.github_repository_collector = github_repository_collector or (
+        legacy_github_collector = github_repository_collector or (
             GitHubRepositoryCollector(configured_github_app)
             if configured_github_app is not None
             else None
+        )
+        app.state.github_connection_validator = (
+            GitHubValidatorRouter(legacy_github_validator, configured_shared_connections_client)
+            if configured_shared_connections_client is not None
+            else legacy_github_validator
+        )
+        app.state.github_repository_collector = (
+            GitHubCollectorRouter(legacy_github_collector, configured_shared_connections_client)
+            if configured_shared_connections_client is not None
+            else legacy_github_collector
         )
         app.state.azure_repos_client = configured_azure_repos_client
         app.state.azure_repos_connection_validator = azure_repos_connection_validator or (
@@ -1800,6 +1825,127 @@ def create_app(
             request, "POST", f"/internal/v1/connections/aws/{connection_id}/disable"
         )  # type: ignore[return-value]
 
+    @app.post("/v1/shared/connections/github/setup", status_code=201)
+    def start_shared_github_setup(request: Request, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        return _shared_request(request, "POST", "/internal/v1/connections/github/setup", payload={})  # type: ignore[return-value]
+
+    @app.post("/v1/shared/connections/github/{connection_id}/use-in-denali", status_code=201)
+    def use_shared_github_in_denali(
+        request: Request, connection_id: UUID, payload: SharedGitHubUseInput
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        listing = _shared_request(request, "GET", "/v1/connections")
+        if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
+            raise HTTPException(status_code=502, detail="shared connection list is invalid")
+        shared = next(
+            (
+                item
+                for item in listing["items"]
+                if isinstance(item, dict) and item.get("id") == str(connection_id)
+            ),
+            None,
+        )
+        if shared is None or shared.get("connection_kind") != "shared_github":
+            raise HTTPException(status_code=404, detail="shared GitHub connection not found")
+        if shared.get("availability") != "ready":
+            raise HTTPException(status_code=409, detail="shared GitHub connection is not ready")
+        scopes = payload.declared_scopes
+        if len(set(scopes)) != len(scopes) or not set(scopes) <= set(GITHUB_SCOPES):
+            raise HTTPException(status_code=422, detail="invalid shared GitHub scopes")
+        if not set(scopes) <= set(shared.get("validated_scopes") or []):
+            raise HTTPException(status_code=403, detail="shared GitHub scopes are not entitled")
+        account_id = shared.get("account_id")
+        account_login = shared.get("account_login")
+        installation_id = shared.get("installation_id")
+        repository_count = shared.get("repository_count")
+        if (
+            not isinstance(account_id, int)
+            or account_id <= 0
+            or not isinstance(account_login, str)
+            or not account_login
+            or not isinstance(installation_id, int)
+            or installation_id <= 0
+            or not isinstance(repository_count, int)
+            or not 1 <= repository_count <= 500
+            or shared.get("repository_selection") not in {"all", "selected"}
+        ):
+            raise HTTPException(status_code=502, detail="shared GitHub boundary is invalid")
+        repository_payload = _shared_request(
+            request,
+            "GET",
+            f"/internal/v1/connections/github/{connection_id}/repositories",
+        )
+        try:
+            repositories = normalize_shared_repositories(
+                repository_payload, expected_count=repository_count
+            )
+        except (RuntimeError, ValueError) as error:
+            raise HTTPException(
+                status_code=502, detail="shared GitHub repository boundary is invalid"
+            ) from error
+        if any(
+            item["owner_id"] != account_id or item["owner_login"].lower() != account_login.lower()
+            for item in repositories
+        ):
+            raise HTTPException(status_code=502, detail="shared GitHub owner boundary is invalid")
+        existing = repo.get_connection(current_tenant, str(connection_id))
+        if existing is not None:
+            if (
+                existing.get("credential_reference", {}).get("type") != "platform_shared_github"
+                or existing.get("lifecycle_state") != "active"
+                or set(existing.get("declared_scopes") or []) != set(scopes)
+                or existing.get("configuration", {}).get("repositories") != repositories
+            ):
+                raise HTTPException(status_code=409, detail="existing Denali connection differs")
+            return _with_validation_state(request, current_tenant, existing)
+        # The broker independently checks current org, app, installation,
+        # repository ID and entitlement. Never store the short-lived token.
+        leased = _shared_request(
+            request,
+            "POST",
+            f"/internal/v1/connections/github/{connection_id}/token",
+            payload={"repository_ids": [repositories[0]["id"]], "scopes": scopes},
+        )
+        if (
+            not isinstance(leased, dict)
+            or not isinstance(leased.get("token"), str)
+            or not leased["token"].startswith("ghs_")
+            or leased.get("repository_ids") != [repositories[0]["id"]]
+        ):
+            raise HTTPException(status_code=502, detail="shared GitHub lease failed")
+        try:
+            created = repo.create_connection(
+                current_tenant,
+                connection_id=str(connection_id),
+                provider="github",
+                display_name=f"Shared GitHub {account_login} {str(connection_id)[:8]}",
+                credential_type="platform_shared_github",
+                credential_reference={
+                    "platform_connection_id": str(connection_id),
+                    "installation_id": installation_id,
+                },
+                declared_scopes=scopes,
+                coverage_plan=github_coverage_plan(scopes, repositories),
+                configuration={
+                    "coverage_mode": "exact-installation-repositories",
+                    "account_id": account_id,
+                    "account_login": account_login,
+                    "installation_repository_selection": shared["repository_selection"],
+                    "repositories": repositories,
+                    "onboarding": {"method": "platform_shared_github"},
+                },
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return _with_validation_state(request, current_tenant, created)
+
+    @app.post("/v1/shared/connections/github/{connection_id}/disable")
+    def disable_shared_github_connection(request: Request, connection_id: UUID) -> dict[str, Any]:
+        return _shared_request(
+            request, "POST", f"/internal/v1/connections/github/{connection_id}/disable"
+        )  # type: ignore[return-value]
+
     @app.post("/v1/connections", status_code=201)
     def create_connection(request: Request, connection: ConnectionCreate) -> dict[str, Any]:
         repo, current_tenant = _context(request)
@@ -2644,7 +2790,11 @@ def create_app(
     ) -> dict[str, Any]:
         repo, current_tenant = _context(request)
         target = repo.get_connection_validation_target(current_tenant, str(connection_id))
-        if target is None or target["provider"] != "github":
+        if (
+            target is None
+            or target["provider"] != "github"
+            or target["credential_type"] != "github_app_installation"
+        ):
             raise HTTPException(status_code=404, detail="GitHub connection not found")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be launched")
@@ -2685,7 +2835,11 @@ def create_app(
         state_tenant, connection_id = _github_state_context(state)
         repo, current_tenant = _context_for_tenant(request, state_tenant)
         target = repo.get_connection_validation_target(current_tenant, connection_id)
-        if target is None or target["provider"] != "github":
+        if (
+            target is None
+            or target["provider"] != "github"
+            or target["credential_type"] != "github_app_installation"
+        ):
             raise HTTPException(status_code=404, detail="GitHub connection not found")
         expected_hash = target["credential_reference"].get("install_state_sha256")
         if not expected_hash or not hmac.compare_digest(expected_hash, _sha256_text(state)):
@@ -2728,7 +2882,11 @@ def create_app(
         state_tenant, connection_id = _github_state_context(state)
         repo, current_tenant = _context_for_tenant(request, state_tenant)
         target = repo.get_connection_validation_target(current_tenant, connection_id)
-        if target is None or target["provider"] != "github":
+        if (
+            target is None
+            or target["provider"] != "github"
+            or target["credential_type"] != "github_app_installation"
+        ):
             raise HTTPException(status_code=404, detail="GitHub connection not found")
         expected_hash = target["credential_reference"].get("oauth_state_sha256")
         if not expected_hash or not hmac.compare_digest(expected_hash, _sha256_text(state)):
@@ -4292,7 +4450,9 @@ def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> 
             result["provider"] == "gcp" and request.app.state.gcp_setup_launcher is not None
         ),
         "github_app": (
-            result["provider"] == "github" and request.app.state.github_app_client is not None
+            result["provider"] == "github"
+            and result.get("credential_reference", {}).get("type") == "github_app_installation"
+            and request.app.state.github_app_client is not None
         ),
         "azure_repos_oauth": (
             result["provider"] == "azure_repos" and request.app.state.azure_repos_client is not None
