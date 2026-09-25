@@ -212,6 +212,16 @@ class PostgresInventoryRepository:
         assert row is not None
         return str(row[0])
 
+    def lookup_tenant(self, clerk_organization_id: str) -> str | None:
+        """Read an existing mapping without creating a tenant for machine traffic."""
+
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                "SELECT id FROM denali_tenant WHERE clerk_organization_id = %s",
+                (clerk_organization_id,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
     def ingest(self, tenant_id: str, batch: InventoryBatch) -> dict[str, int]:
         """Persist a batch atomically and reconcile only completely covered planes."""
 
