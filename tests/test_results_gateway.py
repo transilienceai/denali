@@ -129,6 +129,8 @@ def test_clerk_gateway_verifier_requires_subject_scope_and_bound_claims(monkeypa
         expired=False,
         subject="mch_Gateway1",
         scopes=["mch_Denali1"],
+        created_at=1_000_000,
+        expiration=1_300_000,
         claims={"purpose": "results:read", "org_id": "org_Alpha1", "user_id": "user_Alice1"},
     )
     machine = SimpleNamespace(m2m=SimpleNamespace(verify_token=lambda **_: result))
@@ -140,6 +142,9 @@ def test_clerk_gateway_verifier_requires_subject_scope_and_bound_claims(monkeypa
     result.scopes = ["mch_Other1"]
     assert verifier.verify("token") is None
     result.scopes = ["mch_Denali1"]
+    result.expiration = result.created_at + 16 * 60 * 1000
+    assert verifier.verify("token") is None
+    result.expiration = result.created_at + 5 * 60 * 1000
     result.claims = {"purpose": "results:read", "org_id": "org_Other1"}
     assert verifier.verify("token") is None
     result.claims = {"purpose": "results:read", "org_id": "org_Alpha1", "user_id": "user_Alice1"}

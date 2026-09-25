@@ -45,6 +45,8 @@ class ClerkResultsGatewayVerifier:
             or verified.expired
             or verified.subject != self._gateway_machine_id
             or self._receiver_machine_id not in verified.scopes
+            or verified.expiration is None
+            or not 0 < verified.expiration - verified.created_at <= 15 * 60 * 1000
         ):
             return None
         claims = verified.claims
