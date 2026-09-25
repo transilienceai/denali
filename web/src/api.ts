@@ -97,6 +97,20 @@ export type SharedAwsProbe = {
   sample_count: number;
 };
 
+export type SharedGitHubConnection = {
+  id: string;
+  connection_kind: "shared_github";
+  provider: "github";
+  external_account_id: string;
+  account_id: number;
+  account_login: string;
+  installation_id: number;
+  repository_selection: "all" | "selected";
+  repository_count: number;
+  availability: string;
+  validated_scopes: string[];
+};
+
 type TokenProvider = () => Promise<string | null>;
 let tokenProvider: TokenProvider = async () => null;
 
@@ -190,6 +204,25 @@ export const api = {
   disableSharedAws: (id: string) =>
     request<{ status: string }>(
       `/v1/shared/connections/aws/${encodeURIComponent(id)}/disable`, { method: "POST" },
+    ),
+  sharedGithubConnections: () =>
+    request<{ items: SharedGitHubConnection[] }>("/v1/shared/connections"),
+  startSharedGithubSetup: () =>
+    request<{ install_url: string }>("/v1/shared/connections/github/setup", {
+      method: "POST",
+    }),
+  useSharedGithubInDenali: (id: string) =>
+    request<Connection>(`/v1/shared/connections/github/${encodeURIComponent(id)}/use-in-denali`, {
+      method: "POST",
+      body: JSON.stringify({
+        declared_scopes: [
+          "github.repository_metadata", "github.repository_contents", "github.actions_workflows",
+        ],
+      }),
+    }),
+  disableSharedGithub: (id: string) =>
+    request<{ status: string }>(
+      `/v1/shared/connections/github/${encodeURIComponent(id)}/disable`, { method: "POST" },
     ),
   connection: (id: string) => request<Connection>(`/v1/connections/${id}`),
   createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | AzureReposConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate) =>
