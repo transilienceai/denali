@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from test_shared_connections_api import FakeAuthenticator, FakeRepository
 
 from denali.api.app import create_app
+from denali.connections.github import github_coverage_plan
 from denali.integrations.shared_github import (
     GitHubValidatorRouter,
     SharedGitHubAppClient,
@@ -243,6 +244,66 @@ def test_shared_github_broker_rejects_revoked_or_out_of_boundary_repository():
     validation = GitHubValidatorRouter(None, platform).validate(target)
     assert validation["credential_state"] == "failed"
     assert validation["health_state"] == "unhealthy"
+
+
+def test_shared_github_validator_reads_exact_repository_through_broker(monkeypatch):
+    from denali.integrations import shared_github
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, data):
+            self.data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.data
+
+    paths = []
+
+    def github_read(method, url, **options):
+        assert method == "GET"
+        assert options["headers"]["Authorization"] == "Bearer ghs_temporary-test-token"
+        paths.append(url)
+        if url.endswith("/repos/transilienceai/demo"):
+            return Response(
+                {
+                    "id": 42,
+                    "node_id": "R_kg42",
+                    "full_name": "transilienceai/demo",
+                    "owner": {"id": 7, "login": "transilienceai"},
+                    "default_branch": "main",
+                }
+            )
+        return Response({"total_count": 0})
+
+    monkeypatch.setattr(shared_github.httpx, "request", github_read)
+    platform = Platform()
+    target = {
+        "id": CONNECTION_ID,
+        "provider": "github",
+        "credential_type": "platform_shared_github",
+        "credential_reference": {
+            "platform_connection_id": CONNECTION_ID,
+            "installation_id": 99,
+        },
+        "clerk_organization_id": "org_alpha",
+        "configuration": {
+            "account_id": 7,
+            "account_login": "transilienceai",
+            "repositories": [REPOSITORY],
+        },
+        "declared_scopes": SCOPES,
+        "coverage_plan": github_coverage_plan(SCOPES, [REPOSITORY]),
+    }
+    result = GitHubValidatorRouter(None, platform).validate(target)
+    assert result["credential_state"] == "passed"
+    assert result["health_state"] == "healthy"
+    assert len(result["results"]) == 3
+    assert len(paths) == 3
+    assert "ghs_temporary-test-token" not in str(result)
 
 
 def test_shared_github_repositories_reject_missing_identity_and_count_change():
