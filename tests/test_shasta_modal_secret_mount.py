@@ -12,13 +12,15 @@ def test_production_bridge_retains_provider_identity_and_adds_dedicated_secret(m
 
     module = runpy.run_path(str(MODAL_APP))
 
-    assert [secret.name for secret in module["runtime_secrets"]] == [
+    assert [secret.name for secret in module["runtime_secrets"][:2]] == [
         "test-core",
         "test-provider",
     ]
+    assert "DENALI_PLATFORM_CONNECTIONS_ORIGIN" in repr(module["runtime_secrets"][2])
     assert [secret.name for secret in module["shasta_bridge_secrets"]] == [
         "test-core",
         "test-provider",
+        None,
         "shasta-denali-bridge",
     ]
 
@@ -32,5 +34,6 @@ def test_development_bridge_keeps_the_same_dependency_graph(monkeypatch):
     assert [secret.name for secret in module["shasta_bridge_secrets"]] == [
         "test-core",
         "test-provider",
+        None,
         "shasta-denali-bridge",
     ]

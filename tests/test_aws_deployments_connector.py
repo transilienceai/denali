@@ -333,6 +333,48 @@ def test_connection_collection_ingests_model_links_and_iam_findings() -> None:
     )
 
 
+def test_shared_connection_collection_leases_scope_without_legacy_assume_role(monkeypatch) -> None:
+    from denali.integrations import shared_aws_session
+
+    leased: list[tuple[str, list[str]]] = []
+
+    def fake_lease(connection, *, region, scopes, session_factory):
+        leased.append((region, scopes))
+        return AssumedSession()
+
+    monkeypatch.setattr(shared_aws_session, "leased_aws_session", fake_lease)
+    repository = Repository()
+    result = AwsConnectionDeploymentCollector(
+        session_factory=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy role session was used")
+        )
+    ).collect(
+        tenant_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        connection={
+            "id": "11111111-1111-4111-8111-111111111111",
+            "provider": "aws",
+            "lifecycle_state": "active",
+            "credential_type": "platform_shared_aws",
+            "credential_reference": {
+                "platform_connection_id": "11111111-1111-4111-8111-111111111111"
+            },
+            "clerk_organization_id": "org_alpha",
+            "declared_scopes": ["aws.code_to_cloud"],
+            "configuration": {
+                "account_id": "123456789012",
+                "coverage_mode": "selected",
+                "regions": ["us-east-1"],
+                "partition": "aws",
+            },
+        },
+        repository=repository,
+    )
+
+    assert result["state"] == "complete"
+    assert leased == [("us-east-1", ["aws.code_to_cloud"])]
+    assert repository.inventory
+
+
 def test_deployment_collector_never_claims_runtime_only_evidence() -> None:
     with pytest.raises(ValueError, match="no supported collection scope"):
         AwsConnectionDeploymentCollector().collect(
