@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from denali.integrations.shared_aws_session import leased_aws_session
+from denali.integrations.shared_connections_client import SharedConnectionsError
 
 PLATFORM_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -100,3 +101,22 @@ def test_shared_aws_session_rejects_incomplete_credential_response():
             session_factory=lambda **_kwargs: object(),
             client=bridge,  # type: ignore[arg-type]
         )
+
+
+def test_shared_aws_session_fails_closed_when_platform_revokes_access():
+    class RevokedBridge:
+        def request(self, *_args, **_kwargs):
+            raise SharedConnectionsError(409)
+
+    def unexpected_session(**_kwargs):
+        raise AssertionError("revoked access must not create an AWS session")
+
+    with pytest.raises(SharedConnectionsError) as error:
+        leased_aws_session(
+            _connection(),
+            region="us-east-1",
+            scopes=["aws.bedrock_agents"],
+            session_factory=unexpected_session,
+            client=RevokedBridge(),  # type: ignore[arg-type]
+        )
+    assert error.value.status_code == 409
