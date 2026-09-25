@@ -28,12 +28,17 @@ Denali **development** Modal environment with:
 The isolated platform API, Denali machine authentication, pilot-org isolation,
 CloudFormation role, live validation, signed-in staging Connections panel, and
 bounded AWS read were verified on 2026-09-24. The role was created only in the
-`transilience-dev` AWS account. The new **Use in Denali** flow below still
-requires PR review, development deployment, and hosted acceptance.
+`transilience-dev` AWS account. The reviewed **Use in Denali** path reached
+`denali-dev` through its protected deployment. For the `tran-test` organization,
+the shared connection was attached, Denali validation passed in `us-east-1`,
+and collection recorded complete coverage for the four Bedrock agent and
+guardrail planes. A later live M2M probe returned 403 for another organization's
+registry and template requests. The old Denali-only role connection remains
+separate and unhealthy; it was not changed.
 
-Run `sync_shared_aws_connections` with an exact Clerk `org_...` ID in the
-`denali-dev` Modal environment after the PR is reviewed and deployed through the
-normal `dev` workflow. The function reads that org's complete AWS connection
+For legacy-metadata snapshots, run `sync_shared_aws_connections` with an exact
+Clerk `org_...` ID in the `denali-dev` Modal environment. The function reads
+that org's complete AWS connection
 set from Denali Neon and sends at most 100 sanitized entries to the platform.
 An empty set intentionally tombstones earlier entries for that org; an unknown
 org or truncated set fails before sending. Repeat after create, validation,
@@ -76,7 +81,7 @@ proof of completed collection; use **Collect AWS evidence** and inspect its
 separate collection status and coverage. Disable/delete Denali's local use
 separately from the platform's global connection lifecycle.
 
-Before the Denali backend PR is reviewed and deployed, the isolated one-off
+The isolated one-off
 `scripts/verify_shared_aws_dev.py` Modal runner can exercise the same lease and
 read implementation against the pilot binding. It mounts only the existing
 Denali development core Secret and a public origin configuration object; it
@@ -93,7 +98,7 @@ browser testing, while the backend's direct health endpoint remains separate.
 
 No production deployment, public `api.transilience.cloud` reverse proxy, MCP
 endpoint, automatic synchronization, or switch of existing Denali-owned roles
-is included in this PR. The new Denali-use path is not accepted until its
-reviewed revision reaches `dev` and the signed-in staging flow completes
-attach -> Denali validation -> collection -> local disable/delete without
-cross-org access or credential exposure.
+is included in this dev pilot. The active shared connection has not been
+disabled or deleted just to test the lifecycle. Revocation and cross-org
+denial are covered by automated broker/registry tests; a hosted disable/delete
+acceptance should use a disposable binding so the working pilot is preserved.

@@ -3522,6 +3522,8 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
   if (connection.credential_reference.type === "platform_shared_aws") {
     const validating = connection.validation_state === "running" || busy === `validate:${connection.id}`;
     const collecting = connection.deployment_collection_state === "running" || busy === `collect-aws:${connection.id}`;
+    const lastCollection = connection.last_deployment_collection;
+    const collection = lastCollection && "region_count" in lastCollection ? lastCollection : null;
     return <section className="panel connection-detail" aria-label="Platform shared AWS connection">
       <div className="connection-detail-head"><div><span>PLATFORM SHARED AWS</span><h3>{connection.display_name}</h3><small>Account {connection.configuration.account_id} · {(connection.configuration.regions ?? []).join(", ")} · {connection.declared_scopes.join(", ")}</small></div><ConnectionHealth state={connection.health_state} /></div>
       <p>The read-only role is managed by the shared platform. Denali requests a fresh, scope-limited lease for validation and collection; it does not hold the role trust or AWS keys.</p>
@@ -3530,7 +3532,8 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
         {connection.lifecycle_state === "active" && <button className="primary-action" disabled={validating || collecting || connection.health_state !== "healthy"} onClick={onCollectAws}>{collecting ? "Collecting…" : "Collect AWS evidence"}</button>}
       </div>
       {connection.last_validation && <p role="status">Validation: {connection.last_validation.health_state} · {connection.last_validation.summary}</p>}
-      <p>Connection health proves read access only. Collection creates separate evidence and coverage records.</p>
+      {collecting ? <p role="status">AWS evidence collection is running.</p> : collection ? <p role="status">Collection: {collection.state} · Regions: {collection.region_count - collection.partial_count - collection.failed_count} complete, {collection.partial_count} partial, {collection.failed_count} failed · finished {formatTime(collection.completed_at)}.</p> : lastCollection ? <p role="status">Collection: {lastCollection.state} · {lastCollection.detail ?? "No Region summary was recorded."}</p> : <p>No AWS collection result yet.</p>}
+      <p>Connection health proves read access only. See Sources &amp; coverage for per-plane evidence and coverage; an empty inventory is not a safety verdict.</p>
       <div className="connection-safeguards"><div><strong>Denali use of this connection</strong><span>Disabling here stops Denali collection. Global disconnect remains in the shared platform and may leave already issued sessions valid for up to 15 minutes.</span></div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disable</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete Denali configuration</button>}</div>
     </section>;
   }
