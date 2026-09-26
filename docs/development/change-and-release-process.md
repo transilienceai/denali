@@ -18,6 +18,9 @@ unsafe release.
    an explicit pre-deploy step under the repository advisory lock.
 8. A deploy is not complete until direct Modal health, the Vercel `/api` proxy, and the
    unauthenticated authorization boundary are verified.
+9. Production configuration validation fails closed for the core runtime and every P0 provider
+   group before migrations or deployment begin; it reports missing variable names but never
+   values.
 
 ## 2. Change lifecycle
 
@@ -121,22 +124,30 @@ Pushing a reviewed revision to `dev` automatically runs **Deploy Modal developme
 repeats the complete verification gate, requires the exact remote `dev` SHA, applies development
 migrations, deploys Modal, and checks the direct and same-origin health boundaries. A Modal
 Secret-only change has no Git push, so manually dispatch that workflow from `dev` with the exact
-current `dev` SHA. Production deployment remains separately approved and manual.
+current `dev` SHA.
+
+Merging a reviewed PR to `main` automatically starts **Deploy Modal production** for that exact
+`main` SHA. The protected `production` environment remains the production authorization boundary;
+required reviewers, when configured, still approve the deployment job. A production Secret-only
+change can be applied by manually dispatching the workflow from `main` with its exact current SHA.
 
 ## 5. Backend production deployment
 
 ### Normal path
 
 1. Merge the reviewed PR after `verify` passes.
-2. Copy the full commit SHA now at `main`.
-3. Open GitHub Actions → **Deploy Modal production** → **Run workflow** on `main`.
-4. Enter the exact full merged SHA.
-5. Approve the protected `production` environment when required.
-6. The workflow independently checks out that SHA, re-runs the release gate, runs Modal combined
+2. The resulting push to `main` automatically starts **Deploy Modal production** for that commit.
+3. Approve the protected `production` environment when required.
+4. The workflow independently checks out that SHA, verifies it is still the current `main` tip,
+   re-runs the release gate, runs Modal combined
    configuration status, applies pending migrations, prints non-sensitive database migration
    status, deploys the API/workers, and runs production smoke checks.
-7. Record the workflow URL, commit SHA, migration version, health results, operator, and time in
+5. Record the workflow URL, commit SHA, migration version, health results, operator, and time in
    the PR or release record.
+
+Use the manual workflow dispatch only to retry the exact current `main` revision after changing a
+production Modal Secret or other operator-controlled configuration. It is not a path for deploying
+an older or unmerged commit.
 
 The GitHub workflow is the normal production interface. A coding agent must not deploy merely
 because it has local Modal credentials.

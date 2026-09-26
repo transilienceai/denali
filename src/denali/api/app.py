@@ -48,6 +48,7 @@ from denali.api.evidence_import import (
     encode_report,
     validate_report_pair,
 )
+from denali.api.gateway_auth import ClerkResultsGatewayVerifier, ResultsGatewayVerifier
 from denali.api.github_oidc import (
     GitHubActionsIdentity,
     GitHubActionsTokenVerifier,
@@ -801,6 +802,7 @@ def create_app(
     tenant_id: str | None = None,
     auth_mode: Literal["local", "clerk"] | None = None,
     authenticator: RequestAuthenticator | None = None,
+    results_gateway_verifier: ResultsGatewayVerifier | None = None,
     clerk_organization_admin: ClerkOrganizationAdmin | None = None,
     validation_dispatcher: Callable[[str], str | None] | None = None,
     collection_dispatcher: Callable[[str], str | None] | None = None,
@@ -818,6 +820,16 @@ def create_app(
     configured_authenticator = authenticator or (
         ClerkAuthenticator.from_environment() if configured_auth_mode == "clerk" else None
     )
+    configured_results_gateway_verifier = results_gateway_verifier
+    if configured_results_gateway_verifier is None and configured_auth_mode == "clerk":
+        gateway_machine_id = os.environ.get("DENALI_RESULTS_GATEWAY_MACHINE_ID", "")
+        receiver_machine_id = os.environ.get("DENALI_RESULTS_RECEIVER_MACHINE_ID", "")
+        if gateway_machine_id or receiver_machine_id:
+            configured_results_gateway_verifier = ClerkResultsGatewayVerifier(
+                os.environ.get("DENALI_PLATFORM_MACHINE_SECRET_KEY", ""),
+                gateway_machine_id,
+                receiver_machine_id,
+            )
     configured_clerk_organization_admin = clerk_organization_admin
     if (
         configured_clerk_organization_admin is None
@@ -879,6 +891,7 @@ def create_app(
         app.state.tenant_id = configured_tenant
         app.state.auth_mode = configured_auth_mode
         app.state.authenticator = configured_authenticator
+        app.state.results_gateway_verifier = configured_results_gateway_verifier
         app.state.clerk_organization_admin = configured_clerk_organization_admin
         app.state.validation_dispatcher = validation_dispatcher
         app.state.collection_dispatcher = collection_dispatcher
@@ -998,6 +1011,37 @@ def create_app(
 
     @app.middleware("http")
     async def authenticate_request_context(request: Request, call_next: Callable[..., Any]):
+        if request.method == "GET" and request.url.path in {
+            "/internal/v1/results/summary",
+            "/internal/v1/results/findings",
+            "/internal/v1/results/coverage",
+        }:
+            verifier = request.app.state.results_gateway_verifier
+            authorization = request.headers.get("authorization", "")
+            token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
+            if verifier is None:
+                return JSONResponse(status_code=404, content={"detail": "not found"})
+            principal = await run_in_threadpool(verifier.verify, token)
+            if principal is None:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "invalid gateway token"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            repo = request.app.state.repository
+            lookup_tenant = getattr(repo, "lookup_tenant", None)
+            if lookup_tenant is None:
+                return JSONResponse(
+                    status_code=503, content={"detail": "tenant lookup unavailable"}
+                )
+            tenant_id = await run_in_threadpool(lookup_tenant, principal.organization_id)
+            if tenant_id is None:
+                return JSONResponse(status_code=404, content={"detail": "not found"})
+            request.state.denali_auth = AuthContext(
+                principal.user_id, principal.organization_id, "member"
+            )
+            request.state.denali_tenant_id = tenant_id
+            return await call_next(request)
         if request.app.state.auth_mode == "local" or _is_public_request(request):
             return await call_next(request)
         authenticator = request.app.state.authenticator
@@ -3543,6 +3587,40 @@ def create_app(
     def inventory_summary(request: Request) -> dict[str, Any]:
         repo, current_tenant = _context(request)
         return repo.summary(current_tenant)
+
+    @app.get("/internal/v1/results/summary")
+    def gateway_results_summary(request: Request, response: Response) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "inventory": repo.summary(current_tenant),
+            "findings": repo.finding_summary(current_tenant),
+            "issues": repo.issue_summary(current_tenant),
+        }
+
+    @app.get("/internal/v1/results/findings")
+    def gateway_results_findings(
+        request: Request,
+        response: Response,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "items": repo.list_findings(
+                current_tenant, state=None, severity=None, limit=limit, offset=offset
+            ),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    @app.get("/internal/v1/results/coverage")
+    def gateway_results_coverage(request: Request, response: Response) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        rows = repo.latest_coverage(current_tenant)
+        response.headers["Cache-Control"] = "no-store"
+        return {"items": rows[:100], "total": len(rows), "truncated": len(rows) > 100}
 
     @app.get("/v1/inventory/assets")
     def list_assets(

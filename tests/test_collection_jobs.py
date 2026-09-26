@@ -13,6 +13,17 @@ from denali.api.collection import (
 
 class DurableCollectionRepository:
     def __init__(self, *, stale_running: bool = False, collection_kind: str = "entra_ai"):
+        provider_by_collection_kind = {
+            "aws_deployments": "aws",
+            "aws_agent_runtime": "aws",
+            "azure_deployments": "azure",
+            "azure_agent_runtime": "azure",
+            "entra_ai": "entra",
+            "gcp_deployments": "gcp",
+            "github_source": "github",
+            "azure_repos_source": "azure_repos",
+            "google_workspace_ai": "google_workspace",
+        }
         self.job = {
             "tenant_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "connection_id": "11111111-1111-4111-8111-111111111111",
@@ -21,6 +32,7 @@ class DurableCollectionRepository:
             "lease_expired": stale_running,
             "attempt_count": 0,
         }
+        self.provider = provider_by_collection_kind.get(collection_kind, "unsupported")
         self.completed: dict[str, Any] | None = None
         self.failures: list[str] = []
 
@@ -42,7 +54,11 @@ class DurableCollectionRepository:
     def get_connection_validation_target(
         self, tenant_id: str, connection_id: str
     ) -> dict[str, Any] | None:
-        return {"id": connection_id, "provider": "entra", "lifecycle_state": "active"}
+        return {
+            "id": connection_id,
+            "provider": self.provider,
+            "lifecycle_state": "active",
+        }
 
     def complete_connection_collection_job(self, job_id: str, result: dict[str, Any]) -> None:
         self.completed = result
@@ -96,6 +112,7 @@ def test_collection_job_survives_api_replacement_and_duplicate_worker_delivery()
         "gcp_deployments",
         "github_source",
         "azure_repos_source",
+        "google_workspace_ai",
     ],
 )
 def test_every_provider_collection_kind_uses_the_durable_worker(
@@ -112,6 +129,25 @@ def test_every_provider_collection_kind_uses_the_durable_worker(
 
     assert collector.calls == 1
     assert repository.job["state"] == "succeeded"
+
+
+def test_collection_worker_rejects_a_provider_kind_mismatch() -> None:
+    repository = DurableCollectionRepository(collection_kind="github_source")
+    repository.provider = "gcp"
+    collector = Collector()
+
+    run_durable_collection_job(
+        repository,
+        {"github_source": collector},
+        "job-fixture",
+        max_attempts=1,
+    )
+
+    assert collector.calls == 0
+    assert repository.job["state"] == "failed"
+    assert repository.failures == [
+        "Collection worker could not complete the declared read planes (RuntimeError)."
+    ]
 
 
 def test_collection_job_reclaims_a_stale_worker_lease() -> None:

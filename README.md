@@ -5,6 +5,9 @@ posture, attack paths, and runtime context. It keeps observed facts, inferred re
 security conclusions, and coverage limits separate so an evaluator can see both what Denali
 knows and what it could not verify.
 
+The prioritized product direction and release gates are recorded in the
+[agent security roadmap](docs/product/agent-security-roadmap.md).
+
 The repository contains a runnable local product: a PostgreSQL-backed API, a standalone web
 application, deterministic issue and detection engines, provider onboarding, first-party
 collectors, and bounded importers. It is not an extension of a CSPM. Prowler is supported as
@@ -28,7 +31,10 @@ Status terms in this README are deliberately independent:
 | Self-service AWS connection | **Shipped** | **Locally accepted** against a live AWS account, including Quick Create, exact account binding, enabled-Region discovery, and independent plane validation |
 | Self-service Microsoft Azure connection | **Shipped** | **Pending live acceptance**. Live subscription setup and healthy validation succeeded after RBAC propagation, but the final connected-browser, unselected-subscription, partial-state, disable, and delete pass remains open |
 | Self-service Google Cloud connection | **Shipped** | **Locally accepted** against three live projects, with a unique keyless principal and all declared project/plane validations passing |
+| Self-service Microsoft Entra connection | **Shipped** | **Pending live acceptance**. Production admin consent and validation were observed, but a complete retained lifecycle and collection record remains open |
+| Self-service Google Workspace connection | **Shipped** | **Pending live acceptance**. Fixed-scope domain-wide delegation, validation, durable collection, and tenant isolation have automated coverage; the first hosted lifecycle and collection record remains open |
 | Self-service GitHub connection | **Shipped** | **Locally accepted** through the organization-owned GitHub App against 18 exact repositories, with all 54 repository/plane validations passing |
+| Self-service Azure Repos connection | **Shipped** | **Hosted accepted** on 10 September 2026 for lifecycle and code-to-cloud behavior; a dedicated dated record using the complete P0 evidence template remains to be retained |
 | GCP and Azure code-to-cloud correlation | **Shipped** | **Locally accepted** against independently observed, private scale-to-zero fixtures with exact source identity, PostgreSQL reporting, and browser evidence |
 | AWS Lambda, ECS, EKS, and SageMaker code-to-cloud correlation | **Shipped** | **Locally accepted** against exact live account/Region validation and eight independent deployment collection planes |
 | AWS AgentCore runtime detection and response | **Shipped** | **Pending live acceptance**. Metadata-only CloudWatch span collection, five-minute durable polling, exact session correlation, drift/tool/sequence detections, and manual maker-checker response approval pass automated and PostgreSQL verification; hosted AWS create/update, collect, investigate, and approve remains required |
@@ -235,6 +241,10 @@ Documented planned or deferred capabilities are not shipped:
 
 - Complete hosted create, setup/callback, validate, collect, disable, and delete acceptance for
   every enabled provider; the individual production records remain authoritative.
+- Complete the shared P0 operating gate in the
+  [agent security roadmap](docs/product/agent-security-roadmap.md), including production
+  configuration enforcement, non-empty two-Organization isolation, split Neon roles,
+  alerts/backups, and a restore drill.
 - GitHub branch-protection and pull-request posture through a separate, explicitly granted
   Administration-read plane.
 - GitHub installation/repository lifecycle reconciliation and GitHub Enterprise Server.

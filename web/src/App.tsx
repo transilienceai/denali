@@ -28,6 +28,7 @@ import {
   ListFilter,
   Menu,
   MessageSquareText,
+  Moon,
   Mountain,
   Network,
   PanelLeftClose,
@@ -40,6 +41,7 @@ import {
   ServerCog,
   ShieldCheck,
   Sparkles,
+  Sun,
   Trash2,
   UserRound,
   Waypoints,
@@ -83,6 +85,7 @@ import {
   type Page,
 } from "./navigation";
 import { applicableDetectionEvaluations, inventoryEvidenceSummary } from "./presentation";
+import { applyTheme, currentTheme, nextTheme, type Theme } from "./theme";
 import type {
   Asset,
   AssetDetail,
@@ -312,6 +315,11 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
   const [connectionMonitorError, setConnectionMonitorError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [theme, setTheme] = useState<Theme>(currentTheme);
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
     const initial = navigationFromUrl(window.location.href);
@@ -609,11 +617,19 @@ function App({ canWrite = true, accountControls, profilePage }: { canWrite?: boo
 
   return (
     <div className="app-shell">
+      {/* Shared app switcher paused; restore with the index.html script and CSS rail width. */}
       <Sidebar page={page} onNavigate={navigate} open={sidebarOpen} />
       {sidebarOpen && <button className="sidebar-scrim" aria-label="Close menu" onClick={() => setSidebarOpen(false)} />}
 
       <main className="main-shell">
-        <Topbar page={page} onMenu={() => setSidebarOpen(true)} onRefresh={loadAll} accountControls={accountControls} />
+        <Topbar
+          page={page}
+          theme={theme}
+          onMenu={() => setSidebarOpen(true)}
+          onRefresh={loadAll}
+          onToggleTheme={() => setTheme((value) => nextTheme(value))}
+          accountControls={accountControls}
+        />
         <div className="workspace">
           {(visibleRunningOperations.length > 0 || connectionMonitorError) && <ConnectionBackgroundStatus
             operations={visibleRunningOperations}
@@ -874,7 +890,21 @@ function NavButton({
   );
 }
 
-function Topbar({ page, onMenu, onRefresh, accountControls }: { page: Page; onMenu: () => void; onRefresh: () => void; accountControls?: ReactNode }) {
+function Topbar({
+  page,
+  theme,
+  onMenu,
+  onRefresh,
+  onToggleTheme,
+  accountControls,
+}: {
+  page: Page;
+  theme: Theme;
+  onMenu: () => void;
+  onRefresh: () => void;
+  onToggleTheme: () => void;
+  accountControls?: ReactNode;
+}) {
   const titles: Record<Page, { eyebrow: string; title: string }> = {
     dashboard: { eyebrow: "Command center", title: "Denali Brief" },
     connections: { eyebrow: "Setup", title: "Connections" },
@@ -895,6 +925,15 @@ function Topbar({ page, onMenu, onRefresh, accountControls }: { page: Page; onMe
       <button className="mobile-menu" onClick={onMenu} aria-label="Open menu"><Menu /></button>
       <div><span>{content.eyebrow}</span><h1>{content.title}</h1></div>
       <div className="topbar-actions">
+        <button
+          className="icon-button theme-toggle"
+          title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          aria-pressed={theme === "dark"}
+          onClick={onToggleTheme}
+        >
+          {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+        </button>
         <button className="icon-button" title="Refresh data" onClick={() => void onRefresh()}><RefreshCw size={17} /></button>
         <div className="environment"><span /> Evidence current</div>
         <div className="edition-badge">Community</div>
@@ -2833,6 +2872,7 @@ function ConnectionsPage({
   const [accountId, setAccountId] = useState("");
   const [partition, setPartition] = useState<AwsConnectionCreate["partition"]>("aws");
   const [deploymentRegion, setDeploymentRegion] = useState("us-east-1");
+  const [awsRoleName, setAwsRoleName] = useState("DenaliSecurityAuditRole");
   const [coverageMode, setCoverageMode] = useState<AwsConnectionCreate["coverage_mode"]>("automatic");
   const [regions, setRegions] = useState("us-east-1");
   const [scopes, setScopes] = useState(() => connectionScopes(provider).map((scope) => scope.id));
@@ -2880,6 +2920,7 @@ function ConnectionsPage({
           coverage_mode: coverageMode,
           regions: coverageMode === "selected" ? regions.split(",").map((region) => region.trim()).filter(Boolean) : [],
           declared_scopes: scopes,
+          role_name: awsRoleName,
         } : provider === "azure" ? {
           provider: "azure",
           display_name: displayName,
@@ -2918,6 +2959,7 @@ function ConnectionsPage({
       setActionNotice(`${created.display_name} onboarding plan created. Continue with the provider setup steps below.`);
       setDisplayName("");
       setAccountId("");
+      setAwsRoleName("DenaliSecurityAuditRole");
       setAzureTenantId("");
       setAzureReposTenantId("");
       setAzureReposOrganization("");
@@ -3370,6 +3412,7 @@ function ConnectionsPage({
         <label><span>Connection name</span><input required maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder={`Production ${CONNECTION_PROVIDER_LABELS[provider]}`} /></label>
         {provider === "aws" ? <>
         <label><span>AWS account ID</span><input required inputMode="numeric" pattern="[0-9]{12}" maxLength={12} value={accountId} onChange={(event) => setAccountId(event.target.value)} placeholder="123456789012" /></label>
+        <label><span>IAM role name</span><input required pattern="[A-Za-z0-9+=,.@_-]+" maxLength={64} value={awsRoleName} onChange={(event) => setAwsRoleName(event.target.value)} placeholder="DenaliSecurityAuditRole" /><small>Use a unique role name when connecting the same AWS account more than once.</small></label>
         <label><span>Partition</span><select value={partition} onChange={(event) => setPartition(event.target.value as AwsConnectionCreate["partition"])}><option value="aws">Commercial AWS</option><option value="aws-us-gov">AWS GovCloud</option><option value="aws-cn">AWS China</option></select></label>
         <label><span>Preferred CloudFormation stack location</span><input required value={deploymentRegion} onChange={(event) => setDeploymentRegion(event.target.value)} placeholder="us-east-1" /><small>This plans where the stack is managed; it does not limit inventory coverage.</small></label>
         <label><span>Inventory region coverage</span><select value={coverageMode} onChange={(event) => setCoverageMode(event.target.value as AwsConnectionCreate["coverage_mode"])}><option value="automatic">All enabled regions (recommended)</option><option value="selected">Selected regions only</option></select><small>Automatic mode rediscovers enabled and opted-in regions on every validation.</small></label>

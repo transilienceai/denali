@@ -268,13 +268,24 @@ same observation. Name similarity and trace proximity are insufficient.
 The web application is deliberately small and centralized:
 
 - `main.tsx` initializes Clerk when configured and mounts the application.
+- The shared `app-sidebar` app switcher is temporarily paused. Its script in `index.html` and
+  mount in `App.tsx` are commented out, and `styles.css` sets its product-rail offset to zero.
+  To restore it, re-enable both comments and the 56px rail together. Its product list,
+  destinations, icons, and active-product behavior remain owned by
+  `transilienceai/shared-components`; do not duplicate that configuration in Denali.
 - `App.tsx` owns page composition, shared data loading, drawers, filters, governance controls,
   connection workflows, the provider-neutral Agent Execution Graph, and product presentation.
 - `api.ts` is the typed same-origin `/api/v1/*` client and attaches Clerk session authorization.
 - `navigation.ts` defines canonical routes and URL-serialized page/filter/drawer/tab state.
 - `presentation.ts` contains evidence-applicability rules that should not live in JSX.
 - `types.ts` mirrors API response contracts.
-- `styles.css` is the application design system and responsive layout.
+- `design-tokens.css` is the vendored, plain-CSS adapter for the canonical Figma-backed
+  Transilience token snapshot. It contains Brand -> Alias -> Mapped role tokens and the shared
+  light/dark and responsive-type contract. Do not hand-edit token values; refresh the snapshot
+  from the upstream design-system export.
+- `styles.css` owns Denali-specific composition and component layouts. Product UI consumes mapped
+  `--color-role-*`, spacing, radius, type, gradient, and shadow tokens from `design-tokens.css`;
+  it must not introduce a competing application palette or font scale.
 - `vercel.mjs` defines the production build, `/api/*` rewrite, and SPA fallback.
 
 Browser Back/Forward, pasted deep links, refresh, drawer close, and connection callbacks must

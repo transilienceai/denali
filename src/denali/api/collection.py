@@ -9,6 +9,17 @@ from typing import Any, Protocol
 logger = logging.getLogger(__name__)
 
 
+COLLECTION_KINDS_BY_PROVIDER = {
+    "aws": frozenset({"aws_deployments", "aws_agent_runtime"}),
+    "azure": frozenset({"azure_deployments", "azure_agent_runtime"}),
+    "entra": frozenset({"entra_ai"}),
+    "gcp": frozenset({"gcp_deployments"}),
+    "github": frozenset({"github_source"}),
+    "azure_repos": frozenset({"azure_repos_source"}),
+    "google_workspace": frozenset({"google_workspace_ai"}),
+}
+
+
 class Collector(Protocol):
     def collect(
         self, *, tenant_id: str, connection: dict[str, Any], repository: Any
@@ -122,6 +133,9 @@ def run_durable_collection_job(
             target = repository.get_connection_validation_target(tenant_id, connection_id)
             if target is None or target["lifecycle_state"] != "active":
                 raise RuntimeError("connection is unavailable for collection")
+            provider = str(target.get("provider", ""))
+            if collection_kind not in COLLECTION_KINDS_BY_PROVIDER.get(provider, frozenset()):
+                raise RuntimeError("collection kind does not belong to the connection provider")
             collector = collectors.get(collection_kind)
             if collector is None:
                 raise RuntimeError("connection collector is not configured")

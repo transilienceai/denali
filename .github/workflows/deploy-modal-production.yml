@@ -1,6 +1,8 @@
 name: Deploy Modal production
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       expected_sha:
@@ -14,6 +16,9 @@ permissions:
 concurrency:
   group: denali-modal-production
   cancel-in-progress: false
+
+env:
+  TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_sha || github.sha }}
 
 jobs:
   verify:
@@ -38,13 +43,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.expected_sha }}
-      - name: Require the exact merged commit
-        env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+      - name: Require the exact current main commit
         run: |
-          test "$GITHUB_SHA" = "$EXPECTED_SHA"
-          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "${TARGET_SHA}" = "$(git rev-parse HEAD)"
+          git fetch --no-tags origin main
+          test "${TARGET_SHA}" = "$(git rev-parse origin/main)"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -75,7 +80,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.expected_sha }}
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

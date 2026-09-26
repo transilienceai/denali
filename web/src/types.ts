@@ -426,6 +426,7 @@ export type AwsConnectionCreate = {
   coverage_mode: "automatic" | "selected";
   regions: string[];
   declared_scopes: string[];
+  role_name: string;
 };
 
 export type AzureConnectionCreate = {

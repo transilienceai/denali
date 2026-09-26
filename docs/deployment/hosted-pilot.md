@@ -92,10 +92,11 @@ export it in the deploy shell (or CI environment); it is not read from the runti
 Set the Secret-name variables in the same deploy environment as the Modal CLI invocation; they are
 not runtime values loaded from a Secret.
 
-Deploy production through the protected **Deploy Modal production** GitHub Actions workflow after
-the reviewed PR is merged. Supply the exact full `main` commit SHA. The workflow re-runs the
-release gate and calls the checked-in script, which validates combined configuration, runs
-migrations and database status, deploys the app, and verifies production health.
+Merging a reviewed PR to `main` automatically starts the protected **Deploy Modal production**
+GitHub Actions workflow for the exact merged SHA. The workflow re-runs the release gate and calls
+the checked-in script, which validates combined configuration, runs migrations and database
+status, deploys the app, and verifies production health. Manually dispatch the workflow with the
+exact current `main` SHA only when an operator-only configuration change needs a redeploy.
 
 The script refuses feature branches, dirty worktrees, stale `main`, and invocations without an
 explicit production flag. It is shown here only for the documented emergency path:
@@ -210,8 +211,12 @@ Create a Vercel project with `web` as its Root Directory. Set:
 - `MODAL_API_ORIGIN` to the deployed Modal `api` origin without a trailing slash.
 
 The programmatic `vercel.mjs` configuration builds `dist`, routes `/api/:path*` to Modal without
-caching, and falls back to `index.html` for browser navigation. Add the production domain and
-redeploy after changing environment variables.
+caching, and falls back to `index.html` for browser navigation while preserving Vercel's reserved
+`/_vercel/*` namespace. Enable Web Analytics in the Vercel project before deploying the frontend;
+Vercel adds its `/_vercel/insights/*` handlers only to deployments created after enablement. After
+deployment, verify `/_vercel/insights/script.js` returns JavaScript rather than the SPA HTML shell
+and that a browser page view reaches the Insights endpoint. Add the production domain and redeploy
+after changing environment variables.
 
 Use these production provider URLs:
 

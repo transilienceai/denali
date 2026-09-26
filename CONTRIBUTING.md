@@ -69,10 +69,11 @@ reviewer owns the merge decision.
 Vercel may build feature-branch previews, but previews must use the isolated Clerk development,
 `denali-dev` Modal, and Neon development environments.
 
-Modal production deployment uses the **Deploy Modal production** GitHub Actions workflow. Supply
-the full merged `main` commit SHA when dispatching it. The workflow re-runs the release gate,
-requires the protected `production` environment, performs configuration and migration checks,
-deploys, and verifies the direct and same-origin health boundaries.
+Merging to `main` automatically starts the **Deploy Modal production** GitHub Actions workflow for
+the exact merged commit. The workflow re-runs the release gate, requires the protected
+`production` environment, performs configuration and migration checks, deploys, and verifies the
+direct and same-origin health boundaries. Use its manual exact-SHA dispatch only to retry the
+current `main` revision after an operator-only configuration change.
 
 Do not place production credentials in the repository or Vercel. GitHub's `production`
 environment contains only the Modal deployment credential; the application secrets remain in

@@ -98,6 +98,11 @@ Microsoft Entra evidence, GitHub source, and AWS/Azure/GCP deployment collection
 after the durable job is recorded and dispatched; polling reads PostgreSQL, so completion does not
 depend on the accepting API container remaining alive.
 
+Every durable collection job kind is bound to an explicit provider allowlist. The worker reloads
+the tenant-scoped connection and rejects a job if its collection kind does not belong to that
+connection's provider, even when the job row and a collector both exist. This is an independent
+execution-time check in addition to tenant/connection foreign keys and hard-coded API routes.
+
 Opt-in AWS AgentCore and Azure Foundry runtime collection use the same durable job and worker
 boundary. Five-minute Modal schedulers select only due, healthy connections, create durable jobs,
 and pass identifiers to the worker. PostgreSQL cursors, bounded overlap, leases, retries, and
@@ -192,15 +197,25 @@ status, configuration status, validation worker, collection worker, and bounded 
 schedulers. The pilot keeps a warm API container, but correctness must not depend on its lifetime
 or on requests reaching the same container.
 
+The protected production deployment invokes configuration status with `core`, `aws`, `azure`,
+`entra`, `gcp`, `google_workspace`, `github`, and `azure_repos` as required groups. The check
+reports only presence and missing variable names, never values, and fails before migrations or
+deployment when any required group is incomplete. Development invokes the same check with only
+`core` required so an isolated environment may intentionally exercise a provider subset.
+
 `DENALI_MODAL_REGION`, `DENALI_MODAL_APP_NAME`, `DENALI_MODAL_SECRET_NAME`, and
-`DENALI_MODAL_PROVIDER_SECRET_NAME` are deploy-shell configuration because Modal resolves
-image/function declarations before runtime Secrets are attached. Every deployment mounts exactly
-one core Secret and one environment-local provider Secret; keeping that resource count fixed is
-required for consistent local and remote Modal module evaluation. The provider Secret is mounted
-after the core Secret and must not repeat core Clerk or Neon keys. Production currently uses
-`custom-secret` plus `denali-github-provider`; preview uses `denali-dev` plus an environment-local
-`denali-github-provider`, which may contain only a non-sensitive disabled marker until a development
-GitHub App is configured.
+`DENALI_MODAL_PROVIDER_SECRET_NAME` are deploy-shell
+configuration because Modal resolves image/function declarations before runtime Secrets are
+attached. Every function mounts one core Secret and one environment-local provider Secret; keeping
+those resources stable is required for consistent local and remote Modal module evaluation. The
+provider Secret is mounted after the core Secret and must not repeat core Clerk or Neon keys.
+Production normally uses `custom-secret` plus `denali-github-provider`; the Shasta Workspace pilot
+function additionally mounts a fixed-name `shasta-denali-bridge` for its per-source signing key and
+bindings, while retaining the provider Secret's Google Workspace operator identity. The fixed name
+keeps the dependency count identical when the deploy process and remote worker each import this
+module. Preview uses `denali-dev` plus environment-local `denali-github-provider` and
+`shasta-denali-bridge` Secrets; the bridge Secret there contains only a disabled marker. The Shasta
+function is not configured for collection in development.
 
 The shared-connections pilot also mounts one deployment-scoped configuration object for its
 public platform origin on every function, including workers that import the API module. That

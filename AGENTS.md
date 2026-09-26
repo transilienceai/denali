@@ -16,9 +16,9 @@ changing or diagnosing the shared Clerk, Vercel, Modal, or Neon development envi
   explicitly asks for the merge; creating or updating a PR is not permission to merge it.
 - Never force-push `main`, delete `main`, bypass a required check, dismiss a review, or weaken a
   repository rule to make a change pass. Fix the change or report the blocker.
-- Production deployment is a separate, post-merge operation. Never deploy backend code from a
-  feature branch, dirty worktree, unreviewed commit, or Vercel preview. Use the protected GitHub
-  Actions production workflow from the exact merged `main` SHA.
+- Production deployment is a separate, post-merge operation. A push to `main` automatically starts
+  the protected GitHub Actions production workflow for that exact merged SHA. Never deploy backend
+  code from a feature branch, dirty worktree, unreviewed commit, or Vercel preview.
 - Do not run `scripts/deploy_modal_prod.sh` as an ordinary development step. The script requires
   an explicit production flag and validates its source revision. Local emergency use is allowed
   only from clean, current `main` after the PR is merged and the user explicitly requests it.
@@ -115,6 +115,10 @@ changing or diagnosing the shared Clerk, Vercel, Modal, or Neon development envi
   `custom-secret` plus `denali-github-provider`; hosted preview uses `denali-dev` plus an
   environment-local provider Secret of the same name. Provider Secrets must not duplicate or
   override core Clerk/Neon keys.
+  The Shasta Workspace pilot function additionally mounts the fixed-name, environment-local
+  `shasta-denali-bridge` Secret. Hosted preview has its own disabled-marker bridge Secret,
+  not the production binding, and cannot collect the production source. This third dependency
+  must be declared identically in the deploy process and the remote worker's module import.
 
 ## Required verification
 

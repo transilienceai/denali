@@ -12,6 +12,7 @@ SECRET_NAME = os.environ.get("DENALI_MODAL_SECRET_NAME", "denali-production")
 PROVIDER_SECRET_NAME = os.environ.get(
     "DENALI_MODAL_PROVIDER_SECRET_NAME", "denali-github-provider"
 )
+SHASTA_BRIDGE_SECRET_NAME = "shasta-denali-bridge"
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -31,6 +32,10 @@ runtime_secrets = [
     modal.Secret.from_dict({"DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin}),
 ]
 shared_connections_secrets = runtime_secrets
+shasta_bridge_secrets = [
+    *runtime_secrets,
+    modal.Secret.from_name(SHASTA_BRIDGE_SECRET_NAME),
+]
 app = modal.App(APP_NAME)
 
 
@@ -483,6 +488,44 @@ def active_connection_status(limit: int = 100) -> list[dict[str, str]]:
 
 @app.function(
     image=image,
+    secrets=shasta_bridge_secrets,
+    timeout=2400,
+    retries=0,
+    **_region_options(),
+)
+def collect_shasta_pilot_workspace() -> dict[str, object]:
+    """Run the opt-in, operator-bound Shasta Workspace pilot from Denali's WIF identity."""
+
+    from denali.bridges.shasta_workspace import collect_pilot_workspace
+
+    _configure_gcp_oidc()
+    receipt = collect_pilot_workspace()
+    print(
+        "shasta_workspace_snapshot "
+        f"source_id={receipt['source_id']} snapshot_id={receipt['snapshot_id']} "
+        f"replayed={receipt['replayed']} body_sha256={receipt['body_sha256']}"
+    )
+    return receipt
+
+
+@app.function(
+    image=image,
+    secrets=shasta_bridge_secrets,
+    timeout=240,
+    retries=0,
+    **_region_options(),
+)
+def diagnose_shasta_pilot_workspace() -> dict[str, object]:
+    """Return only the failing Workspace authorization stage and HTTP statuses."""
+
+    from denali.bridges.shasta_workspace import diagnose_pilot_workspace
+
+    _configure_gcp_oidc()
+    return diagnose_pilot_workspace()
+
+
+@app.function(
+    image=image,
     secrets=runtime_secrets,
     timeout=600,
     **_region_options(),
@@ -521,56 +564,17 @@ def database_status() -> None:
     timeout=60,
     **_region_options(),
 )
-def configuration_status() -> None:
-    """Print presence-only production configuration without revealing values."""
+def configuration_status(required_groups: str = "core") -> None:
+    """Print presence-only configuration and fail when required groups are incomplete."""
 
-    requirement_groups = {
-        "core": (
-            "DENALI_DSN",
-            "DENALI_MIGRATION_DSN",
-            "DENALI_WEB_URL",
-            "DENALI_CORS_ORIGINS",
-            "CLERK_SECRET_KEY",
-            "CLERK_JWT_KEY",
-            "CLERK_AUTHORIZED_PARTIES",
-        ),
-        "aws": (
-            "DENALI_MODAL_AWS_ROLE_ARN",
-            "DENALI_AWS_ONBOARDING_BUCKET",
-            "DENALI_AWS_PRINCIPAL_ARN",
-        ),
-        "evidence": ("DENALI_AWS_ONBOARDING_BUCKET",),
-        "azure": (
-            "DENALI_AZURE_ONBOARDING_BUCKET",
-            "DENALI_AZURE_CLIENT_ID",
-            "DENALI_AZURE_CLIENT_SECRET",
-        ),
-        "entra": (
-            "DENALI_ENTRA_CLIENT_ID",
-            "DENALI_ENTRA_CLIENT_SECRET",
-            "DENALI_ENTRA_CALLBACK_URL",
-        ),
-        "gcp": (
-            "DENALI_GCP_ONBOARDING_BUCKET",
-            "DENALI_GCP_OPERATOR_PROJECT_ID",
-            "DENALI_GCP_WORKLOAD_IDENTITY_PROVIDER",
-            "DENALI_GCP_RUNTIME_SERVICE_ACCOUNT",
-        ),
-        "google_workspace": (
-            "DENALI_GOOGLE_WORKSPACE_SERVICE_ACCOUNT",
-            "DENALI_GOOGLE_WORKSPACE_CLIENT_ID",
-        ),
-        "github": (
-            "DENALI_GITHUB_APP_ID",
-            "DENALI_GITHUB_CLIENT_ID",
-            "DENALI_GITHUB_CLIENT_SECRET",
-            "DENALI_GITHUB_APP_SLUG",
-            "DENALI_GITHUB_PRIVATE_KEY",
-            "DENALI_GITHUB_CALLBACK_URL",
-        ),
-    }
-    for group, requirements in requirement_groups.items():
-        missing = [name for name in requirements if not os.environ.get(name, "").strip()]
+    from denali.hosted_configuration import configuration_report, require_configuration
+
+    report = configuration_report(os.environ)
+    for group, missing in report.items():
         state = "ready" if not missing else "incomplete"
         missing_text = ",".join(missing) if missing else "none"
         print(f"group={group} state={state} missing={missing_text}")
+    required = tuple(group.strip() for group in required_groups.split(",") if group.strip())
+    if not required:
+        raise ValueError("at least one configuration group is required")
+    require_configuration(report, required)
