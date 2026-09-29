@@ -4643,6 +4643,73 @@ class PostgresInventoryRepository:
             ).fetchone()
         return None if row is None else dict(row)
 
+    def set_governance_idempotent(
+        self,
+        tenant_id: str,
+        asset_id: str,
+        *,
+        status: str,
+        owner: str | None,
+        notes: str | None,
+        actor: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Apply one tenant-scoped gateway action and record its immutable audit result."""
+
+        if status not in {"approved", "unreviewed", "unwanted"}:
+            raise ValueError("unsupported governance status")
+        request_hash = hashlib.sha256(
+            json.dumps(
+                [actor, asset_id, status, owner, notes],
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"denali-gateway-governance:{tenant_id}:{idempotency_key}",),
+                )
+                previous = connection.execute(
+                    """
+                    SELECT request_hash, result FROM gateway_governance_action
+                    WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                    """,
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if previous is not None:
+                    if previous["request_hash"] != request_hash:
+                        raise ValueError("idempotency key was already used for another action")
+                    return dict(previous["result"])
+                row = connection.execute(
+                    """
+                    UPDATE asset SET governance_status = %s, owner = %s, notes = %s
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid
+                    RETURNING id, governance_status, owner, notes
+                    """,
+                    (status, owner, notes, tenant_id, asset_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                result = json.loads(json.dumps(dict(row), default=str))
+                connection.execute(
+                    """
+                    INSERT INTO gateway_governance_action
+                        (tenant_id, idempotency_key, request_hash, actor_user_id, asset_id, result)
+                    VALUES (%s::uuid, %s, %s, %s, %s::uuid, %s::jsonb)
+                    """,
+                    (
+                        tenant_id,
+                        idempotency_key,
+                        request_hash,
+                        actor,
+                        asset_id,
+                        json.dumps(result),
+                    ),
+                )
+                return result
+
     @staticmethod
     def _detection_coverage_state(
         connection, tenant_id: str, planes: tuple[str, ...]
