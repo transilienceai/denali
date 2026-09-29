@@ -26,6 +26,7 @@ class Verifier:
         identities = {
             "admin-read": ("org_Alpha1", "user_Admin1", "results:read"),
             "admin-write": ("org_Alpha1", "user_Admin1", "denali:write"),
+            "reviewer-write": ("org_Alpha1", "user_Reviewer1", "denali:write"),
             "member-write": ("org_Alpha1", "user_Member1", "denali:write"),
             "removed-read": ("org_Alpha1", "user_Removed1", "results:read"),
             "other-read": ("org_Beta2", "user_Admin2", "results:read"),
@@ -42,6 +43,7 @@ class Memberships:
     def role(self, organization_id, user_id):
         return {
             ("org_Alpha1", "user_Admin1"): "admin",
+            ("org_Alpha1", "user_Reviewer1"): "admin",
             ("org_Alpha1", "user_Member1"): "member",
             ("org_Beta2", "user_Admin2"): "admin",
             ("org_Unknown3", "user_Admin3"): "admin",
@@ -52,6 +54,8 @@ class Repository:
     def __init__(self):
         self.calls = []
         self.actions = {}
+        self.proposals = {}
+        self.response_actions = {}
 
     def lookup_tenant(self, org):
         return {"org_Alpha1": "tenant-alpha", "org_Beta2": "tenant-beta"}.get(org)
@@ -108,6 +112,65 @@ class Repository:
         else:
             self.actions[key] = payload
         return {"id": asset, "governance_status": status, "tenant": tenant}
+
+    def create_runtime_response_request_idempotent(
+        self,
+        tenant,
+        detection,
+        *,
+        action_type,
+        target_asset_id,
+        justification,
+        requested_by,
+        idempotency_key,
+    ):
+        key = (tenant, idempotency_key)
+        payload = (detection, action_type, target_asset_id, justification, requested_by)
+        if key in self.response_actions:
+            if self.response_actions[key][0] != payload:
+                raise ValueError("idempotency key was already used for another action")
+            return self.response_actions[key][1]
+        if tenant != "tenant-alpha" or detection != ASSET:
+            return None
+        result = {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "tenant": tenant,
+            "state": "awaiting_approval",
+            "requested_by": requested_by,
+        }
+        self.proposals[result["id"]] = result
+        self.response_actions[key] = (payload, result)
+        return result
+
+    def review_runtime_response_request_idempotent(
+        self,
+        tenant,
+        detection,
+        response,
+        *,
+        decision,
+        review_note,
+        reviewed_by,
+        idempotency_key,
+    ):
+        key = (tenant, idempotency_key)
+        payload = (detection, response, decision, review_note, reviewed_by)
+        if key in self.response_actions:
+            if self.response_actions[key][0] != payload:
+                raise ValueError("idempotency key was already used for another action")
+            return self.response_actions[key][1]
+        proposal = self.proposals.get(response)
+        if (
+            tenant != "tenant-alpha"
+            or proposal is None
+            or proposal["requested_by"] == reviewed_by
+            or proposal["state"] != "awaiting_approval"
+        ):
+            return None
+        result = {**proposal, "state": decision, "reviewed_by": reviewed_by}
+        self.proposals[response] = result
+        self.response_actions[key] = (payload, result)
+        return result
 
 
 def app(repository):
@@ -270,6 +333,63 @@ def test_gateway_rejects_removed_member_unmapped_org_and_unconfigured_auth():
     )
     with TestClient(no_gateway) as client:
         assert client.get(url, headers={"Authorization": "Bearer admin-read"}).status_code == 404
+
+
+def test_manual_runtime_response_requires_independent_admin_and_is_idempotent():
+    repo = Repository()
+    create_url = f"/internal/v1/capabilities/detections/{ASSET}/responses"
+    proposal = {
+        "action_type": "preserve_and_investigate",
+        "justification": "Investigate exact evidence",
+    }
+    writer = {"Authorization": "Bearer admin-write", "Idempotency-Key": "proposal-123"}
+    reviewer = {"Authorization": "Bearer reviewer-write", "Idempotency-Key": "review-123"}
+    with TestClient(app(repo)) as client:
+        assert (
+            client.post(
+                create_url, json=proposal, headers={**writer, "Authorization": "Bearer admin-read"}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                create_url,
+                json=proposal,
+                headers={**writer, "Authorization": "Bearer member-write"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(create_url.replace(ASSET, "bad"), json=proposal, headers=writer).status_code
+            == 422
+        )
+        created = client.post(create_url, json=proposal, headers=writer)
+        assert created.status_code == 201
+        assert client.post(create_url, json=proposal, headers=writer).json() == created.json()
+        assert (
+            client.post(
+                create_url, json={**proposal, "justification": "Different"}, headers=writer
+            ).status_code
+            == 409
+        )
+        response_id = created.json()["id"]
+        review_url = f"{create_url}/{response_id}"
+        decision = {"decision": "approved"}
+        assert client.patch(review_url, json=decision, headers=writer).status_code == 409
+        reviewed = client.patch(review_url, json=decision, headers=reviewer)
+        assert reviewed.status_code == 200
+        assert reviewed.json()["state"] == "approved"
+        assert client.patch(review_url, json=decision, headers=reviewer).json() == reviewed.json()
+        assert (
+            client.patch(review_url, json={"decision": "rejected"}, headers=reviewer).status_code
+            == 409
+        )
+        assert (
+            client.patch(
+                review_url.replace(response_id, "bad"), json=decision, headers=reviewer
+            ).status_code
+            == 422
+        )
 
 
 def test_clerk_machine_verifier_and_live_membership_are_bounded(monkeypatch):
