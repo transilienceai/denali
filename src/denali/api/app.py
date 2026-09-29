@@ -35,6 +35,7 @@ from denali.api.auth import (
     ClerkAuthenticator,
     RequestAuthenticator,
 )
+from denali.api.capabilities import read_route
 from denali.api.clerk_admin import (
     ClerkAdminError,
     ClerkBackendOrganizationAdmin,
@@ -48,7 +49,12 @@ from denali.api.evidence_import import (
     encode_report,
     validate_report_pair,
 )
-from denali.api.gateway_auth import ClerkResultsGatewayVerifier, ResultsGatewayVerifier
+from denali.api.gateway_auth import (
+    ClerkGatewayVerifier,
+    ClerkMembershipChecker,
+    GatewayVerifier,
+    MembershipChecker,
+)
 from denali.api.github_oidc import (
     GitHubActionsIdentity,
     GitHubActionsTokenVerifier,
@@ -802,7 +808,8 @@ def create_app(
     tenant_id: str | None = None,
     auth_mode: Literal["local", "clerk"] | None = None,
     authenticator: RequestAuthenticator | None = None,
-    results_gateway_verifier: ResultsGatewayVerifier | None = None,
+    results_gateway_verifier: GatewayVerifier | None = None,
+    gateway_membership_checker: MembershipChecker | None = None,
     clerk_organization_admin: ClerkOrganizationAdmin | None = None,
     validation_dispatcher: Callable[[str], str | None] | None = None,
     collection_dispatcher: Callable[[str], str | None] | None = None,
@@ -825,11 +832,20 @@ def create_app(
         gateway_machine_id = os.environ.get("DENALI_RESULTS_GATEWAY_MACHINE_ID", "")
         receiver_machine_id = os.environ.get("DENALI_RESULTS_RECEIVER_MACHINE_ID", "")
         if gateway_machine_id or receiver_machine_id:
-            configured_results_gateway_verifier = ClerkResultsGatewayVerifier(
+            configured_results_gateway_verifier = ClerkGatewayVerifier(
                 os.environ.get("DENALI_PLATFORM_MACHINE_SECRET_KEY", ""),
                 gateway_machine_id,
                 receiver_machine_id,
             )
+    configured_gateway_membership_checker = gateway_membership_checker
+    if (
+        configured_gateway_membership_checker is None
+        and configured_results_gateway_verifier is not None
+        and os.environ.get("CLERK_SECRET_KEY")
+    ):
+        configured_gateway_membership_checker = ClerkMembershipChecker(
+            os.environ["CLERK_SECRET_KEY"]
+        )
     configured_clerk_organization_admin = clerk_organization_admin
     if (
         configured_clerk_organization_admin is None
@@ -892,6 +908,7 @@ def create_app(
         app.state.auth_mode = configured_auth_mode
         app.state.authenticator = configured_authenticator
         app.state.results_gateway_verifier = configured_results_gateway_verifier
+        app.state.gateway_membership_checker = configured_gateway_membership_checker
         app.state.clerk_organization_admin = configured_clerk_organization_admin
         app.state.validation_dispatcher = validation_dispatcher
         app.state.collection_dispatcher = collection_dispatcher
@@ -1011,23 +1028,74 @@ def create_app(
 
     @app.middleware("http")
     async def authenticate_request_context(request: Request, call_next: Callable[..., Any]):
-        if request.method == "GET" and request.url.path in {
+        original_path = request.scope["path"]
+        legacy_read = request.method == "GET" and original_path in {
             "/internal/v1/results/summary",
             "/internal/v1/results/findings",
             "/internal/v1/results/coverage",
-        }:
+        }
+        capability_read = request.method == "GET" and original_path.startswith(
+            "/internal/v1/capabilities/"
+        )
+        capability_write = (
+            (
+                request.method == "PATCH"
+                and re.fullmatch(
+                    r"/internal/v1/capabilities/assets/[^/]{1,128}/governance",
+                    original_path,
+                )
+                is not None
+            )
+            or (
+                request.method == "POST"
+                and re.fullmatch(
+                    r"/internal/v1/capabilities/detections/[^/]{1,128}/responses",
+                    original_path,
+                )
+                is not None
+            )
+            or (
+                request.method == "PATCH"
+                and re.fullmatch(
+                    r"/internal/v1/capabilities/detections/[^/]{1,128}/responses/[^/]{1,128}",
+                    original_path,
+                )
+                is not None
+            )
+        )
+        if original_path.startswith("/internal/v1/") and not (
+            legacy_read or capability_read or capability_write
+        ):
+            return JSONResponse(status_code=404, content={"detail": "not found"})
+        if legacy_read or capability_read or capability_write:
             verifier = request.app.state.results_gateway_verifier
+            if request.app.state.auth_mode != "clerk" or verifier is None:
+                return JSONResponse(status_code=404, content={"detail": "not found"})
             authorization = request.headers.get("authorization", "")
             token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
-            if verifier is None:
-                return JSONResponse(status_code=404, content={"detail": "not found"})
-            principal = await run_in_threadpool(verifier.verify, token)
+            purpose = "denali:write" if capability_write else "results:read"
+            principal = await run_in_threadpool(verifier.verify, token, purpose=purpose)
             if principal is None:
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "invalid gateway token"},
                     headers={"WWW-Authenticate": "Bearer"},
                 )
+            checker = request.app.state.gateway_membership_checker
+            if checker is None:
+                return JSONResponse(
+                    status_code=503, content={"detail": "membership lookup unavailable"}
+                )
+            try:
+                role = await run_in_threadpool(
+                    checker.role, principal.organization_id, principal.user_id
+                )
+            except Exception:
+                return JSONResponse(
+                    status_code=503, content={"detail": "membership lookup unavailable"}
+                )
+            if role not in {"admin", "member"} or (capability_write and role != "admin"):
+                return JSONResponse(status_code=403, content={"detail": "forbidden"})
             repo = request.app.state.repository
             lookup_tenant = getattr(repo, "lookup_tenant", None)
             if lookup_tenant is None:
@@ -1038,10 +1106,23 @@ def create_app(
             if tenant_id is None:
                 return JSONResponse(status_code=404, content={"detail": "not found"})
             request.state.denali_auth = AuthContext(
-                principal.user_id, principal.organization_id, "member"
+                principal.user_id, principal.organization_id, role
             )
             request.state.denali_tenant_id = tenant_id
-            return await call_next(request)
+            if capability_read:
+                operation = original_path.removeprefix("/internal/v1/capabilities/")
+                try:
+                    path, query = read_route(operation, request.query_params)
+                except HTTPException as error:
+                    return JSONResponse(
+                        status_code=error.status_code, content={"detail": error.detail}
+                    )
+                request.scope["path"] = path
+                request.scope["raw_path"] = path.encode()
+                request.scope["query_string"] = query
+            response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            return response
         if request.app.state.auth_mode == "local" or _is_public_request(request):
             return await call_next(request)
         authenticator = request.app.state.authenticator
@@ -3690,6 +3771,91 @@ def create_app(
             raise HTTPException(status_code=404, detail="asset not found")
         return row
 
+    @app.patch("/internal/v1/capabilities/assets/{asset_id}/governance")
+    def gateway_update_governance(
+        request: Request,
+        asset_id: UUID,
+        update: GovernanceUpdate,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        key = _gateway_idempotency_key(request)
+        mutate_once = getattr(repo, "set_governance_idempotent", None)
+        if mutate_once is None:
+            raise HTTPException(status_code=503, detail="idempotent governance unavailable")
+        try:
+            row = mutate_once(
+                current_tenant,
+                str(asset_id),
+                status=update.status,
+                owner=update.owner,
+                notes=update.notes,
+                actor=request.state.denali_auth.user_id,
+                idempotency_key=key,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if row is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        return row
+
+    @app.post("/internal/v1/capabilities/detections/{detection_id}/responses", status_code=201)
+    def gateway_create_runtime_response(
+        request: Request,
+        detection_id: UUID,
+        proposal: RuntimeResponseCreate,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        create_once = getattr(repo, "create_runtime_response_request_idempotent", None)
+        if create_once is None:
+            raise HTTPException(status_code=503, detail="idempotent response storage unavailable")
+        key = _gateway_idempotency_key(request)
+        try:
+            row = create_once(
+                current_tenant,
+                str(detection_id),
+                action_type=proposal.action_type,
+                target_asset_id=str(proposal.target_asset_id) if proposal.target_asset_id else None,
+                justification=proposal.justification.strip(),
+                requested_by=request.state.denali_auth.user_id,
+                idempotency_key=key,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if row is None:
+            raise HTTPException(status_code=404, detail="detection or response target not found")
+        return row
+
+    @app.patch("/internal/v1/capabilities/detections/{detection_id}/responses/{response_id}")
+    def gateway_review_runtime_response(
+        request: Request,
+        detection_id: UUID,
+        response_id: UUID,
+        review: RuntimeResponseReview,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        review_once = getattr(repo, "review_runtime_response_request_idempotent", None)
+        if review_once is None:
+            raise HTTPException(status_code=503, detail="idempotent response storage unavailable")
+        key = _gateway_idempotency_key(request)
+        try:
+            row = review_once(
+                current_tenant,
+                str(detection_id),
+                str(response_id),
+                decision=review.decision,
+                review_note=review.review_note,
+                reviewed_by=request.state.denali_auth.user_id,
+                idempotency_key=key,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail="response unavailable, already reviewed, or requester cannot self-approve",
+            )
+        return row
+
     @app.get("/v1/sources/coverage")
     def source_coverage(request: Request) -> dict[str, Any]:
         repo, current_tenant = _context(request)
@@ -4209,9 +4375,7 @@ def create_app(
         aws_compatible = row.get("provider") == "aws_agentcore"
         payload = {
             "schema_version": (
-                "denali.aws_agent_session.v1"
-                if aws_compatible
-                else "denali.agent_session.v1"
+                "denali.aws_agent_session.v1" if aws_compatible else "denali.agent_session.v1"
             ),
             "exported_at": datetime.now(UTC),
             "content_policy": "metadata_only",
@@ -4223,7 +4387,7 @@ def create_app(
                 "Cache-Control": "no-store",
                 "Content-Disposition": (
                     f'attachment; filename="denali-'
-                    f'{"aws" if aws_compatible else "agent"}-session-'
+                    f"{'aws' if aws_compatible else 'agent'}-session-"
                     f'{session_key[:12]}.json"'
                 ),
             },
@@ -4383,6 +4547,13 @@ def _context(request: Request) -> tuple[InventoryReader, str]:
             raise HTTPException(status_code=401, detail="authentication required")
         return repository, str(tenant_id)
     return repository, request.app.state.tenant_id
+
+
+def _gateway_idempotency_key(request: Request) -> str:
+    key = request.headers.get("Idempotency-Key", "")
+    if re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key) is None:
+        raise HTTPException(status_code=422, detail="valid Idempotency-Key is required")
+    return key
 
 
 def _clerk_admin_context(
