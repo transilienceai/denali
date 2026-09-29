@@ -1523,7 +1523,8 @@ def test_activity_can_be_filtered_by_correlated_asset(repository) -> None:
 
 
 def test_runtime_detections_are_evidence_linked_and_idempotent(repository) -> None:
-    tenant, repo = repository
+    _, repo = repository
+    tenant = repo.resolve_tenant(f"org_RuntimeGateway{uuid.uuid4().hex}")
     now = datetime.now(UTC)
     application = AssetRef(
         AssetKind.AI_APPLICATION,
@@ -1641,6 +1642,58 @@ def test_runtime_detections_are_evidence_linked_and_idempotent(repository) -> No
     assert len(detail["activities"]) == 2
     assert detail["attributes"]["high_impact_scopes"] == ["Mail.ReadWrite"]
     assert detail["assets"][0]["natural_key"] == application.natural_key
+
+    detection_id = str(consent_row["id"])
+    proposal_values = {
+        "action_type": "preserve_and_investigate",
+        "target_asset_id": None,
+        "justification": "Investigate exact observed consent evidence",
+        "requested_by": "user_GatewayRequester",
+        "idempotency_key": "proposal-fixture-01",
+    }
+    proposal = repo.create_runtime_response_request_idempotent(
+        tenant, detection_id, **proposal_values
+    )
+    assert proposal is not None and proposal["state"] == "awaiting_approval"
+    assert repo.create_runtime_response_request_idempotent(
+        tenant, detection_id, **proposal_values
+    ) == proposal
+    with pytest.raises(ValueError, match="idempotency key"):
+        repo.create_runtime_response_request_idempotent(
+            tenant,
+            detection_id,
+            **{**proposal_values, "justification": "Different action"},
+        )
+    response_id = str(proposal["id"])
+    review_values = {
+        "decision": "approved",
+        "review_note": "Evidence independently verified",
+        "reviewed_by": "user_GatewayReviewer",
+        "idempotency_key": "review-fixture-01",
+    }
+    assert repo.review_runtime_response_request_idempotent(
+        tenant,
+        detection_id,
+        response_id,
+        **{**review_values, "reviewed_by": proposal_values["requested_by"]},
+    ) is None
+    review = repo.review_runtime_response_request_idempotent(
+        tenant, detection_id, response_id, **review_values
+    )
+    assert review is not None and review["state"] == "approved"
+    assert repo.review_runtime_response_request_idempotent(
+        tenant, detection_id, response_id, **review_values
+    ) == review
+    assert repo.review_runtime_response_request_idempotent(
+        str(uuid.uuid4()), detection_id, response_id,
+        **{**review_values, "idempotency_key": "cross-tenant-01"},
+    ) is None
+    with psycopg.connect(DSN) as connection:
+        audit_count = connection.execute(
+            "SELECT count(*) FROM gateway_runtime_response_action WHERE tenant_id = %s::uuid",
+            (tenant,),
+        ).fetchone()[0]
+    assert audit_count == 2
 
     second = repo.evaluate_runtime_detections(tenant)
     assert second["confirmed_detections"] == 2

@@ -25,7 +25,7 @@ handler; it never accepts a URL, tenant ID, or arbitrary route from the gateway.
 | Activity | `activity-summary`, `activity`, `activity-detail`, `runtime-sessions`, `runtime-session-detail` |
 | Detections | `detections-summary`, `detections`, `detection-detail`, `detection-evaluations` |
 
-The single write operation is:
+The asset-governance write operation is:
 
 `PATCH /internal/v1/capabilities/assets/{asset_id}/governance`
 
@@ -36,6 +36,22 @@ optional `notes` is at most 4000 characters. It requires an 8–128-character
 request returns 200; a retry of the same tenant/key/body returns the recorded
 result without another update; a different action using that key returns 409.
 The action and actor are durably recorded by migration 021.
+
+Two additional Denali-owned manual response operations are available:
+
+- `POST /internal/v1/capabilities/detections/{detection_id}/responses` (201) uses
+  `RuntimeResponseCreate`: `action_type` is one of Denali's five response proposal
+  types, `target_asset_id` is required for target-specific types, and `justification`
+  is 1–2000 characters. This records a proposal only; it does not call a provider.
+- `PATCH /internal/v1/capabilities/detections/{detection_id}/responses/{response_id}`
+  (200) uses `RuntimeResponseReview`: `decision` is `approved` or `rejected`, with
+  optional `review_note` at most 2000 characters. The original requester cannot
+  review their own proposal. Approval records a decision only and does not call
+  a provider.
+
+Both require the same distinct `denali:write` M2M purpose, current organization
+admin membership, and `Idempotency-Key` as governance. Migration 022 records their
+request hashes, actors, and outcomes atomically with the app-owned mutation.
 
 Every request requires a short-lived Clerk M2M token from the configured gateway
 machine, scoped to the Denali receiver machine and bound to `org_id` and `user_id`.
@@ -54,10 +70,9 @@ and missing assets 404. Clerk membership lookup failure returns 503, never acces
 The receiver does not expose health, account administration, invitations, provider
 callbacks, CloudFormation/setup artifacts, raw connection configuration, credential
 leases, runtime-session export, connection disable/delete, customer-cloud mutation,
-or arbitrary API forwarding. Existing Denali write APIs for vulnerability imports,
-runtime response request/review, and validation/collection are **not yet** gateway
-capabilities; each needs its own authorization, audit, idempotency, and durable-work
-review. The shared AWS/GitHub connector APIs are on `dev`, not production `main`,
+or arbitrary API forwarding. Existing Denali write APIs for vulnerability imports
+and validation/collection are **not yet** gateway capabilities; each needs its own
+authorization, audit, idempotency, and durable-work review. The shared AWS/GitHub connector APIs are on `dev`, not production `main`,
 and are not introduced by this branch. This is not full Denali API parity.
 
 ## Release gate
@@ -65,5 +80,5 @@ and are not introduced by this branch. This is not full Denali API parity.
 Run Ruff, the complete Python suite, the PostgreSQL integration suite with
 `DENALI_TEST_DSN`, Modal module compilation, frontend build, and a development
 Clerk-org-switch/removed-member/admin/member acceptance pass before merge/deploy.
-Migration 021 must run before enabling the PATCH route. Do not configure production
+Migrations 021 and 022 must run before enabling the write routes. Do not configure production
 gateway IDs or deploy from this feature branch.

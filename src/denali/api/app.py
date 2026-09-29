@@ -1038,12 +1038,30 @@ def create_app(
             "/internal/v1/capabilities/"
         )
         capability_write = (
-            request.method == "PATCH"
-            and re.fullmatch(
-                r"/internal/v1/capabilities/assets/[^/]{1,128}/governance",
-                original_path,
+            (
+                request.method == "PATCH"
+                and re.fullmatch(
+                    r"/internal/v1/capabilities/assets/[^/]{1,128}/governance",
+                    original_path,
+                )
+                is not None
             )
-            is not None
+            or (
+                request.method == "POST"
+                and re.fullmatch(
+                    r"/internal/v1/capabilities/detections/[^/]{1,128}/responses",
+                    original_path,
+                )
+                is not None
+            )
+            or (
+                request.method == "PATCH"
+                and re.fullmatch(
+                    r"/internal/v1/capabilities/detections/[^/]{1,128}/responses/[^/]{1,128}",
+                    original_path,
+                )
+                is not None
+            )
         )
         if original_path.startswith("/internal/v1/") and not (
             legacy_read or capability_read or capability_write
@@ -3760,9 +3778,7 @@ def create_app(
         update: GovernanceUpdate,
     ) -> dict[str, Any]:
         repo, current_tenant = _context(request)
-        key = request.headers.get("Idempotency-Key", "")
-        if re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key) is None:
-            raise HTTPException(status_code=422, detail="valid Idempotency-Key is required")
+        key = _gateway_idempotency_key(request)
         mutate_once = getattr(repo, "set_governance_idempotent", None)
         if mutate_once is None:
             raise HTTPException(status_code=503, detail="idempotent governance unavailable")
@@ -3780,6 +3796,64 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         if row is None:
             raise HTTPException(status_code=404, detail="asset not found")
+        return row
+
+    @app.post("/internal/v1/capabilities/detections/{detection_id}/responses", status_code=201)
+    def gateway_create_runtime_response(
+        request: Request,
+        detection_id: UUID,
+        proposal: RuntimeResponseCreate,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        create_once = getattr(repo, "create_runtime_response_request_idempotent", None)
+        if create_once is None:
+            raise HTTPException(status_code=503, detail="idempotent response storage unavailable")
+        key = _gateway_idempotency_key(request)
+        try:
+            row = create_once(
+                current_tenant,
+                str(detection_id),
+                action_type=proposal.action_type,
+                target_asset_id=str(proposal.target_asset_id) if proposal.target_asset_id else None,
+                justification=proposal.justification.strip(),
+                requested_by=request.state.denali_auth.user_id,
+                idempotency_key=key,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if row is None:
+            raise HTTPException(status_code=404, detail="detection or response target not found")
+        return row
+
+    @app.patch("/internal/v1/capabilities/detections/{detection_id}/responses/{response_id}")
+    def gateway_review_runtime_response(
+        request: Request,
+        detection_id: UUID,
+        response_id: UUID,
+        review: RuntimeResponseReview,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        review_once = getattr(repo, "review_runtime_response_request_idempotent", None)
+        if review_once is None:
+            raise HTTPException(status_code=503, detail="idempotent response storage unavailable")
+        key = _gateway_idempotency_key(request)
+        try:
+            row = review_once(
+                current_tenant,
+                str(detection_id),
+                str(response_id),
+                decision=review.decision,
+                review_note=review.review_note,
+                reviewed_by=request.state.denali_auth.user_id,
+                idempotency_key=key,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail="response unavailable, already reviewed, or requester cannot self-approve",
+            )
         return row
 
     @app.get("/v1/sources/coverage")
@@ -4473,6 +4547,13 @@ def _context(request: Request) -> tuple[InventoryReader, str]:
             raise HTTPException(status_code=401, detail="authentication required")
         return repository, str(tenant_id)
     return repository, request.app.state.tenant_id
+
+
+def _gateway_idempotency_key(request: Request) -> str:
+    key = request.headers.get("Idempotency-Key", "")
+    if re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key) is None:
+        raise HTTPException(status_code=422, detail="valid Idempotency-Key is required")
+    return key
 
 
 def _clerk_admin_context(
