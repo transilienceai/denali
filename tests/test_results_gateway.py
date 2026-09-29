@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from denali.api.app import create_app
 from denali.api.auth import AuthContext, AuthenticationError
 from denali.api.gateway_auth import (
-    ClerkResultsGatewayVerifier,
+    ClerkGatewayVerifier,
     GatewayPrincipal,
 )
 
@@ -21,12 +21,25 @@ class SessionAuthenticator:
 
 
 class FakeGatewayVerifier:
-    def verify(self, token):
+    def verify(self, token, *, purpose):
+        if purpose != "results:read":
+            return None
         return {
-            "alpha": GatewayPrincipal("mch_Gateway1", "org_Alpha1", "user_Alice1"),
-            "beta": GatewayPrincipal("mch_Gateway1", "org_Beta2", "user_Bob2"),
-            "unmapped": GatewayPrincipal("mch_Gateway1", "org_Unknown3", "user_Carol3"),
+            "alpha": GatewayPrincipal("mch_Gateway1", "org_Alpha1", "user_Alice1", purpose),
+            "beta": GatewayPrincipal("mch_Gateway1", "org_Beta2", "user_Bob2", purpose),
+            "unmapped": GatewayPrincipal(
+                "mch_Gateway1", "org_Unknown3", "user_Carol3", purpose
+            ),
         }.get(token)
+
+
+class Memberships:
+    def role(self, organization_id, user_id):
+        return {
+            ("org_Alpha1", "user_Alice1"): "member",
+            ("org_Beta2", "user_Bob2"): "member",
+            ("org_Unknown3", "user_Carol3"): "member",
+        }.get((organization_id, user_id))
 
 
 class ResultsRepository:
@@ -73,6 +86,7 @@ def _app(repository, verifier=_DEFAULT_VERIFIER):
         auth_mode="clerk",
         authenticator=SessionAuthenticator(),
         results_gateway_verifier=verifier,
+        gateway_membership_checker=Memberships(),
         migrate_on_start=False,
     )
 
@@ -135,18 +149,18 @@ def test_clerk_gateway_verifier_requires_subject_scope_and_bound_claims(monkeypa
     )
     machine = SimpleNamespace(m2m=SimpleNamespace(verify_token=lambda **_: result))
     monkeypatch.setattr(clerk_backend_api, "Clerk", lambda **_: machine)
-    verifier = ClerkResultsGatewayVerifier("ak_test", "mch_Gateway1", "mch_Denali1")
-    assert verifier.verify("token") == GatewayPrincipal(
-        "mch_Gateway1", "org_Alpha1", "user_Alice1"
+    verifier = ClerkGatewayVerifier("ak_test", "mch_Gateway1", "mch_Denali1")
+    assert verifier.verify("token", purpose="results:read") == GatewayPrincipal(
+        "mch_Gateway1", "org_Alpha1", "user_Alice1", "results:read"
     )
     result.scopes = ["mch_Other1"]
-    assert verifier.verify("token") is None
+    assert verifier.verify("token", purpose="results:read") is None
     result.scopes = ["mch_Denali1"]
     result.expiration = result.created_at + 16 * 60 * 1000
-    assert verifier.verify("token") is None
+    assert verifier.verify("token", purpose="results:read") is None
     result.expiration = result.created_at + 5 * 60 * 1000
     result.claims = {"purpose": "results:read", "org_id": "org_Other1"}
-    assert verifier.verify("token") is None
+    assert verifier.verify("token", purpose="results:read") is None
     result.claims = {"purpose": "results:read", "org_id": "org_Alpha1", "user_id": "user_Alice1"}
     result.revoked = True
-    assert verifier.verify("token") is None
+    assert verifier.verify("token", purpose="results:read") is None
