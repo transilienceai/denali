@@ -30,8 +30,10 @@ The asset-governance write operation is:
 `PATCH /internal/v1/capabilities/assets/{asset_id}/governance`
 
 It accepts the existing Denali `GovernanceUpdate` JSON: `status` is one of
-`approved`, `unreviewed`, `unwanted`; optional `owner` is at most 256 characters;
-optional `notes` is at most 4000 characters. It requires an 8–128-character
+`approved`, `unreviewed`, `unwanted`; schema-optional `owner` is at most 256
+characters and `notes` at most 4000 characters. The public gateway requires
+callers to supply all three fields explicitly, preventing accidental clearing
+of owner or notes by an omitted field. The receiver requires an 8–128-character
 `Idempotency-Key` consisting of letters, digits, `_`, or `-`. A successful first
 request returns 200; a retry of the same tenant/key/body returns the recorded
 result without another update; a different action using that key returns 409.
@@ -55,11 +57,12 @@ request hashes, actors, and outcomes atomically with the app-owned mutation.
 
 Every request requires a short-lived Clerk M2M token from the configured gateway
 machine, scoped to the Denali receiver machine and bound to `org_id` and `user_id`.
-GET requires token purpose `results:read`; PATCH requires `denali:write`. Denali
-independently checks **current** Clerk membership, requires `org:admin` for PATCH,
-looks up the pre-existing Clerk-org → Denali-tenant mapping, and scopes all repository
-operations by that tenant UUID. A removed member is denied even if their gateway
-token has not expired. Responses are `Cache-Control: no-store`.
+GET requires token purpose `results:read`; mutations (POST/PATCH) require
+`denali:write`. Denali independently checks **current** Clerk membership,
+requires `org:admin` for every mutation, looks up the pre-existing Clerk-org →
+Denali-tenant mapping, and scopes all repository operations by that tenant UUID.
+A removed member is denied even if their gateway token has not expired. Responses
+are `Cache-Control: no-store`.
 
 Unknown routes and unconfigured receivers return 404; invalid tokens 401;
 non-members and non-admin writers 403; malformed input 422; unmapped organizations
