@@ -301,6 +301,41 @@ def test_clerk_organization_mapping_is_stable_and_isolated(repository) -> None:
     assert repo.resolve_tenant("org_DenaliPilotB") != first
 
 
+def test_gateway_governance_action_is_audited_once_and_tenant_scoped(repository) -> None:
+    _, repo = repository
+    marker = uuid.uuid4().hex
+    alpha = repo.resolve_tenant(f"org_GatewayAlpha{marker}")
+    beta = repo.resolve_tenant(f"org_GatewayBeta{marker}")
+    assert repo.lookup_tenant(f"org_GatewayAlpha{marker}") == alpha
+    assert repo.lookup_tenant(f"org_GatewayMissing{marker}") is None
+    repo.ingest(alpha, demo_batch(datetime.now(UTC)))
+    asset = str(repo.list_assets(alpha)[0]["id"])
+    key = f"action-{marker}"
+    values = {
+        "status": "approved",
+        "owner": "security",
+        "notes": "reviewed",
+        "actor": "user_GatewayAdmin",
+        "idempotency_key": key,
+    }
+    assert repo.set_governance_idempotent(beta, asset, **values) is None
+    first = repo.set_governance_idempotent(alpha, asset, **values)
+    assert first is not None and first["governance_status"] == "approved"
+    assert repo.set_governance_idempotent(alpha, asset, **values) == first
+    with pytest.raises(ValueError, match="idempotency key"):
+        repo.set_governance_idempotent(alpha, asset, **{**values, "status": "unwanted"})
+    with psycopg.connect(DSN) as connection:
+        audit = connection.execute(
+            """
+            SELECT actor_user_id, count(*) FROM gateway_governance_action
+            WHERE tenant_id = %s::uuid AND idempotency_key = %s
+            GROUP BY actor_user_id
+            """,
+            (alpha, key),
+        ).fetchone()
+    assert audit == ("user_GatewayAdmin", 1)
+
+
 def test_github_ci_import_resolves_tenant_repository_and_exact_observed_digest(
     repository,
 ) -> None:
