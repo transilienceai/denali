@@ -1,10 +1,10 @@
-# Denali capability receiver (proposed, not deployed)
+# Denali capability receiver (dev integration, not deployed)
 
 Denali remains the owner of its data and authorization. The Transilience gateway is
 an authenticated client of these **internal** routes, not a database reader. This
-branch starts from production `main`; it ports only the three existing development
-results receiver paths needed for compatibility, not the unmerged shared-connector
-development branch.
+integration branch starts from `dev` and preserves its existing results bridge and
+shared AWS/GitHub connection routes. It does not merge into or deploy production
+`main`.
 
 ## Request contract
 
@@ -75,8 +75,9 @@ callbacks, CloudFormation/setup artifacts, raw connection configuration, credent
 leases, runtime-session export, connection disable/delete, customer-cloud mutation,
 or arbitrary API forwarding. Existing Denali write APIs for vulnerability imports
 and validation/collection are **not yet** gateway capabilities; each needs its own
-authorization, audit, idempotency, and durable-work review. The shared AWS/GitHub connector APIs are on `dev`, not production `main`,
-and are not introduced by this branch. This is not full Denali API parity.
+authorization, audit, idempotency, and durable-work review. The shared AWS/GitHub
+connector APIs remain on `dev`, not production `main`; this branch does not change
+their contracts. This is not full Denali API parity.
 
 ## Release gate
 
