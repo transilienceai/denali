@@ -8,8 +8,14 @@ from fastapi.testclient import TestClient
 
 from denali.api.app import create_app
 from denali.api.auth import AuthContext, AuthenticationError
-from denali.api.capabilities import READ_CAPABILITIES
+from denali.api.capabilities import CAPABILITY_CONTRACT_VERSION, READ_CAPABILITIES
 from denali.api.gateway_auth import ClerkGatewayVerifier, ClerkMembershipChecker, GatewayPrincipal
+
+
+def test_product_owned_read_contract_is_versioned_and_allowlisted():
+    assert CAPABILITY_CONTRACT_VERSION == 1
+    assert len(READ_CAPABILITIES) == 26
+    assert all(spec.path.startswith("/v1/") for spec in READ_CAPABILITIES.values())
 
 ASSET = "11111111-1111-4111-8111-111111111111"
 
