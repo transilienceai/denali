@@ -10,6 +10,11 @@ from uuid import UUID
 from fastapi import HTTPException
 from starlette.datastructures import QueryParams
 
+# This product-owned v1 contract is pinned by the shared Platform adapter.
+# Changing an operation name, parameter, or result meaning requires a new
+# contract version and coordinated gateway/CLI/MCP rollout.
+CAPABILITY_CONTRACT_VERSION = 1
+
 
 @dataclass(frozen=True)
 class ReadCapability:
