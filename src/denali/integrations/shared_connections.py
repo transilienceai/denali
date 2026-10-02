@@ -15,6 +15,8 @@ import psycopg
 from clerk_backend_api import Clerk
 from psycopg.rows import dict_row
 
+from denali.integrations.shared_connections_client import SharedConnectionsClient
+
 MAX_AWS_CONNECTIONS_PER_ORG = 100
 
 
@@ -74,6 +76,9 @@ def aws_snapshot(dsn: str, clerk_org_id: str) -> dict[str, Any]:
 
 def publish_aws_snapshot(clerk_org_id: str) -> dict[str, int]:
     """Run manually after dev platform registration and entitlement are provisioned."""
+
+    if clerk_org_id not in SharedConnectionsClient.allowed_org_ids_from_environment():
+        raise ValueError("shared connections are not enabled for this Clerk organization")
 
     origin = os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "").rstrip("/")
     parsed = urlsplit(origin)

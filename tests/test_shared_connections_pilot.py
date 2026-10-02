@@ -98,6 +98,7 @@ def test_snapshot_aborts_instead_of_sending_a_truncated_set(monkeypatch):
 
 
 def test_publisher_requires_https_and_a_distinct_machine_key(monkeypatch):
+    monkeypatch.setenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "org_123")
     monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "http://platform.example")
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "test-key")
     with pytest.raises(ValueError, match="HTTPS origin"):
@@ -144,6 +145,7 @@ def test_publisher_sends_one_complete_snapshot_with_clerk_m2m(monkeypatch):
 
     monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "machine-test-key")
+    monkeypatch.setenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "org_123")
     monkeypatch.setenv("DENALI_DSN", "unused-dsn")
     monkeypatch.setattr(shared_connections, "Clerk", FakeClerk)
     monkeypatch.setattr(shared_connections.httpx, "Client", FakeClient)
@@ -159,3 +161,12 @@ def test_publisher_sends_one_complete_snapshot_with_clerk_m2m(monkeypatch):
     assert sent["url"] == "https://platform.example/internal/v1/connections/aws/legacy/snapshot"
     assert sent["headers"] == {"Authorization": "Bearer short-lived-test-token"}
     assert sent["json"]["clerk_org_id"] == "org_123"
+
+
+def test_publisher_rejects_non_pilot_org_before_reading_database(monkeypatch):
+    monkeypatch.setenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "org_pilot")
+    monkeypatch.setattr(
+        shared_connections, "aws_snapshot", lambda *_args: pytest.fail("unexpected database read")
+    )
+    with pytest.raises(ValueError, match="not enabled"):
+        shared_connections.publish_aws_snapshot("org_other")

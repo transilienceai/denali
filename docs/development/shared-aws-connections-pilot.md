@@ -95,3 +95,38 @@ is included in this PR. The new Denali-use path is not accepted until its
 reviewed revision reaches `dev` and the signed-in staging flow completes
 attach -> Denali validation -> collection -> local disable/delete without
 cross-org access or credential exposure.
+
+## Production opt-in boundary
+
+Production code is dark by default. The bridge requires both a production
+Platform HTTPS origin and Denali's own production Clerk M2M sender secret in
+Modal; neither belongs in Vercel. Even when those are configured, the
+`DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` value in the Denali core Modal Secret
+defaults to **no organizations**. Set it only to reviewed, comma-separated
+Clerk production Organization IDs. The first pilot is `Transilience Prod`
+(`org_3K8emWY2vMAQDvm9UaMlZBnrjVt`). Do not use the development `tran-test`
+ID in production. Requests from any other org receive 404 before an M2M token
+or Platform request is made; the operator snapshot task and worker leases use
+the same allowlist. An invalid ID fails configuration instead of widening it.
+
+The org allowlist is a second boundary, not a substitute for the Platform's
+registered Denali machine and explicit org/app entitlement. Register and
+entitle only the pilot org in Platform production. The production Platform
+receiver and Denali sender are separate Clerk machines in the production
+instance; never copy either development secret. Deploy the bridge through the
+reviewed Denali `main` workflow, initially with the origin and sender key
+unset. After smoke checks, add the production origin, sender key, and pilot
+allowlist to Denali Modal, then redeploy the exact reviewed `main` SHA. Keep
+the public origin in the deployment-scoped configuration object, as in dev.
+
+This does **not** migrate or alter any existing Denali connection. Legacy AWS
+continues to use its existing role and external ID. Azure, Microsoft Entra,
+Google Cloud (GCP), Google Workspace, GitHub, and Azure Repos continue to use
+their existing integrations. The Platform currently brokers shared AWS and
+GitHub only; this Denali pilot exposes shared AWS only. A Denali admin must
+explicitly choose **Use in Denali** for a validated Platform AWS connection,
+which creates a new Denali connection record without replacing an existing
+record. Test the exact pilot org, a non-pilot org, legacy AWS validation and
+collection, and each other provider's connection listing before enabling the
+pilot. Do not claim production onboarding complete until hosted create,
+role setup, validation, attachment, collection, disable, and deletion pass.

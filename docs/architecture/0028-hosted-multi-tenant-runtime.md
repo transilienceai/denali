@@ -212,8 +212,11 @@ provider Secret is mounted after the core Secret and must not repeat core Clerk 
 The shared-connections pilot also mounts one deployment-scoped configuration object for its
 public platform origin on every function, including workers that import the API module. That
 object remains present when unset, so the dependency count stays identical on remote import;
-the machine key remains in the core Secret. Production has neither platform origin nor machine
-access until its separate rollout is approved.
+the machine key remains in the core Secret. The production bridge is dark until its separate
+rollout configures both values. A server-side `DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` allowlist
+in the core Secret defaults to no organizations even if the origin and key are present; the
+allowlist applies to browser routes, operator snapshots, and worker leases. Existing Denali
+provider connections and their execution paths remain unchanged.
 Production normally uses `custom-secret` plus `denali-github-provider`; the Shasta Workspace pilot
 function additionally mounts a fixed-name `shasta-denali-bridge` for its per-source signing key and
 bindings, while retaining the provider Secret's Google Workspace operator identity. The fixed name

@@ -31,8 +31,12 @@ class FakeRepository:
 
 
 class FakeSharedClient:
-    def __init__(self):
+    def __init__(self, allowed_org_ids=None):
         self.calls = []
+        self.allowed_org_ids = allowed_org_ids
+
+    def allows_org(self, clerk_org_id):
+        return self.allowed_org_ids is None or clerk_org_id in self.allowed_org_ids
 
     def request(self, method, path, *, clerk_org_id, payload=None, expect_text=False):
         self.calls.append((method, path, clerk_org_id, payload, expect_text))
@@ -59,6 +63,23 @@ def make_client(shared, repository=None):
             migrate_on_start=False,
         )
     )
+
+
+def test_shared_routes_are_hidden_from_non_pilot_orgs():
+    shared = FakeSharedClient(allowed_org_ids={"org_alpha"})
+    with make_client(shared) as client:
+        assert client.get(
+            "/v1/shared/connections", headers={"Authorization": "Bearer alpha-member"}
+        ).status_code == 200
+        assert client.get(
+            "/v1/shared/connections", headers={"Authorization": "Bearer beta-admin"}
+        ).status_code == 404
+        assert client.post(
+            "/v1/shared/connections/aws",
+            json={"account_id": "123456789012"},
+            headers={"Authorization": "Bearer beta-admin"},
+        ).status_code == 404
+    assert all(call[2] == "org_alpha" for call in shared.calls)
 
 
 def test_admin_creation_uses_server_resolved_clerk_org_not_client_input():

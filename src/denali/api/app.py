@@ -1607,7 +1607,10 @@ def create_app(
         client = request.app.state.shared_connections_client
         if client is None:
             raise HTTPException(status_code=503, detail="shared connections are not configured")
-        return client, request.state.denali_auth.organization_id
+        clerk_org_id = request.state.denali_auth.organization_id
+        if not client.allows_org(clerk_org_id):
+            raise HTTPException(status_code=404, detail="shared connections are not available")
+        return client, clerk_org_id
 
     def _shared_request(
         request: Request,

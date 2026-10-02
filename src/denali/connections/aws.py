@@ -428,7 +428,13 @@ class AwsConnectionValidator:
                 )
 
         regional_plan = aws_coverage_plan(connection["declared_scopes"], scan_regions)
-        if self._max_workers == 1 or len(regional_plan) < 2:
+        if (
+            connection.get("credential_type") == "platform_shared_aws"
+            or self._max_workers == 1
+            or len(regional_plan) < 2
+        ):
+            # A platform lease stays inside this validation invocation. The
+            # parallel path creates per-thread sessions from legacy STS keys.
             regional_results = [
                 self._validate_plane(session, planned, configuration) for planned in regional_plan
             ]

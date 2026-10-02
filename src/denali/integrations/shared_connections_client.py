@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,7 +19,13 @@ class SharedConnectionsError(Exception):
 
 
 class SharedConnectionsClient:
-    def __init__(self, origin: str, machine_secret_key: str):
+    def __init__(
+        self,
+        origin: str,
+        machine_secret_key: str,
+        *,
+        allowed_clerk_org_ids: frozenset[str] | None = None,
+    ):
         origin = origin.rstrip("/")
         parsed = urlsplit(origin)
         if (
@@ -35,6 +42,21 @@ class SharedConnectionsClient:
             raise ValueError("Denali shared-connections machine secret is required")
         self._origin = origin
         self._clerk = Clerk(bearer_auth=machine_secret_key)
+        self._allowed_clerk_org_ids = allowed_clerk_org_ids
+
+    @staticmethod
+    def allowed_org_ids_from_environment() -> frozenset[str]:
+        raw = os.environ.get("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "")
+        org_ids = frozenset(value.strip() for value in raw.split(",") if value.strip())
+        if any(not re.fullmatch(r"org_[A-Za-z0-9]+", value) for value in org_ids):
+            raise ValueError("shared connections allowlist contains an invalid Clerk org ID")
+        return org_ids
+
+    def allows_org(self, clerk_org_id: str) -> bool:
+        return (
+            self._allowed_clerk_org_ids is None
+            or clerk_org_id in self._allowed_clerk_org_ids
+        )
 
     @classmethod
     def from_environment(cls) -> SharedConnectionsClient | None:
@@ -46,7 +68,11 @@ class SharedConnectionsClient:
             raise ValueError(
                 "shared connections origin and machine secret must be configured together"
             )
-        return cls(origin, key)
+        return cls(
+            origin,
+            key,
+            allowed_clerk_org_ids=cls.allowed_org_ids_from_environment(),
+        )
 
     def request(
         self,
@@ -57,6 +83,8 @@ class SharedConnectionsClient:
         payload: dict[str, Any] | None = None,
         expect_text: bool = False,
     ) -> dict[str, Any] | str:
+        if not self.allows_org(clerk_org_id):
+            raise SharedConnectionsError(404)
         if path != "/v1/connections" and not path.startswith("/internal/v1/connections/"):
             raise ValueError("unexpected shared connections path")
         try:
