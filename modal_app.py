@@ -21,10 +21,17 @@ image = (
     .add_local_dir("src", remote_path="/opt/denali/src", copy=True)
     .run_commands("pip install '/opt/denali[api,aws,azure,gcp,github,hosted]'")
 )
+# Modal re-imports this module inside each container without deploy-shell variables.
+# Keep every function's dependency graph identical locally and remotely. Workers
+# also import the API module, so they need this public origin alongside the
+# machine key in the core Modal Secret even though only the API calls it.
+shared_connections_origin = os.environ.get("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
 runtime_secrets = [
     modal.Secret.from_name(SECRET_NAME),
     modal.Secret.from_name(PROVIDER_SECRET_NAME),
+    modal.Secret.from_dict({"DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin}),
 ]
+shared_connections_secrets = runtime_secrets
 shasta_bridge_secrets = [
     *runtime_secrets,
     modal.Secret.from_name(SHASTA_BRIDGE_SECRET_NAME),
@@ -35,6 +42,15 @@ app = modal.App(APP_NAME)
 def _region_options() -> dict[str, str]:
     region = os.environ.get("DENALI_MODAL_REGION", "").strip()
     return {"region": region} if region else {}
+
+
+@app.function(image=image, secrets=shared_connections_secrets, **_region_options())
+def sync_shared_aws_connections(clerk_org_id: str) -> dict[str, int]:
+    """Operator-triggered pilot; no change to Denali's AWS execution path."""
+
+    from denali.integrations.shared_connections import publish_aws_snapshot
+
+    return publish_aws_snapshot(clerk_org_id)
 
 
 def _configure_aws_oidc() -> None:
@@ -357,7 +373,7 @@ def _dispatch_vulnerability_import(job_id: str) -> str:
 
 @app.function(
     image=image,
-    secrets=runtime_secrets,
+    secrets=shared_connections_secrets,
     min_containers=1,
     scaledown_window=600,
     timeout=300,

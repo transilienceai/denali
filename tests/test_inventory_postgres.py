@@ -301,6 +301,38 @@ def test_clerk_organization_mapping_is_stable_and_isolated(repository) -> None:
     assert repo.resolve_tenant("org_DenaliPilotB") != first
 
 
+def test_shared_aws_worker_target_uses_server_resolved_org(repository) -> None:
+    _, repo = repository
+    clerk_org_id = f"org_SharedAws{uuid.uuid4().hex}"
+    tenant = repo.resolve_tenant(clerk_org_id)
+    other_tenant = repo.resolve_tenant(f"org_SharedAwsOther{uuid.uuid4().hex}")
+    connection_id = str(uuid.uuid4())
+    created = repo.create_connection(
+        tenant,
+        connection_id=connection_id,
+        provider="aws",
+        display_name=f"Shared AWS {connection_id[:8]}",
+        credential_type="platform_shared_aws",
+        credential_reference={"platform_connection_id": connection_id},
+        declared_scopes=[AWS_SCOPE_BEDROCK_AGENTS],
+        coverage_plan=aws_coverage_plan([AWS_SCOPE_BEDROCK_AGENTS], ["us-east-1"]),
+        configuration={
+            "account_id": "123456789012",
+            "partition": "aws",
+            "coverage_mode": "selected",
+            "regions": ["us-east-1"],
+        },
+    )
+    assert created["credential_reference"] == {
+        "type": "platform_shared_aws",
+        "platform_connection_id": connection_id,
+    }
+    target = repo.get_connection_validation_target(tenant, connection_id)
+    assert target is not None
+    assert target["clerk_organization_id"] == clerk_org_id
+    assert repo.get_connection_validation_target(other_tenant, connection_id) is None
+
+
 def test_github_ci_import_resolves_tenant_repository_and_exact_observed_digest(
     repository,
 ) -> None:
