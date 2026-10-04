@@ -106,7 +106,9 @@ def test_normalizes_foundry_spans_with_exact_metadata_only_entities() -> None:
     assert model.session_uid == SESSION_ID
     assert model.entities[1].asset is not None
     assert model.entities[2].asset is not None
-    assert model.entities[2].asset.natural_key == "azure_openai:gpt-5-mini"
+    assert model.entities[2].asset.natural_key == (
+        f"{PROJECT_ID.lower()}/model-deployments/gpt-5-mini"
+    )
     assert tool.entities[-1].asset is not None
     assert tool.entities[-1].asset.natural_key.endswith("/tools/stage_followup")
     serialized = repr((root, model, tool))

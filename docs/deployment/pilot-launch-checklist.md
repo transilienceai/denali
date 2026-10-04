@@ -331,6 +331,9 @@ DENALI_AZURE_REPOS_CALLBACK_URL=https://<production-domain>/api/v1/connections/a
 - The Cloud Shell script creates or confirms the customer tenant's local service principal and
   grants Reader only on the subscriptions the customer selects. Azure onboarding has no browser
   consent callback because the operator application requests no API permissions.
+- When Azure Foundry agent inventory is selected, the same reviewable script creates a custom role
+  containing only `Microsoft.CognitiveServices/accounts/AIServices/agents/read` and assigns it at
+  each discovered Foundry project. Re-run setup when a new project is added.
 - When Azure Repos is enabled, register the callback above, add Azure DevOps delegated `vso.code`
   to the operator application, and have an Azure DevOps administrator add its tenant-local service
   principal as a Basic user with read access only to the selected projects or repositories.

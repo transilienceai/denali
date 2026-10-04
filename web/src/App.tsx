@@ -2792,6 +2792,7 @@ const AZURE_CONNECTION_SCOPES = [
   { id: "azure.ai_services", label: "Azure AI services", detail: "AI service accounts and Azure AI Search" },
   { id: "azure.ai_platform", label: "Azure AI platform", detail: "Machine Learning workspaces and Bot Service" },
   { id: "azure.ai_activity", label: "Azure AI management activity", detail: "Subscription Activity Log metadata; no prompts or responses" },
+  { id: "azure.agent_runtime_inventory", label: "Foundry agent inventory", detail: "Exact project, agent, model deployment, and tool identifiers through a read-only custom data-plane role" },
   { id: "azure.agent_runtime_activity", label: "Foundry agent runtime activity", detail: "Server-side metadata-only Application Insights sessions, model calls, and tool invocations" },
   { id: "azure.code_to_cloud", label: "Code-to-cloud deployments", detail: "Container Apps, Function Apps, and AKS cluster identities, revisions, images, and managed identities" },
 ];
@@ -2836,6 +2837,12 @@ function connectionScopes(provider: ConnectionProvider) {
           : GOOGLE_WORKSPACE_CONNECTION_SCOPES;
 }
 
+function defaultConnectionScopeIds(provider: ConnectionProvider) {
+  return connectionScopes(provider)
+    .filter((scope) => scope.id !== "azure.agent_runtime_inventory")
+    .map((scope) => scope.id);
+}
+
 function ConnectionsPage({
   connections,
   selectedId,
@@ -2873,7 +2880,7 @@ function ConnectionsPage({
   const [awsRoleName, setAwsRoleName] = useState("DenaliSecurityAuditRole");
   const [coverageMode, setCoverageMode] = useState<AwsConnectionCreate["coverage_mode"]>("automatic");
   const [regions, setRegions] = useState("us-east-1");
-  const [scopes, setScopes] = useState(() => connectionScopes(provider).map((scope) => scope.id));
+  const [scopes, setScopes] = useState(() => defaultConnectionScopeIds(provider));
   const [azureTenantId, setAzureTenantId] = useState("");
   const [azureReposTenantId, setAzureReposTenantId] = useState("");
   const [azureReposOrganization, setAzureReposOrganization] = useState("");
@@ -2890,7 +2897,7 @@ function ConnectionsPage({
   const selected = connections.find((connection) => connection.id === selectedId) ?? connections[0];
 
   useEffect(() => {
-    setScopes(connectionScopes(provider).map((scope) => scope.id));
+    setScopes(defaultConnectionScopeIds(provider));
   }, [provider]);
 
   useEffect(() => {

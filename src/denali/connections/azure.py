@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 from uuid import UUID
 
 AZURE_CLOUD_PUBLIC = "AzureCloud"
@@ -13,19 +14,25 @@ AZURE_SCOPE_AI_SERVICES = "azure.ai_services"
 AZURE_SCOPE_AI_PLATFORM = "azure.ai_platform"
 AZURE_SCOPE_AI_ACTIVITY = "azure.ai_activity"
 AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY = "azure.agent_runtime_activity"
+AZURE_SCOPE_AGENT_RUNTIME_INVENTORY = "azure.agent_runtime_inventory"
 AZURE_SCOPE_CODE_TO_CLOUD = "azure.code_to_cloud"
 AZURE_SCOPES = (
     AZURE_SCOPE_AI_SERVICES,
     AZURE_SCOPE_AI_PLATFORM,
     AZURE_SCOPE_AI_ACTIVITY,
     AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY,
+    AZURE_SCOPE_AGENT_RUNTIME_INVENTORY,
     AZURE_SCOPE_CODE_TO_CLOUD,
+)
+AZURE_DEFAULT_SCOPES = tuple(
+    scope for scope in AZURE_SCOPES if scope != AZURE_SCOPE_AGENT_RUNTIME_INVENTORY
 )
 AZURE_READER_ROLE_DEFINITION_ID = "acdd72a7-3385-48ef-bd42-f606fba81ae7"
 AZURE_MANAGEMENT_SCOPE = "https://management.azure.com/.default"
 AZURE_MANAGEMENT_ENDPOINT = "https://management.azure.com"
 AZURE_APPLICATION_INSIGHTS_SCOPE = "https://api.applicationinsights.io/.default"
 AZURE_APPLICATION_INSIGHTS_ENDPOINT = "https://api.applicationinsights.io"
+AZURE_FOUNDRY_SCOPE = "https://ai.azure.com/.default"
 AZURE_RESOURCE_GRAPH_API_VERSION = "2022-10-01"
 AZURE_SUBSCRIPTION_API_VERSION = "2022-12-01"
 AZURE_ACTIVITY_API_VERSION = "2015-04-01"
@@ -90,14 +97,29 @@ _SCOPE_METADATA = {
             ),
         },
     ),
+    AZURE_SCOPE_AGENT_RUNTIME_INVENTORY: (
+        {
+            "plane": "azure_foundry_agent_inventory",
+            "label": "Microsoft Foundry project and agent configuration inventory",
+            "permissions": [
+                "Microsoft.ResourceGraph/resources/read",
+                "Microsoft.CognitiveServices/accounts/AIServices/agents/read",
+            ],
+            "query": (
+                "Resources | where type =~ "
+                "'microsoft.cognitiveservices/accounts/projects' "
+                "| project id, name, type, location, resourceGroup, subscriptionId "
+                "| order by id asc | take 1"
+            ),
+        },
+    ),
     AZURE_SCOPE_CODE_TO_CLOUD: (
         {
             "plane": "azure_container_apps_inventory",
             "label": "Azure Container Apps deployment inventory",
             "permission": "Microsoft.ResourceGraph/resources/read",
             "query": (
-                "Resources | where type =~ 'microsoft.app/containerapps' "
-                "| project id | take 1"
+                "Resources | where type =~ 'microsoft.app/containerapps' | project id | take 1"
             ),
         },
         {
@@ -154,7 +176,7 @@ def azure_coverage_plan(
             "region": "all-locations",
             "subscription_id": subscription["id"],
             "subscription_name": subscription["name"],
-            "permissions": [plane["permission"]],
+            "permissions": plane.get("permissions", [plane.get("permission")]),
             "validation_state": "not_validated",
             "coverage_mode": "selected-subscriptions",
         }
@@ -201,6 +223,18 @@ class AzureConnectionValidator:
             except Exception as error:
                 monitor_error = _azure_error_code(error)
 
+        foundry_headers: dict[str, str] | None = None
+        foundry_error: str | None = None
+        if AZURE_SCOPE_AGENT_RUNTIME_INVENTORY in connection.get("declared_scopes", []):
+            try:
+                foundry_token = credential.get_token(AZURE_FOUNDRY_SCOPE).token
+                foundry_headers = {
+                    "Authorization": f"Bearer {foundry_token}",
+                    "Content-Type": "application/json",
+                }
+            except Exception as error:
+                foundry_error = _azure_error_code(error)
+
         results: list[dict[str, Any]] = []
         observed_subscriptions: list[str] = []
         credential_failed = False
@@ -242,6 +276,8 @@ class AzureConnectionValidator:
                     headers,
                     monitor_headers=monitor_headers,
                     monitor_error=monitor_error,
+                    foundry_headers=foundry_headers,
+                    foundry_error=foundry_error,
                 )
                 for planned in plans
             )
@@ -283,6 +319,8 @@ class AzureConnectionValidator:
         *,
         monitor_headers: dict[str, str] | None = None,
         monitor_error: str | None = None,
+        foundry_headers: dict[str, str] | None = None,
+        foundry_error: str | None = None,
     ) -> dict[str, Any]:
         result = {
             "scope": planned["scope"],
@@ -294,7 +332,44 @@ class AzureConnectionValidator:
         }
         try:
             metadata = _plane_metadata(planned["declared_scope"], planned["plane"])
-            if planned["declared_scope"] == AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY:
+            if planned["declared_scope"] == AZURE_SCOPE_AGENT_RUNTIME_INVENTORY:
+                if foundry_headers is None:
+                    raise AzureBindingError(f"foundry_token_{foundry_error or 'unavailable'}")
+                graph_response = self._request(
+                    "POST",
+                    f"{AZURE_MANAGEMENT_ENDPOINT}/providers/Microsoft.ResourceGraph/resources",
+                    headers=headers,
+                    params={"api-version": AZURE_RESOURCE_GRAPH_API_VERSION},
+                    json={
+                        "subscriptions": [subscription_id],
+                        "query": metadata["query"],
+                        "options": {"$top": 1, "resultFormat": "objectArray"},
+                    },
+                    timeout=10.0,
+                )
+                graph_response.raise_for_status()
+                graph_payload = graph_response.json()
+                projects = graph_payload.get("data") if isinstance(graph_payload, dict) else None
+                if not isinstance(projects, list):
+                    raise AzureBindingError("foundry_project_query_invalid")
+                if not projects:
+                    result.update(
+                        state="passed",
+                        detail=(
+                            "The subscription-wide project discovery entrypoint succeeded; no "
+                            "Foundry project currently requires a data-plane probe."
+                        ),
+                    )
+                    return result
+                project_endpoint = _foundry_project_endpoint(projects[0], subscription_id)
+                response = self._request(
+                    "GET",
+                    f"{project_endpoint}/agents",
+                    headers=foundry_headers,
+                    params={"api-version": "v1"},
+                    timeout=10.0,
+                )
+            elif planned["declared_scope"] == AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY:
                 if monitor_headers is None:
                     raise AzureBindingError(
                         f"application_insights_token_{monitor_error or 'unavailable'}"
@@ -313,9 +388,7 @@ class AzureConnectionValidator:
                 )
                 graph_response.raise_for_status()
                 graph_payload = graph_response.json()
-                components = (
-                    graph_payload.get("data") if isinstance(graph_payload, dict) else None
-                )
+                components = graph_payload.get("data") if isinstance(graph_payload, dict) else None
                 if not isinstance(components, list) or not components:
                     raise AzureBindingError("application_insights_component_not_found")
                 app_id = components[0].get("appId") if isinstance(components[0], dict) else None
@@ -327,8 +400,7 @@ class AzureConnectionValidator:
                     headers=monitor_headers,
                     params={
                         "query": (
-                            "dependencies | where false "
-                            "| project timestamp, operation_Id | take 1"
+                            "dependencies | where false | project timestamp, operation_Id | take 1"
                         )
                     },
                     timeout=10.0,
@@ -486,9 +558,7 @@ def authorized_azure_request(customer_tenant_id: str) -> AzureRequest:
 
     def request(method: str, url: str, **kwargs: Any) -> AzureHttpResponse:
         headers = dict(kwargs.pop("headers", {}))
-        headers["Authorization"] = (
-            f"Bearer {credential.get_token(AZURE_MANAGEMENT_SCOPE).token}"
-        )
+        headers["Authorization"] = f"Bearer {credential.get_token(AZURE_MANAGEMENT_SCOPE).token}"
         headers.setdefault("Content-Type", "application/json")
         return _httpx_request(method, url, headers=headers, **kwargs)
 
@@ -511,6 +581,68 @@ def authorized_azure_monitor_request(customer_tenant_id: str) -> AzureRequest:
         return _httpx_request(method, url, headers=headers, **kwargs)
 
     return request
+
+
+def authorized_azure_foundry_request(customer_tenant_id: str) -> AzureRequest:
+    """Create a Foundry project request callable scoped to the public data plane."""
+
+    credential = _default_credential(customer_tenant_id)
+
+    def request(method: str, url: str, **kwargs: Any) -> AzureHttpResponse:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname or ""
+        if (
+            parsed.scheme != "https"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port is not None
+            or not hostname.endswith(".services.ai.azure.com")
+            or not parsed.path.startswith("/api/projects/")
+        ):
+            raise ValueError("Azure Foundry request escaped the public project endpoint")
+        headers = dict(kwargs.pop("headers", {}))
+        headers["Authorization"] = f"Bearer {credential.get_token(AZURE_FOUNDRY_SCOPE).token}"
+        headers.setdefault("Content-Type", "application/json")
+        return _httpx_request(method, url, headers=headers, **kwargs)
+
+    return request
+
+
+def _foundry_project_endpoint(raw: Any, subscription_id: str) -> str:
+    if not isinstance(raw, dict):
+        raise AzureBindingError("foundry_project_invalid")
+    resource_id = raw.get("id")
+    if not isinstance(resource_id, str):
+        raise AzureBindingError("foundry_project_id_missing")
+    parts = resource_id.split("/")
+    if len(parts) != 11 or any(not item for item in parts[1:]):
+        raise AzureBindingError("foundry_project_id_invalid")
+    expected = {
+        1: "subscriptions",
+        3: "resourcegroups",
+        5: "providers",
+        6: "microsoft.cognitiveservices",
+        7: "accounts",
+        9: "projects",
+    }
+    if any(parts[index].casefold() != value for index, value in expected.items()):
+        raise AzureBindingError("foundry_project_id_invalid")
+    if parts[2].casefold() != subscription_id.casefold():
+        raise AzureBindingError("foundry_project_subscription_mismatch")
+    account = parts[8]
+    project = parts[10]
+    if not _safe_foundry_segment(account) or not _safe_foundry_segment(project):
+        raise AzureBindingError("foundry_project_name_invalid")
+    return f"https://{account}.services.ai.azure.com/api/projects/{project}"
+
+
+def _safe_foundry_segment(value: str) -> bool:
+    return (
+        1 <= len(value) <= 64
+        and value[0].isalnum()
+        and value[-1].isalnum()
+        and all(character.isalnum() or character in {"-", ".", "_"} for character in value)
+    )
 
 
 def _httpx_request(method: str, url: str, **kwargs: Any) -> AzureHttpResponse:

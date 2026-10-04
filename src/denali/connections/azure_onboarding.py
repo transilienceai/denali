@@ -9,9 +9,14 @@ from typing import Any
 from uuid import uuid4
 
 from denali.connections.aws_onboarding import S3OnboardingClient
-from denali.connections.azure import AZURE_MANAGEMENT_SCOPE, _default_credential, valid_azure_uuid
+from denali.connections.azure import (
+    AZURE_MANAGEMENT_SCOPE,
+    AZURE_SCOPE_AGENT_RUNTIME_INVENTORY,
+    _default_credential,
+    valid_azure_uuid,
+)
 
-AZURE_ONBOARDING_SCRIPT_VERSION = "denali-azure-subscription-reader-v3"
+AZURE_ONBOARDING_SCRIPT_VERSION = "denali-azure-subscription-reader-v4"
 
 
 class AzureSetupScriptLauncher:
@@ -75,14 +80,15 @@ class AzureSetupScriptLauncher:
             client_id=self._client_id,
             customer_tenant_id=customer_tenant_id,
             callback_token=callback_token,
+            enable_foundry_inventory=(
+                AZURE_SCOPE_AGENT_RUNTIME_INVENTORY in connection.get("declared_scopes", [])
+            ),
         )
         script_bytes = script.encode("utf-8")
         script_sha256 = hashlib.sha256(script_bytes).hexdigest()
         published_at = self._now()
         expires_at = published_at + timedelta(seconds=self._expires_in_seconds)
-        object_key = (
-            f"{self._object_prefix}/{tenant_id}/{connection_id}/{self._nonce()}.sh"
-        )
+        object_key = f"{self._object_prefix}/{tenant_id}/{connection_id}/{self._nonce()}.sh"
         self._s3_client.put_object(
             Bucket=self._bucket_name,
             Key=object_key,
@@ -118,7 +124,11 @@ class AzureSetupScriptLauncher:
 
 
 def render_setup_script(
-    *, client_id: str, customer_tenant_id: str, callback_token: str
+    *,
+    client_id: str,
+    customer_tenant_id: str,
+    callback_token: str,
+    enable_foundry_inventory: bool,
 ) -> str:
     """Render a transparent, interactive, idempotent Azure subscription setup script."""
 
@@ -129,6 +139,8 @@ DENALI_CLIENT_ID='{client_id}'
 DENALI_CUSTOMER_TENANT_ID='{customer_tenant_id}'
 DENALI_SETUP_TOKEN='{callback_token}'
 DENALI_READER_ROLE_ID='acdd72a7-3385-48ef-bd42-f606fba81ae7'
+DENALI_ENABLE_FOUNDRY_INVENTORY='{"true" if enable_foundry_inventory else "false"}'
+DENALI_FOUNDRY_ROLE_NAME='Denali Foundry Agent Inventory Reader'
 
 command -v az >/dev/null || {{ echo 'Azure CLI is required.' >&2; exit 1; }}
 command -v jq >/dev/null || {{ echo 'jq is required.' >&2; exit 1; }}
@@ -197,6 +209,55 @@ for selected in "${{DENALI_SELECTED[@]}}"; do
     --role "$DENALI_READER_ROLE_ID" \
     --scope "/subscriptions/$subscription_id" \
     --only-show-errors --output none
+  if [[ "$DENALI_ENABLE_FOUNDRY_INVENTORY" == 'true' ]]; then
+    subscription_scope="/subscriptions/$subscription_id"
+    foundry_role_id="$(
+      az role definition list \
+        --name "$DENALI_FOUNDRY_ROLE_NAME" \
+        --scope "$subscription_scope" \
+        --query '[0].name' -o tsv
+    )"
+    if [[ -z "$foundry_role_id" ]]; then
+      foundry_role_id="$(cat /proc/sys/kernel/random/uuid)"
+      role_definition_file="$(mktemp)"
+      jq -n \
+        --arg name "$foundry_role_id" \
+        --arg roleName "$DENALI_FOUNDRY_ROLE_NAME" \
+        --arg scope "$subscription_scope" \
+        '{{Name: $name, IsCustom: true, RoleName: $roleName,
+          Description: "Read Foundry agent identifiers and metadata for Denali inventory.",
+          Actions: [], NotActions: [],
+          DataActions: ["Microsoft.CognitiveServices/accounts/AIServices/agents/read"],
+          NotDataActions: [], AssignableScopes: [$scope]}}' > "$role_definition_file"
+      az role definition create \
+        --role-definition "$role_definition_file" \
+        --only-show-errors --output none
+      rm -f "$role_definition_file"
+    fi
+
+    while IFS= read -r account_id; do
+      [[ -n "$account_id" ]] || continue
+      while IFS= read -r project_id; do
+        [[ -n "$project_id" ]] || continue
+        echo "Assigning Foundry agent inventory read access at $project_id..."
+        az role assignment create \
+          --assignee-object-id "$DENALI_SERVICE_PRINCIPAL_ID" \
+          --assignee-principal-type ServicePrincipal \
+          --role "$foundry_role_id" \
+          --scope "$project_id" \
+          --only-show-errors --output none
+      done < <(
+        az rest --method get \
+          --url "https://management.azure.com${{account_id}}/projects?api-version=2025-06-01" \
+          --query 'value[].id' -o tsv 2>/dev/null || true
+      )
+    done < <(
+      az resource list \
+        --subscription "$subscription_id" \
+        --resource-type Microsoft.CognitiveServices/accounts \
+        --query '[].id' -o tsv
+    )
+  fi
   DENALI_SELECTED_JSON="$(
     jq -c --arg id "$subscription_id" --arg name "$subscription_name" \
       '. + [{{id: $id, name: $name}}]' <<< "$DENALI_SELECTED_JSON"

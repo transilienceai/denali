@@ -12,11 +12,19 @@ from denali.connections import AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY
 from denali.domain import (
     ActivityBatch,
     ActivityCategory,
+    ActivityCorrelation,
+    ActivityEntity,
+    ActivityEntityRole,
     ActivityOutcome,
     ActivityRecord,
+    AssertionType,
+    AssetAssertion,
+    AssetKind,
+    AssetRef,
     Coverage,
     CoverageState,
     Evidence,
+    InventoryBatch,
 )
 from denali.store.db import migrate
 from denali.store.repository import PostgresInventoryRepository
@@ -91,6 +99,11 @@ def test_azure_runtime_scheduler_cursor_and_session_are_tenant_scoped(repository
 
     trace_id = "a" * 32
     span_id = "b" * 16
+    project_id = (
+        f"/subscriptions/{subscription_id}/resourcegroups/test/providers/"
+        "microsoft.cognitiveservices/accounts/foundry/projects/anna"
+    )
+    agent = AssetRef(AssetKind.AI_AGENT, f"{project_id}/agents/agent-123")
     inserted = repo.ingest_activity(
         tenant,
         ActivityBatch(
@@ -127,7 +140,16 @@ def test_azure_runtime_scheduler_cursor_and_session_are_tenant_scoped(repository
                     parent_span_uid=None,
                     telemetry_convention="opentelemetry_genai",
                     content_policy="metadata_only",
-                    entities=(),
+                    entities=(
+                        ActivityEntity(
+                            role=ActivityEntityRole.AGENT,
+                            external_uid="agent-123",
+                            display_name="Anna",
+                            asset=agent,
+                            correlation=ActivityCorrelation.EXACT_IDENTIFIER,
+                            confidence=1.0,
+                        ),
+                    ),
                     evidence=Evidence(
                         "azure_application_insights_span",
                         f"azure://application-insights/{subscription_id}/{trace_id}/{span_id}",
@@ -140,6 +162,42 @@ def test_azure_runtime_scheduler_cursor_and_session_are_tenant_scoped(repository
         ),
     )
     assert inserted["activities"] == 1
+    assert inserted["unresolved_entities"] == 1
+    [unlinked] = repo.list_activity(tenant)
+    assert unlinked["correlated_entity_count"] == 0
+    repo.ingest(
+        tenant,
+        InventoryBatch(
+            connector_id="denali.azure_foundry_inventory",
+            connection_id=connection_id,
+            run_id="azure-foundry-inventory-1",
+            scope_key=f"azure:subscription:{subscription_id}:foundry-projects",
+            collected_at=now + timedelta(minutes=2),
+            coverage=(
+                Coverage(
+                    "azure_foundry_agent_inventory",
+                    CoverageState.COMPLETE,
+                    f"azure:subscription:{subscription_id}:foundry-projects",
+                ),
+            ),
+            assets=(
+                AssetAssertion(
+                    asset=agent,
+                    coverage_plane="azure_foundry_agent_inventory",
+                    display_name="Anna",
+                    assertion_type=AssertionType.OBSERVED,
+                    confidence=1.0,
+                    evidence=Evidence(
+                        "azure_foundry_agent_configuration",
+                        "azure://foundry/anna#agent=agent-123",
+                        now + timedelta(minutes=2),
+                    ),
+                ),
+            ),
+        ),
+    )
+    [linked] = repo.list_activity(tenant)
+    assert linked["correlated_entity_count"] == 1
     [session] = repo.list_runtime_sessions(tenant, provider="azure_foundry")
     assert session["provider"] == "azure_foundry"
     assert session["metadata_only"] is True

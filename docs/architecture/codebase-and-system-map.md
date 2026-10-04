@@ -165,7 +165,7 @@ collection run ID, scope key, timestamp, observations, and coverage.
 | Repository source | `repository.py`, `github_repository.py`, `repository_posture.py` | Immutable repository revision, bounded source tree, AI declarations, posture, deployment identifiers, model/tool/action declarations. |
 | Code to cloud | `code_to_cloud.py`, provider deployment modules | Exact source declaration to independently observed workload joins; unmatched and ambiguous candidates remain visible. |
 | AWS AI | `aws_bedrock.py`, `aws_agentcore.py`, `aws_agent_runtime_activity.py`, `aws_stack.py`, `aws_deployments.py` | Bedrock, AgentCore, metadata-only ordered runtime spans, Lambda, ECS, EKS, SageMaker, CloudFormation topology and posture. |
-| Azure | `azure_deployments.py`, `azure_agent_runtime_activity.py` | Container Apps, Function Apps, AKS, deployment identity and control-plane metadata, plus opt-in metadata-only Azure Foundry agent/model/tool spans from Application Insights. |
+| Azure | `azure_deployments.py`, `azure_agent_runtime_activity.py` | Container Apps, Function Apps, AKS, deployment identity and control-plane metadata, opt-in identifier-only Foundry agent configuration, plus metadata-only Foundry agent/model/tool spans from Application Insights. |
 | GCP | `gcp_deployments.py`, `gcp_vertex_activity.py` | Cloud Run, Cloud Run functions Gen2, GKE, Vertex model references, Cloud Audit Log runtime metadata. |
 | Microsoft Entra | `entra_ai.py` | Catalog-matched AI enterprise apps, service principals, grants, app roles, sign-ins, and application-management audits. |
 | Runtime imports | `activity_json.py`, `aws_bedrock_activity.py`, `aws_agent_runtime_activity.py`, `azure_agent_runtime_activity.py` | Provider-neutral Bedrock, Vertex, Workspace Gemini, and Entra activity plus provider-native AgentCore and Azure Foundry OpenTelemetry/OpenInference session spans. |
@@ -220,6 +220,7 @@ The migration sequence is append-only:
 | `013`–`018` | Durable provider collection, vulnerability evidence, Google Workspace, and Azure Repos jobs. |
 | `019` | AWS AgentCore span/session fields, runtime collection jobs, and approval-gated manual response requests. |
 | `020` | Azure Foundry runtime scope and durable collection-job kind. |
+| `021` | Deferred same-tenant runtime-entity links after authoritative inventory arrives. |
 
 Never edit an applied migration. Add a new numbered migration. `src/denali/store/db.py` runs each
 migration once under a transaction-scoped PostgreSQL advisory lock. Hosted API startup never
@@ -387,7 +388,7 @@ separately.
 | Vulnerabilities and component identity | [ADR 0006](0006-sbom-first-vulnerability-model.md), [0013](0013-artifact-vulnerability-correlation.md), [0014](0014-package-occurrence-identity.md) |
 | Code-to-cloud semantics | [ADR 0010](0010-evidence-led-code-to-cloud.md), [0023](0023-provider-neutral-deployment-identity.md) |
 | Provider-specific code to cloud | [GCP 0024](0024-gcp-code-to-cloud.md), [Azure 0025](0025-azure-code-to-cloud.md), [AWS 0026](0026-aws-deployment-code-to-cloud.md), [Kubernetes 0027](0027-shared-kubernetes-code-to-cloud.md) |
-| Runtime activity and detections | [ADR 0015](0015-provider-neutral-runtime-activity.md), [0017](0017-evidence-led-runtime-detections.md), [AWS AgentCore AIDR 0035](0035-aws-agentcore-runtime-detection-and-response.md), [Azure Foundry AIDR 0036](0036-azure-foundry-runtime-detection-and-response.md) |
+| Runtime activity and detections | [ADR 0015](0015-provider-neutral-runtime-activity.md), [0017](0017-evidence-led-runtime-detections.md), [AWS AgentCore AIDR 0035](0035-aws-agentcore-runtime-detection-and-response.md), [Azure Foundry AIDR 0036](0036-azure-foundry-runtime-detection-and-response.md), [Azure exact identity 0037](0037-azure-foundry-exact-runtime-identity.md) |
 | Entra application discovery | [ADR 0016](0016-entra-shadow-ai-and-runtime.md) |
 | Provider onboarding | [AWS 0018](0018-self-service-aws-connections.md), [Azure 0019](0019-self-service-azure-connections.md), [GCP 0020](0020-self-service-gcp-connections.md), [GitHub 0021](0021-self-service-github-connections.md), [Entra 0029](0029-self-service-entra-connections.md) |
 | Hosted deployment status and next actions | [Pilot checklist](../deployment/pilot-launch-checklist.md) |
@@ -397,8 +398,9 @@ separately.
 
 - Full create, setup/callback, validate, collect, disable, and delete evidence remains incomplete
   for some hosted providers; individual dated acceptance records are authoritative.
-- Azure Foundry runtime collection is production accepted, but the reference session still has
-  unresolved agent, model, tool, and execution-identity references against inventory.
+- Azure Foundry runtime collection is production accepted. Exact project, agent, model-deployment,
+  and declared-tool inventory is implemented but still needs hosted lifecycle acceptance; runtime
+  execution identity remains dependent on a provider-native identifier being present in telemetry.
 - The Neon runtime role is not yet split to least privilege and restore operations are untested.
 - Entra sign-in logs depend on tenant licensing and retention; coverage must remain explicit.
 - The local Golden Path is reproducible by manifest and documented collection order, but not yet a

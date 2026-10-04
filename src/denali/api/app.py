@@ -61,6 +61,7 @@ from denali.connections import (
     AWS_SCOPE_AGENT_RUNTIME_ACTIVITY,
     AWS_SCOPES,
     AZURE_CLOUD_PUBLIC,
+    AZURE_DEFAULT_SCOPES,
     AZURE_REPOS_SCOPES,
     AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY,
     AZURE_SCOPES,
@@ -603,7 +604,9 @@ class AzureConnectionCreate(BaseModel):
     tenant_id: UUID
     cloud: Literal["AzureCloud"] = AZURE_CLOUD_PUBLIC
     declared_scopes: list[str] = Field(
-        default_factory=lambda: list(AZURE_SCOPES), min_length=1, max_length=len(AZURE_SCOPES)
+        default_factory=lambda: list(AZURE_DEFAULT_SCOPES),
+        min_length=1,
+        max_length=len(AZURE_SCOPES),
     )
 
 

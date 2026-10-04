@@ -191,7 +191,15 @@ visible to Denali.
 
 ### Azure Foundry runtime activity
 
-Azure Foundry runtime activity is an optional scope on the existing Azure connection. The customer
+Azure Foundry runtime inventory and activity are separate optional scopes on the existing Azure
+connection. When inventory is selected, the Cloud Shell setup creates a custom role containing
+only `Microsoft.CognitiveServices/accounts/AIServices/agents/read` and assigns it at each Foundry
+project discovered in the selected subscriptions. Denali retains only exact project, agent, model
+deployment, and tool identifiers from agent configuration; it does not retain instructions, tool
+schemas, descriptions, endpoints, or environment variables. Re-run setup after adding a project
+so the project-scoped role assignment is created.
+
+For runtime activity, the customer
 enables Foundry tracing and connects the project to Application Insights. Denali uses the selected
 subscription's existing Reader grant to discover Application Insights components and query only
 allowlisted metadata. Denali does not enable tracing, change retention, or request prompts,
@@ -202,6 +210,8 @@ session during acceptance. Confirm the durable job completes, the Runtime page d
 model, and tool sequence, coverage is explicit, and every retained activity reports
 `content_policy=metadata_only`. The production reference pass is recorded in the
 [Azure Foundry AIDR acceptance](../handoffs/2026-09-14-azure-foundry-aidr-production-acceptance.md).
+Exact inventory collection still requires its own hosted create-to-delete acceptance before it is
+described as production accepted.
 
 ## 4. Configure Vercel and the domain
 
