@@ -2776,6 +2776,12 @@ function detectionRuleName(ruleUid: string) {
   if (ruleUid === "DENALI-RUNTIME-AWS-UNDECLARED-MODEL-001") return "Observed model absent from the agent declaration";
   if (ruleUid === "DENALI-RUNTIME-AWS-UNAPPROVED-TOOL-001") return "Observed tool is not approved";
   if (ruleUid === "DENALI-RUNTIME-AWS-RISKY-SEQUENCE-001") return "Retrieval followed by a mutating tool action";
+  if (ruleUid === "DENALI-RUNTIME-OPENSHELL-BOUNDARY-001") return "Effective policy exceeds its approved boundary";
+  if (ruleUid === "DENALI-RUNTIME-OPENSHELL-PROVER-001") return "Required policy domain is not conclusively proven";
+  if (ruleUid === "DENALI-RUNTIME-OPENSHELL-CREDENTIAL-001") return "Effective policy added a credentialed destination";
+  if (ruleUid === "DENALI-RUNTIME-DENIAL-PATH-001") return "Repeated denials followed by another execution path";
+  if (ruleUid === "DENALI-RUNTIME-TELEMETRY-INTEGRITY-001") return "Runtime telemetry interruption or contradiction";
+  if (ruleUid === "DENALI-RUNTIME-POLICY-MISMATCH-001") return "Runtime access conflicts with effective policy";
   return titleCase(ruleUid);
 }
 

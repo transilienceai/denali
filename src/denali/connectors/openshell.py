@@ -236,6 +236,11 @@ class OpenShellConnector:
                     "provider": "nvidia_openshell",
                     "gateway_uid": gateway_uid,
                     "sandbox_uid": sandbox_uid,
+                    "capture_source": loaded.manifest["capture"]["source"],
+                    "capture_started_at": loaded.manifest["capture"]["started_at"],
+                    "capture_ended_at": loaded.manifest["capture"]["ended_at"],
+                    "capture_complete": loaded.manifest["capture"]["complete"],
+                    "loss_signals": loaded.manifest["capture"]["loss_signals"],
                     "policy_revision": _optional_text(
                         loaded.manifest.get("policy_revision"), 512
                     ),

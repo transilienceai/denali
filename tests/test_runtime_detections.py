@@ -4,7 +4,13 @@ from denali.detections import (
     evaluate_aws_risky_action_sequence,
     evaluate_aws_unapproved_tool_invocation,
     evaluate_aws_undeclared_model_invocation,
+    evaluate_denials_followed_by_alternate_path,
+    evaluate_effective_policy_exceeds_boundary,
+    evaluate_new_credentialed_destination,
+    evaluate_prover_authority_gap,
     evaluate_repeated_failed_ai_signins,
+    evaluate_runtime_policy_mismatch,
+    evaluate_telemetry_interruption_or_contradiction,
     evaluate_unreviewed_ai_consent,
     evaluate_unreviewed_model_invocation,
 )
@@ -458,3 +464,336 @@ def test_aws_retrieval_then_mutating_tool_is_ordered_sequence() -> None:
         invocation.id,
     ]
     assert evaluation.candidates[0].attributes["elapsed_ms"] == 10_000
+
+
+def _openshell_assets(
+    *,
+    prover_result: str = "within_boundary",
+    effective_destinations: list[dict] | None = None,
+    declared_destinations: list[dict] | None = None,
+    loss_signals: list[str] | None = None,
+) -> tuple[DetectionAsset, DetectionAsset, DetectionAsset, DetectionAsset, DetectionAsset]:
+    scope = "openshell:gateway-1:sandbox:sandbox-1"
+    workload = DetectionAsset(
+        id="openshell-workload",
+        kind="ai_workload",
+        natural_key=scope,
+        display_name="Review agent",
+        governance_status="approved",
+        lifecycle_state="active",
+        attributes={
+            "provider": "nvidia_openshell",
+            "capture_complete": not bool(loss_signals),
+            "loss_signals": loss_signals or [],
+            "capture_started_at": "2026-10-04T10:00:00Z",
+            "capture_ended_at": "2026-10-04T11:00:00Z",
+        },
+    )
+    declared = DetectionAsset(
+        id="declared-policy",
+        kind="ai_guardrail",
+        natural_key=f"{scope}:declared_policy",
+        display_name="Review agent declared policy",
+        governance_status="approved",
+        lifecycle_state="active",
+        attributes={
+            "provider": "nvidia_openshell",
+            "policy_role": "declared_policy",
+            "policy_sha256": "declared-digest",
+            "network_destinations": declared_destinations or [],
+            "network_binaries": ["/usr/bin/curl"],
+        },
+    )
+    effective = DetectionAsset(
+        id="effective-policy",
+        kind="ai_guardrail",
+        natural_key=f"{scope}:effective_policy",
+        display_name="Review agent effective policy",
+        governance_status="approved",
+        lifecycle_state="active",
+        attributes={
+            "provider": "nvidia_openshell",
+            "policy_role": "effective_policy",
+            "policy_sha256": "effective-digest",
+            "network_destinations": effective_destinations or [],
+            "network_binaries": ["/usr/bin/curl"],
+        },
+    )
+    boundary = DetectionAsset(
+        id="boundary-policy",
+        kind="ai_guardrail",
+        natural_key=f"{scope}:boundary_policy",
+        display_name="Review agent approved boundary",
+        governance_status="approved",
+        lifecycle_state="active",
+        attributes={
+            "provider": "nvidia_openshell",
+            "policy_role": "boundary_policy",
+            "policy_sha256": "boundary-digest",
+        },
+    )
+    check = DetectionAsset(
+        id="boundary-check",
+        kind="ai_guardrail",
+        natural_key=f"{scope}:boundary-check:effective:boundary",
+        display_name="Review agent boundary check",
+        governance_status="approved",
+        lifecycle_state="active",
+        attributes={
+            "provider": "nvidia_openshell",
+            "check": "boundary",
+            "result": prover_result,
+            "reason_code": "solver_timeout" if prover_result == "inconclusive" else None,
+            "coverage_domains": [
+                "filesystem",
+                "network_l4",
+                "network_rest",
+                "process",
+                "landlock",
+            ],
+            "required_domains": [
+                "filesystem",
+                "network_l4",
+                "network_rest",
+                "process",
+                "landlock",
+            ],
+            "candidate_policy_sha256": "effective-digest",
+            "boundary_policy_sha256": "boundary-digest",
+            "counterexample": {"domain": "network", "host": "example.net", "port": 443},
+            "prover_version": "0.1.2",
+        },
+    )
+    return workload, declared, effective, boundary, check
+
+
+def _openshell_access(
+    activity_id: str,
+    *,
+    seconds: int,
+    outcome: str,
+    action: str,
+    destination: str,
+    process: str,
+    status: str | None = None,
+    disposition: str | None = None,
+) -> DetectionActivity:
+    return DetectionActivity(
+        id=activity_id,
+        category="data_access",
+        outcome=outcome,
+        title=activity_id,
+        occurred_at=NOW + timedelta(seconds=seconds),
+        provider="nvidia_openshell",
+        connection_id="openshell:gateway-1",
+        session_uid="sandbox-1",
+        attributes={
+            "action": action,
+            "status": status or ("Success" if outcome == "success" else "Failure"),
+            "disposition": disposition or ("Allowed" if outcome == "success" else "Blocked"),
+            "destination_domain": destination,
+            "destination_port": 443,
+            "process_name": process,
+            "http_method": "GET",
+        },
+        entities=(
+            DetectionActivityEntity(
+                "workload",
+                "sandbox-1",
+                "Review agent",
+                "openshell-workload",
+            ),
+        ),
+    )
+
+
+def test_effective_policy_exceeds_boundary_requires_exact_proof_artifacts() -> None:
+    assets = _openshell_assets(prover_result="exceeds_boundary")
+    evaluation = evaluate_effective_policy_exceeds_boundary(
+        DetectionSnapshot((), assets),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    candidate = evaluation.candidates[0]
+    assert candidate.severity is FindingSeverity.CRITICAL
+    assert {link.role for link in candidate.assets} == {
+        "effective_policy",
+        "approved_boundary",
+        "boundary_check",
+    }
+    assert candidate.attributes["counterexample"]["domain"] == "network"
+
+
+def test_prover_unsupported_or_missing_required_domain_is_detected() -> None:
+    assets = list(_openshell_assets(prover_result="inconclusive"))
+    check = assets[-1]
+    assets[-1] = DetectionAsset(
+        id=check.id,
+        kind=check.kind,
+        natural_key=check.natural_key,
+        display_name=check.display_name,
+        governance_status=check.governance_status,
+        lifecycle_state=check.lifecycle_state,
+        attributes={
+            **dict(check.attributes),
+            "coverage_domains": ["filesystem", "network_l4"],
+        },
+    )
+    evaluation = evaluate_prover_authority_gap(
+        DetectionSnapshot((), tuple(assets)),
+        coverage_state=CoverageState.PARTIAL,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    assert evaluation.candidates[0].attributes["missing_domains"] == [
+        "landlock",
+        "network_rest",
+        "process",
+    ]
+    assert evaluation.candidates[0].attributes["reason_code"] == "solver_timeout"
+
+
+def test_effective_policy_credential_destination_absent_from_declaration_is_detected() -> None:
+    github = {
+        "host": "api.github.com",
+        "port": 443,
+        "protocol": "rest",
+        "credentialed": True,
+    }
+    slack = {
+        "host": "slack.com",
+        "port": 443,
+        "protocol": "rest",
+        "credentialed": True,
+    }
+    assets = _openshell_assets(
+        declared_destinations=[github], effective_destinations=[github, slack]
+    )
+    evaluation = evaluate_new_credentialed_destination(
+        DetectionSnapshot((), assets),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    assert evaluation.candidates[0].attributes["destination_host"] == "slack.com"
+    assert evaluation.candidates[0].attributes["source"] == (
+        "effective_minus_declared_policy"
+    )
+
+
+def test_three_denials_then_changed_successful_path_is_detected() -> None:
+    assets = _openshell_assets()
+    activities = (
+        _openshell_access(
+            "deny-1",
+            seconds=0,
+            outcome="failure",
+            action="Denied",
+            destination="blocked.example",
+            process="/usr/bin/curl",
+        ),
+        _openshell_access(
+            "deny-2",
+            seconds=10,
+            outcome="failure",
+            action="Denied",
+            destination="blocked.example",
+            process="/usr/bin/curl",
+        ),
+        _openshell_access(
+            "deny-3",
+            seconds=20,
+            outcome="failure",
+            action="Denied",
+            destination="blocked.example",
+            process="/usr/bin/curl",
+        ),
+        _openshell_access(
+            "success-1",
+            seconds=30,
+            outcome="success",
+            action="Allowed",
+            destination="alternate.example",
+            process="/usr/bin/python",
+        ),
+    )
+    evaluation = evaluate_denials_followed_by_alternate_path(
+        DetectionSnapshot(activities, assets),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    assert [link.role for link in evaluation.candidates[0].activities] == [
+        "preceding_denial",
+        "preceding_denial",
+        "preceding_denial",
+        "alternate_path_success",
+    ]
+
+
+def test_telemetry_loss_and_field_contradiction_are_distinct_candidates() -> None:
+    assets = _openshell_assets(loss_signals=["watch_stream_skip"])
+    contradiction = _openshell_access(
+        "contradiction",
+        seconds=0,
+        outcome="failure",
+        action="Allowed",
+        status="Failure",
+        disposition="Allowed",
+        destination="api.github.com",
+        process="/usr/bin/curl",
+    )
+    evaluation = evaluate_telemetry_interruption_or_contradiction(
+        DetectionSnapshot((contradiction,), assets),
+        coverage_state=CoverageState.PARTIAL,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 2
+    assert {candidate.attributes["kind"] for candidate in evaluation.candidates} == {
+        "interruption",
+        "contradiction",
+    }
+
+
+def test_successful_runtime_access_absent_from_effective_policy_is_detected() -> None:
+    allowed = {
+        "host": "api.github.com",
+        "port": 443,
+        "protocol": "rest",
+        "enforcement": "enforce",
+        "access": "read-only",
+        "methods": [],
+        "credentialed": False,
+    }
+    assets = _openshell_assets(effective_destinations=[allowed])
+    unexpected = _openshell_access(
+        "unexpected",
+        seconds=0,
+        outcome="success",
+        action="Allowed",
+        destination="uploads.example.net",
+        process="/usr/bin/curl",
+    )
+    expected = _openshell_access(
+        "expected",
+        seconds=1,
+        outcome="success",
+        action="Allowed",
+        destination="api.github.com",
+        process="/usr/bin/curl",
+    )
+    evaluation = evaluate_runtime_policy_mismatch(
+        DetectionSnapshot((unexpected, expected), assets),
+        coverage_state=CoverageState.COMPLETE,
+        evaluated_at=NOW,
+    )
+
+    assert len(evaluation.candidates) == 1
+    assert evaluation.candidates[0].activities[0].activity_id == "unexpected"
+    assert evaluation.candidates[0].attributes["destination_host"] == "uploads.example.net"
