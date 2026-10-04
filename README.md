@@ -39,6 +39,7 @@ Status terms in this README are deliberately independent:
 | AWS Lambda, ECS, EKS, and SageMaker code-to-cloud correlation | **Shipped** | **Locally accepted** against exact live account/Region validation and eight independent deployment collection planes |
 | AWS AgentCore runtime detection and response | **Shipped** | **Pending live acceptance**. Metadata-only CloudWatch span collection, five-minute durable polling, exact session correlation, drift/tool/sequence detections, and manual maker-checker response approval pass automated and PostgreSQL verification; hosted AWS create/update, collect, investigate, and approve remains required |
 | Azure Foundry runtime detection and response | **Shipped** | **Production accepted** on 14 September 2026 against the Anna reference agent: one durable metadata-only session, six agent/model/tool activities, complete Application Insights coverage, and zero prohibited content fields |
+| NVIDIA OpenShell evidence and cross-system detections | **Shipped** | **Automated and PostgreSQL verification only**. Bounded OCSF/policy/prover bundles retain loss-aware provenance and drive six exact-join rules; hosted gateway collection and live acceptance are not claimed |
 | Shared EKS, GKE, and AKS workload correlation | **Shipped** | **Locally accepted** through a live, control-plane-only EKS fixture with exact workload UID/revision, service-account, image-digest, negative-case, persistence, API, and teardown evidence; GKE and AKS workload identities remain covered by automated contract tests |
 | GitHub source-to-cloud correlation | **Shipped** | **Locally accepted** against two immutable GitHub revisions, with all source/inventory/posture/correlation planes complete and two independently observed runtime links proven |
 | Two-application code-to-cloud Golden Path | **Shipped** | Anna on AWS and Summit on GCP are bounded by a versioned reset/verify manifest with exact source-to-runtime links, declared model/tool/action context, real Vertex activity, Entra discovery context, three image vulnerabilities, two correlated governance issues, and a dedicated dashboard story |
@@ -60,7 +61,8 @@ Denali presents the following product surfaces in the web application and API:
   artifact identity separate from unattested source revision claims.
 - Provider-neutral runtime activity plus deterministic, evidence-linked runtime detections,
   ordered AWS AgentCore and Azure Foundry session investigations, and approval-gated manual
-  response requests.
+  response requests. OpenShell bundles add separate declared/effective/boundary/prover authority
+  and loss-aware cross-system drift, sequence, and telemetry-integrity rules.
 - Source coverage that keeps complete, partial, failed, unsupported, and unknown states
   visible.
 - Stable application routes with direct deep links and browser Back/Forward navigation.

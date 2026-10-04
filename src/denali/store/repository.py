@@ -15,7 +15,13 @@ from denali.detections import (
     evaluate_aws_risky_action_sequence,
     evaluate_aws_unapproved_tool_invocation,
     evaluate_aws_undeclared_model_invocation,
+    evaluate_denials_followed_by_alternate_path,
+    evaluate_effective_policy_exceeds_boundary,
+    evaluate_new_credentialed_destination,
+    evaluate_prover_authority_gap,
     evaluate_repeated_failed_ai_signins,
+    evaluate_runtime_policy_mismatch,
+    evaluate_telemetry_interruption_or_contradiction,
     evaluate_unreviewed_ai_consent,
     evaluate_unreviewed_model_invocation,
 )
@@ -910,6 +916,47 @@ class PostgresInventoryRepository:
                         "aws_agentcore_gateway_target_inventory",
                     ),
                 )
+                openshell_prover_coverage = self._detection_coverage_state(
+                    connection, tenant_id, ("openshell_policy_prover",)
+                )
+                openshell_policy_coverage = self._detection_coverage_state(
+                    connection,
+                    tenant_id,
+                    ("openshell_declared_policy", "openshell_effective_policy"),
+                )
+                openshell_access_coverage = self._detection_coverage_state(
+                    connection,
+                    tenant_id,
+                    (
+                        "openshell_ocsf_network",
+                        "openshell_ocsf_http",
+                        "openshell_ocsf_ssh",
+                    ),
+                )
+                openshell_telemetry_coverage = self._detection_coverage_state(
+                    connection,
+                    tenant_id,
+                    (
+                        "openshell_runtime_identity",
+                        "openshell_ocsf_base",
+                        "openshell_ocsf_process",
+                        "openshell_ocsf_network",
+                        "openshell_ocsf_http",
+                        "openshell_ocsf_ssh",
+                        "openshell_ocsf_policy_config",
+                        "openshell_ocsf_lifecycle",
+                    ),
+                )
+                openshell_mismatch_coverage = self._detection_coverage_state(
+                    connection,
+                    tenant_id,
+                    (
+                        "openshell_effective_policy",
+                        "openshell_ocsf_network",
+                        "openshell_ocsf_http",
+                        "openshell_ocsf_ssh",
+                    ),
+                )
                 if snapshot.truncated:
                     sign_in_coverage = self._partial_if_complete(sign_in_coverage)
                     consent_coverage = self._partial_if_complete(consent_coverage)
@@ -921,6 +968,21 @@ class PostgresInventoryRepository:
                         aws_model_drift_coverage
                     )
                     aws_tool_coverage = self._partial_if_complete(aws_tool_coverage)
+                    openshell_prover_coverage = self._partial_if_complete(
+                        openshell_prover_coverage
+                    )
+                    openshell_policy_coverage = self._partial_if_complete(
+                        openshell_policy_coverage
+                    )
+                    openshell_access_coverage = self._partial_if_complete(
+                        openshell_access_coverage
+                    )
+                    openshell_telemetry_coverage = self._partial_if_complete(
+                        openshell_telemetry_coverage
+                    )
+                    openshell_mismatch_coverage = self._partial_if_complete(
+                        openshell_mismatch_coverage
+                    )
                 evaluations = (
                     evaluate_repeated_failed_ai_signins(snapshot, coverage_state=sign_in_coverage),
                     evaluate_unreviewed_ai_consent(snapshot, coverage_state=consent_coverage),
@@ -935,6 +997,24 @@ class PostgresInventoryRepository:
                     ),
                     evaluate_aws_risky_action_sequence(
                         snapshot, coverage_state=aws_runtime_coverage
+                    ),
+                    evaluate_effective_policy_exceeds_boundary(
+                        snapshot, coverage_state=openshell_prover_coverage
+                    ),
+                    evaluate_prover_authority_gap(
+                        snapshot, coverage_state=openshell_prover_coverage
+                    ),
+                    evaluate_new_credentialed_destination(
+                        snapshot, coverage_state=openshell_policy_coverage
+                    ),
+                    evaluate_denials_followed_by_alternate_path(
+                        snapshot, coverage_state=openshell_access_coverage
+                    ),
+                    evaluate_telemetry_interruption_or_contradiction(
+                        snapshot, coverage_state=openshell_telemetry_coverage
+                    ),
+                    evaluate_runtime_policy_mismatch(
+                        snapshot, coverage_state=openshell_mismatch_coverage
                     ),
                 )
                 if snapshot.truncated:
@@ -4811,7 +4891,8 @@ class PostgresInventoryRepository:
             WHERE tenant_id = %s::uuid
               AND category IN (
                   'ai_app_sign_in', 'admin_change', 'agent_invocation',
-                  'model_invocation', 'tool_invocation', 'retrieval'
+                  'model_invocation', 'tool_invocation', 'retrieval',
+                  'data_access', 'other'
               )
               AND attributes->>'fixture' IS DISTINCT FROM 'true'
             ORDER BY occurred_at DESC, id DESC
@@ -4834,7 +4915,8 @@ class PostgresInventoryRepository:
             WHERE entity.tenant_id = %s::uuid
               AND event.category IN (
                   'ai_app_sign_in', 'admin_change', 'agent_invocation',
-                  'model_invocation', 'tool_invocation', 'retrieval'
+                  'model_invocation', 'tool_invocation', 'retrieval',
+                  'data_access', 'other'
               )
               AND event.attributes->>'fixture' IS DISTINCT FROM 'true'
               AND entity.activity_id = ANY(%s::uuid[])

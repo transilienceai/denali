@@ -13,6 +13,14 @@ const AWS_AGENT_RUNTIME_RULE_UIDS = new Set([
   "DENALI-RUNTIME-AWS-UNAPPROVED-TOOL-001",
   "DENALI-RUNTIME-AWS-RISKY-SEQUENCE-001",
 ]);
+const OPENSHELL_RUNTIME_RULE_UIDS = new Set([
+  "DENALI-RUNTIME-OPENSHELL-BOUNDARY-001",
+  "DENALI-RUNTIME-OPENSHELL-PROVER-001",
+  "DENALI-RUNTIME-OPENSHELL-CREDENTIAL-001",
+  "DENALI-RUNTIME-DENIAL-PATH-001",
+  "DENALI-RUNTIME-TELEMETRY-INTEGRITY-001",
+  "DENALI-RUNTIME-POLICY-MISMATCH-001",
+]);
 
 export function applicableDetectionEvaluations(
   evaluations: RuntimeDetectionEvaluation[],
@@ -23,11 +31,15 @@ export function applicableDetectionEvaluations(
   const hasAwsAgentRuntimeEvidence = coverage.some(
     (item) => item.plane === "aws_agent_runtime_activity",
   );
+  const hasOpenShellEvidence = coverage.some((item) =>
+    item.plane?.startsWith("openshell_"),
+  );
   const observedRules = new Set(detections.map((item) => item.rule_uid));
   return evaluations.filter(
     (item) =>
       ((!ENTRA_RULE_UIDS.has(item.rule_uid) || hasEntraEvidence) &&
-        (!AWS_AGENT_RUNTIME_RULE_UIDS.has(item.rule_uid) || hasAwsAgentRuntimeEvidence)) ||
+        (!AWS_AGENT_RUNTIME_RULE_UIDS.has(item.rule_uid) || hasAwsAgentRuntimeEvidence) &&
+        (!OPENSHELL_RUNTIME_RULE_UIDS.has(item.rule_uid) || hasOpenShellEvidence)) ||
       observedRules.has(item.rule_uid),
   );
 }

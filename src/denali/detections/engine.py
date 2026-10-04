@@ -6,6 +6,7 @@ import hashlib
 import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatchcase
 
 from denali.domain import (
     CoverageState,
@@ -25,6 +26,12 @@ UNREVIEWED_MODEL_RULE_UID = "DENALI-RUNTIME-UNREVIEWED-MODEL-001"
 AWS_UNDECLARED_MODEL_RULE_UID = "DENALI-RUNTIME-AWS-UNDECLARED-MODEL-001"
 AWS_UNAPPROVED_TOOL_RULE_UID = "DENALI-RUNTIME-AWS-UNAPPROVED-TOOL-001"
 AWS_RISKY_SEQUENCE_RULE_UID = "DENALI-RUNTIME-AWS-RISKY-SEQUENCE-001"
+OPENSHELL_BOUNDARY_RULE_UID = "DENALI-RUNTIME-OPENSHELL-BOUNDARY-001"
+OPENSHELL_PROVER_AUTHORITY_RULE_UID = "DENALI-RUNTIME-OPENSHELL-PROVER-001"
+OPENSHELL_CREDENTIAL_DESTINATION_RULE_UID = "DENALI-RUNTIME-OPENSHELL-CREDENTIAL-001"
+RUNTIME_DENIAL_PATH_RULE_UID = "DENALI-RUNTIME-DENIAL-PATH-001"
+RUNTIME_TELEMETRY_INTEGRITY_RULE_UID = "DENALI-RUNTIME-TELEMETRY-INTEGRITY-001"
+RUNTIME_POLICY_MISMATCH_RULE_UID = "DENALI-RUNTIME-POLICY-MISMATCH-001"
 FAILURE_THRESHOLD = 3
 FAILURE_WINDOW = timedelta(hours=24)
 CONSENT_OPERATIONS = (
@@ -41,6 +48,8 @@ HIGH_IMPACT_SCOPES = {
     "rolemanagement.readwrite.directory",
 }
 AWS_SEQUENCE_WINDOW = timedelta(minutes=5)
+DENIAL_PATH_WINDOW = timedelta(minutes=5)
+DENIAL_PATH_THRESHOLD = 3
 MUTATING_TOOL_TOKENS = (
     "create",
     "delete",
@@ -613,6 +622,734 @@ def evaluate_aws_risky_action_sequence(
             f"{incomplete} AWS sessions lacked one exact agent correlation" if incomplete else None
         ),
     )
+
+
+def evaluate_effective_policy_exceeds_boundary(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Surface conclusive OpenShell boundary counterexamples without re-proving them."""
+
+    now = evaluated_at or datetime.now(UTC)
+    candidates: list[RuntimeDetectionCandidate] = []
+    incomplete = 0
+    for check in _openshell_checks(snapshot):
+        result = check.attributes.get("result")
+        if result != "exceeds_boundary":
+            continue
+        candidate_digest = check.attributes.get("candidate_policy_sha256")
+        boundary_digest = check.attributes.get("boundary_policy_sha256")
+        effective = _policy_by_digest(snapshot, "effective_policy", candidate_digest)
+        boundary = _policy_by_digest(snapshot, "boundary_policy", boundary_digest)
+        if effective is None or boundary is None:
+            incomplete += 1
+            continue
+        counterexample = check.attributes.get("counterexample")
+        counterexample = counterexample if isinstance(counterexample, dict) else {}
+        domain = str(counterexample.get("domain") or "modeled policy domain")
+        candidates.append(
+            RuntimeDetectionCandidate(
+                correlation_key=_key(OPENSHELL_BOUNDARY_RULE_UID, check.natural_key),
+                rule_uid=OPENSHELL_BOUNDARY_RULE_UID,
+                title=f"{effective.display_name} exceeds its approved boundary",
+                description=(
+                    "The OpenShell standalone prover returned exceeds_boundary for the exact "
+                    "effective and boundary policy artifacts. The counterexample domain is "
+                    f"{domain}."
+                ),
+                risk=(
+                    "The sandbox can exercise authority outside the operator-approved maximum in "
+                    "at least one modeled domain. This conclusion is limited to the prover's "
+                    "reported coverage and counterexample."
+                ),
+                investigation_guidance=(
+                    "Review the linked effective policy, boundary policy, artifact digests, and "
+                    "counterexample. Narrow the effective policy or explicitly revise the approved "
+                    "boundary, then run and ingest a fresh proof."
+                ),
+                severity=FindingSeverity.CRITICAL,
+                confidence=1.0,
+                first_seen_at=now,
+                last_seen_at=now,
+                activities=(),
+                assets=(
+                    DetectionAssetLink(effective.id, "effective_policy"),
+                    DetectionAssetLink(boundary.id, "approved_boundary"),
+                    DetectionAssetLink(check.id, "boundary_check"),
+                ),
+                attributes={
+                    "result": result,
+                    "counterexample": counterexample,
+                    "coverage_domains": check.attributes.get("coverage_domains", []),
+                    "candidate_policy_sha256": candidate_digest,
+                    "boundary_policy_sha256": boundary_digest,
+                },
+            )
+        )
+    return RuntimeDetectionEvaluation(
+        rule_uid=OPENSHELL_BOUNDARY_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} boundary results lacked their exact policy artifacts"
+            if incomplete
+            else None
+        ),
+    )
+
+
+def evaluate_prover_authority_gap(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect unsupported, inconclusive, errored, or under-covered required proof domains."""
+
+    now = evaluated_at or datetime.now(UTC)
+    candidates: list[RuntimeDetectionCandidate] = []
+    incomplete = 0
+    for check in _openshell_checks(snapshot):
+        result = check.attributes.get("result")
+        observed = _string_set(check.attributes.get("coverage_domains"))
+        required = _string_set(check.attributes.get("required_domains"))
+        if not required:
+            incomplete += 1
+            continue
+        missing = sorted(required - observed)
+        if result not in {"unsupported", "inconclusive", "error"} and not missing:
+            continue
+        reason_code = check.attributes.get("reason_code")
+        candidates.append(
+            RuntimeDetectionCandidate(
+                correlation_key=_key(
+                    OPENSHELL_PROVER_AUTHORITY_RULE_UID,
+                    check.natural_key,
+                    str(result),
+                    ",".join(missing),
+                ),
+                rule_uid=OPENSHELL_PROVER_AUTHORITY_RULE_UID,
+                title="OpenShell proof is not authoritative for every required domain",
+                description=(
+                    f"The exact boundary check returned {result}. "
+                    + (
+                        "Required domains without modeled coverage: " + ", ".join(missing) + "."
+                        if missing
+                        else "All declared domains were listed, but the proof did not conclude."
+                    )
+                ),
+                risk=(
+                    "Unsupported or inconclusive proof authority cannot establish that the "
+                    "effective policy stays inside the approved boundary. It is not evidence that "
+                    "the policy exceeds the boundary."
+                ),
+                investigation_guidance=(
+                    "Inspect the prover version and stable reason code, simplify unsupported "
+                    "policy shapes or increase the bounded solve budget, and require a "
+                    "within_boundary result covering every required domain before approval."
+                ),
+                severity=FindingSeverity.HIGH,
+                confidence=1.0,
+                first_seen_at=now,
+                last_seen_at=now,
+                activities=(),
+                assets=(DetectionAssetLink(check.id, "incomplete_boundary_check"),),
+                attributes={
+                    "result": result,
+                    "reason_code": reason_code,
+                    "required_domains": sorted(required),
+                    "observed_domains": sorted(observed),
+                    "missing_domains": missing,
+                    "prover_version": check.attributes.get("prover_version"),
+                },
+            )
+        )
+    return RuntimeDetectionEvaluation(
+        rule_uid=OPENSHELL_PROVER_AUTHORITY_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} prover observations did not declare required domains"
+            if incomplete
+            else None
+        ),
+    )
+
+
+def evaluate_new_credentialed_destination(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect credential-bearing destinations added by effective policy composition."""
+
+    now = evaluated_at or datetime.now(UTC)
+    candidates: list[RuntimeDetectionCandidate] = []
+    incomplete = 0
+    declared_by_scope = {
+        _openshell_policy_scope(asset): asset
+        for asset in snapshot.assets
+        if asset.attributes.get("policy_role") == "declared_policy"
+    }
+    for effective in snapshot.assets:
+        if effective.attributes.get("policy_role") != "effective_policy":
+            continue
+        scope = _openshell_policy_scope(effective)
+        declared = declared_by_scope.get(scope)
+        if scope is None or declared is None:
+            incomplete += 1
+            continue
+        effective_destinations = _credentialed_destinations(effective)
+        declared_destinations = _credentialed_destinations(declared)
+        for destination in sorted(effective_destinations - declared_destinations):
+            host, port, protocol = destination
+            candidates.append(
+                RuntimeDetectionCandidate(
+                    correlation_key=_key(
+                        OPENSHELL_CREDENTIAL_DESTINATION_RULE_UID,
+                        effective.natural_key,
+                        host,
+                        port,
+                        protocol,
+                    ),
+                    rule_uid=OPENSHELL_CREDENTIAL_DESTINATION_RULE_UID,
+                    title=f"Effective policy added credentialed destination {host}:{port}",
+                    description=(
+                        "The fully composed OpenShell policy contains a credential-bearing "
+                        f"{protocol} destination that is absent from the directly declared policy."
+                    ),
+                    risk=(
+                        "Provider composition can expand where sandbox credentials are usable. "
+                        "This is an authority change, not evidence that a credential was used."
+                    ),
+                    investigation_guidance=(
+                        "Identify the provider profile or composed rule that introduced the "
+                        "destination, verify endpoint binding and methods, and compare it with the "
+                        "approved boundary and source declaration."
+                    ),
+                    severity=FindingSeverity.HIGH,
+                    confidence=1.0,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    activities=(),
+                    assets=(
+                        DetectionAssetLink(declared.id, "declared_policy"),
+                        DetectionAssetLink(effective.id, "effective_policy"),
+                    ),
+                    attributes={
+                        "destination_host": host,
+                        "destination_port": int(port) if port.isdigit() else port,
+                        "protocol": protocol,
+                        "source": "effective_minus_declared_policy",
+                    },
+                )
+            )
+    return RuntimeDetectionEvaluation(
+        rule_uid=OPENSHELL_CREDENTIAL_DESTINATION_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} effective policies lacked an exact declared-policy peer"
+            if incomplete
+            else None
+        ),
+    )
+
+
+def evaluate_denials_followed_by_alternate_path(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect repeated OpenShell denials followed by a changed successful execution path."""
+
+    now = evaluated_at or datetime.now(UTC)
+    assets = {asset.id: asset for asset in snapshot.assets}
+    by_workload: dict[str, list[DetectionActivity]] = defaultdict(list)
+    incomplete = 0
+    for activity in snapshot.activities:
+        if activity.provider != "nvidia_openshell" or activity.category != "data_access":
+            continue
+        workload = _one_entity(activity, "workload")
+        if workload is None or workload.asset_id is None:
+            incomplete += 1
+            continue
+        by_workload[workload.asset_id].append(activity)
+
+    candidates: list[RuntimeDetectionCandidate] = []
+    for workload_id, activities in by_workload.items():
+        activities.sort(key=lambda item: (item.occurred_at, item.id))
+        denied: list[DetectionActivity] = []
+        for activity in activities:
+            if _is_denied(activity):
+                denied.append(activity)
+                continue
+            if activity.outcome != "success":
+                continue
+            recent = [
+                item
+                for item in denied
+                if timedelta(0) <= activity.occurred_at - item.occurred_at <= DENIAL_PATH_WINDOW
+            ]
+            if len(recent) < DENIAL_PATH_THRESHOLD:
+                continue
+            latest_path = _execution_path(activity)
+            matching_denials = [item for item in recent if _execution_path(item) != latest_path]
+            if len(matching_denials) < DENIAL_PATH_THRESHOLD:
+                continue
+            evidence = tuple(matching_denials[-DENIAL_PATH_THRESHOLD:] + [activity])
+            workload = assets.get(workload_id)
+            if workload is None:
+                incomplete += 1
+                continue
+            candidates.append(
+                RuntimeDetectionCandidate(
+                    correlation_key=_key(
+                        RUNTIME_DENIAL_PATH_RULE_UID,
+                        workload.natural_key,
+                        *(item.id for item in evidence),
+                    ),
+                    rule_uid=RUNTIME_DENIAL_PATH_RULE_UID,
+                    title=f"{workload.display_name} changed execution path after repeated denials",
+                    description=(
+                        f"OpenShell recorded {DENIAL_PATH_THRESHOLD} denied access attempts "
+                        "followed within five minutes by a successful request using a different "
+                        "process or destination path."
+                    ),
+                    risk=(
+                        "A rapid path change after repeated enforcement failures can indicate "
+                        "policy probing or fallback behavior that bypasses the intended route. "
+                        "Metadata alone does not establish intent."
+                    ),
+                    investigation_guidance=(
+                        "Review the ordered events, exact process and destination metadata, policy "
+                        "revision, and surrounding sandbox activity. Confirm whether the alternate "
+                        "path was an approved fallback."
+                    ),
+                    severity=FindingSeverity.HIGH,
+                    confidence=0.9,
+                    first_seen_at=evidence[0].occurred_at,
+                    last_seen_at=evidence[-1].occurred_at,
+                    activities=tuple(
+                        DetectionActivityLink(
+                            item.id,
+                            "alternate_path_success" if item is activity else "preceding_denial",
+                        )
+                        for item in evidence
+                    ),
+                    assets=(DetectionAssetLink(workload.id, "openshell_workload"),),
+                    attributes={
+                        "denial_count": DENIAL_PATH_THRESHOLD,
+                        "window_seconds": int(DENIAL_PATH_WINDOW.total_seconds()),
+                        "denied_paths": [list(_execution_path(item)) for item in evidence[:-1]],
+                        "successful_path": list(latest_path),
+                    },
+                )
+            )
+    return RuntimeDetectionEvaluation(
+        rule_uid=RUNTIME_DENIAL_PATH_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} OpenShell access observations lacked exact workload identity"
+            if incomplete
+            else None
+        ),
+    )
+
+
+def evaluate_telemetry_interruption_or_contradiction(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect explicit capture loss attestations or contradictory enforcement fields."""
+
+    now = evaluated_at or datetime.now(UTC)
+    candidates: list[RuntimeDetectionCandidate] = []
+    for workload in snapshot.assets:
+        if (
+            workload.kind != "ai_workload"
+            or workload.attributes.get("provider") != "nvidia_openshell"
+        ):
+            continue
+        complete = workload.attributes.get("capture_complete")
+        loss_signals = sorted(_string_set(workload.attributes.get("loss_signals")))
+        if complete is not False and not loss_signals:
+            continue
+        candidates.append(
+            RuntimeDetectionCandidate(
+                correlation_key=_key(
+                    RUNTIME_TELEMETRY_INTEGRITY_RULE_UID,
+                    workload.natural_key,
+                    "interruption",
+                    ",".join(loss_signals),
+                ),
+                rule_uid=RUNTIME_TELEMETRY_INTEGRITY_RULE_UID,
+                title=f"OpenShell telemetry continuity is interrupted for {workload.display_name}",
+                description=(
+                    "The imported capture explicitly does not attest a complete interval or "
+                    f"reported loss signals: {', '.join(loss_signals) or 'unspecified gap'}."
+                ),
+                risk=(
+                    "A telemetry gap prevents reliable negative conclusions and can hide policy "
+                    "violations or execution-path changes. It is not itself evidence of malicious "
+                    "activity."
+                ),
+                investigation_guidance=(
+                    "Recover retained sandbox-local JSONL segments when possible, inspect exporter "
+                    "drop/error metrics, and ingest a new bounded interval with no unresolved loss "
+                    "signal."
+                ),
+                severity=FindingSeverity.HIGH,
+                confidence=1.0,
+                first_seen_at=now,
+                last_seen_at=now,
+                activities=(),
+                assets=(DetectionAssetLink(workload.id, "telemetry_source"),),
+                attributes={
+                    "kind": "interruption",
+                    "capture_complete": complete,
+                    "loss_signals": loss_signals,
+                    "capture_started_at": workload.attributes.get("capture_started_at"),
+                    "capture_ended_at": workload.attributes.get("capture_ended_at"),
+                },
+            )
+        )
+    for activity in snapshot.activities:
+        if activity.provider != "nvidia_openshell":
+            continue
+        action = str(activity.attributes.get("action") or "").casefold()
+        status = str(activity.attributes.get("status") or "").casefold()
+        disposition = str(activity.attributes.get("disposition") or "").casefold()
+        contradiction = (
+            (action == "allowed" and status in {"failure", "error"})
+            or (action == "denied" and status == "success")
+            or (disposition == "blocked" and activity.outcome == "success")
+            or (disposition == "allowed" and activity.outcome == "failure")
+        )
+        if not contradiction:
+            continue
+        workload_entity = _one_entity(activity, "workload")
+        links = ()
+        if workload_entity and workload_entity.asset_id:
+            links = (DetectionAssetLink(workload_entity.asset_id, "telemetry_source"),)
+        candidates.append(
+            RuntimeDetectionCandidate(
+                correlation_key=_key(
+                    RUNTIME_TELEMETRY_INTEGRITY_RULE_UID, activity.id, "contradiction"
+                ),
+                rule_uid=RUNTIME_TELEMETRY_INTEGRITY_RULE_UID,
+                title="OpenShell enforcement telemetry is internally contradictory",
+                description=(
+                    "One OCSF record contains action, disposition, status, or normalized outcome "
+                    "fields that cannot all describe the same enforcement result."
+                ),
+                risk=(
+                    "Contradictory security telemetry cannot safely support allow/deny conclusions "
+                    "and may indicate producer, transformation, or schema errors."
+                ),
+                investigation_guidance=(
+                    "Compare the source record digest with the original JSONL event and producer "
+                    "version, then repair or upgrade the producer before relying on the interval."
+                ),
+                severity=FindingSeverity.HIGH,
+                confidence=1.0,
+                first_seen_at=activity.occurred_at,
+                last_seen_at=activity.occurred_at,
+                activities=(DetectionActivityLink(activity.id, "contradictory_event"),),
+                assets=links,
+                attributes={
+                    "kind": "contradiction",
+                    "action": action,
+                    "disposition": disposition,
+                    "status": status,
+                    "outcome": activity.outcome,
+                },
+            )
+        )
+    return RuntimeDetectionEvaluation(
+        rule_uid=RUNTIME_TELEMETRY_INTEGRITY_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+    )
+
+
+def evaluate_runtime_policy_mismatch(
+    snapshot: DetectionSnapshot,
+    *,
+    coverage_state: CoverageState,
+    evaluated_at: datetime | None = None,
+) -> RuntimeDetectionEvaluation:
+    """Detect exact successful OpenShell access absent from its effective policy summary."""
+
+    now = evaluated_at or datetime.now(UTC)
+    assets = {asset.id: asset for asset in snapshot.assets}
+    policies = {
+        _openshell_policy_scope(asset): asset
+        for asset in snapshot.assets
+        if asset.attributes.get("policy_role") == "effective_policy"
+    }
+    candidates: list[RuntimeDetectionCandidate] = []
+    incomplete = 0
+    for activity in snapshot.activities:
+        if (
+            activity.provider != "nvidia_openshell"
+            or activity.category != "data_access"
+            or activity.outcome != "success"
+        ):
+            continue
+        workload_entity = _one_entity(activity, "workload")
+        workload = assets.get(workload_entity.asset_id) if workload_entity else None
+        scope = _openshell_workload_scope(workload) if workload else None
+        policy = policies.get(scope)
+        host = activity.attributes.get("destination_domain") or activity.attributes.get(
+            "destination_ip"
+        )
+        port = activity.attributes.get("destination_port")
+        process = activity.attributes.get("process_name")
+        method = activity.attributes.get("http_method")
+        if (
+            workload is None
+            or policy is None
+            or not isinstance(host, str)
+            or not isinstance(port, int)
+        ):
+            incomplete += 1
+            continue
+        match = _effective_policy_allows(policy, host, port, process, method)
+        if match is None:
+            incomplete += 1
+            continue
+        if match:
+            continue
+        candidates.append(
+            RuntimeDetectionCandidate(
+                correlation_key=_key(
+                    RUNTIME_POLICY_MISMATCH_RULE_UID,
+                    workload.natural_key,
+                    policy.natural_key,
+                    activity.id,
+                ),
+                rule_uid=RUNTIME_POLICY_MISMATCH_RULE_UID,
+                title=f"Runtime access by {workload.display_name} is absent from effective policy",
+                description=(
+                    f"OpenShell reported successful access to {host}:{port}, but no normalized "
+                    "effective-policy endpoint and binary/method constraint admits the exact "
+                    "metadata."
+                ),
+                risk=(
+                    "Observed access outside the declared enforcement surface can indicate policy "
+                    "drift, a bypass, stale evidence, or a producer defect. Denali does not infer "
+                    "which cause applies."
+                ),
+                investigation_guidance=(
+                    "Verify the policy revision active at the event time, inspect "
+                    "provider-composed rules and runtime enforcement logs, and compare "
+                    "source/IAM/tool declarations before changing policy or access."
+                ),
+                severity=FindingSeverity.CRITICAL,
+                confidence=1.0,
+                first_seen_at=activity.occurred_at,
+                last_seen_at=activity.occurred_at,
+                activities=(DetectionActivityLink(activity.id, "inconsistent_runtime_access"),),
+                assets=(
+                    DetectionAssetLink(workload.id, "executing_workload"),
+                    DetectionAssetLink(policy.id, "effective_policy"),
+                ),
+                attributes={
+                    "destination_host": host,
+                    "destination_port": port,
+                    "process_name": process,
+                    "http_method": method,
+                    "policy_sha256": policy.attributes.get("policy_sha256"),
+                    "comparison": "exact_runtime_metadata_to_effective_policy",
+                },
+            )
+        )
+    return RuntimeDetectionEvaluation(
+        rule_uid=RUNTIME_POLICY_MISMATCH_RULE_UID,
+        state=coverage_state,
+        evaluated_at=now,
+        candidates=tuple(sorted(candidates, key=lambda item: item.correlation_key)),
+        incomplete_candidates=incomplete,
+        detail=(
+            f"{incomplete} successful accesses lacked exact workload, policy, or "
+            "destination evidence"
+            if incomplete
+            else None
+        ),
+    )
+
+
+def _openshell_checks(snapshot: DetectionSnapshot) -> tuple[DetectionAsset, ...]:
+    return tuple(
+        asset
+        for asset in snapshot.assets
+        if asset.kind == "ai_guardrail"
+        and asset.attributes.get("provider") == "nvidia_openshell"
+        and asset.attributes.get("check") == "boundary"
+    )
+
+
+def _policy_by_digest(
+    snapshot: DetectionSnapshot, role: str, digest: object
+) -> DetectionAsset | None:
+    if not isinstance(digest, str) or not digest:
+        return None
+    matches = [
+        asset
+        for asset in snapshot.assets
+        if asset.attributes.get("policy_role") == role
+        and asset.attributes.get("policy_sha256") == digest
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _openshell_policy_scope(asset: DetectionAsset) -> str | None:
+    role = asset.attributes.get("policy_role")
+    if not isinstance(role, str):
+        return None
+    suffix = f":{role}"
+    return asset.natural_key[: -len(suffix)] if asset.natural_key.endswith(suffix) else None
+
+
+def _openshell_workload_scope(asset: DetectionAsset) -> str | None:
+    if not asset.natural_key.startswith("openshell:") or ":sandbox:" not in asset.natural_key:
+        return None
+    return asset.natural_key
+
+
+def _credentialed_destinations(asset: DetectionAsset) -> set[tuple[str, str, str]]:
+    output: set[tuple[str, str, str]] = set()
+    value = asset.attributes.get("network_destinations")
+    if not isinstance(value, list):
+        return output
+    for destination in value:
+        if not isinstance(destination, dict) or destination.get("credentialed") is not True:
+            continue
+        host = destination.get("host")
+        protocol = destination.get("protocol")
+        if not isinstance(host, str) or not host or not isinstance(protocol, str):
+            continue
+        ports: list[object] = []
+        if destination.get("port") is not None:
+            ports.append(destination["port"])
+        value_ports = destination.get("ports")
+        if isinstance(value_ports, list):
+            ports.extend(value_ports)
+        if not ports:
+            ports.append("any")
+        output.update((host.casefold(), str(port), protocol.casefold()) for port in ports)
+    return output
+
+
+def _is_denied(activity: DetectionActivity) -> bool:
+    action = str(activity.attributes.get("action") or "").casefold()
+    disposition = str(activity.attributes.get("disposition") or "").casefold()
+    return (
+        activity.outcome == "failure"
+        and (action == "denied" or disposition in {"blocked", "denied"})
+    )
+
+
+def _execution_path(activity: DetectionActivity) -> tuple[str, str, str]:
+    destination = str(
+        activity.attributes.get("destination_domain")
+        or activity.attributes.get("destination_ip")
+        or "unknown"
+    ).casefold()
+    port = str(activity.attributes.get("destination_port") or "unknown")
+    process = str(activity.attributes.get("process_name") or "unknown").casefold()
+    return process, destination, port
+
+
+def _effective_policy_allows(
+    policy: DetectionAsset,
+    host: str,
+    port: int,
+    process: object,
+    method: object,
+) -> bool | None:
+    destinations = policy.attributes.get("network_destinations")
+    binaries = policy.attributes.get("network_binaries")
+    if not isinstance(destinations, list) or not isinstance(binaries, list):
+        return None
+    normalized_process = process if isinstance(process, str) and process else None
+    if binaries:
+        if normalized_process is None:
+            return None
+        if not any(
+            isinstance(pattern, str) and fnmatchcase(normalized_process, pattern)
+            for pattern in binaries
+        ):
+            return False
+    normalized_method = method.upper() if isinstance(method, str) and method else None
+    for destination in destinations:
+        if not isinstance(destination, dict):
+            continue
+        pattern = destination.get("host")
+        if not isinstance(pattern, str) or not _host_matches(host, pattern):
+            continue
+        declared_ports: set[int] = set()
+        if isinstance(destination.get("port"), int):
+            declared_ports.add(destination["port"])
+        if isinstance(destination.get("ports"), list):
+            declared_ports.update(
+                item for item in destination["ports"] if isinstance(item, int)
+            )
+        if declared_ports and port not in declared_ports:
+            continue
+        enforcement = destination.get("enforcement")
+        methods = destination.get("methods")
+        access = destination.get("access")
+        protocol = destination.get("protocol")
+        if protocol == "rest" and enforcement == "enforce" and normalized_method:
+            if isinstance(methods, list) and methods:
+                if normalized_method not in {str(item).upper() for item in methods}:
+                    continue
+            elif access == "read-only" and normalized_method not in {"GET", "HEAD", "OPTIONS"}:
+                continue
+            elif access == "read-write" and normalized_method not in {
+                "GET",
+                "HEAD",
+                "OPTIONS",
+                "POST",
+                "PUT",
+                "PATCH",
+            }:
+                continue
+        return True
+    return False
+
+
+def _host_matches(host: str, pattern: str) -> bool:
+    host = host.casefold().rstrip(".")
+    pattern = pattern.casefold().rstrip(".")
+    if pattern.startswith("*."):
+        suffix = pattern[1:]
+        return host.endswith(suffix) and host != suffix[1:]
+    return host == pattern
+
+
+def _string_set(value: object) -> set[str]:
+    if not isinstance(value, list | tuple | set):
+        return set()
+    return {item for item in value if isinstance(item, str) and item}
 
 
 def _successful_aws(activity: DetectionActivity, category: str) -> bool:

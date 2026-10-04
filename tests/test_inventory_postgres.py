@@ -42,6 +42,12 @@ from denali.detections import (
     AWS_UNDECLARED_MODEL_RULE_UID,
     ENTRA_CONSENT_RULE_UID,
     ENTRA_FAILURE_RULE_UID,
+    OPENSHELL_BOUNDARY_RULE_UID,
+    OPENSHELL_CREDENTIAL_DESTINATION_RULE_UID,
+    OPENSHELL_PROVER_AUTHORITY_RULE_UID,
+    RUNTIME_DENIAL_PATH_RULE_UID,
+    RUNTIME_POLICY_MISMATCH_RULE_UID,
+    RUNTIME_TELEMETRY_INTEGRITY_RULE_UID,
     UNREVIEWED_MODEL_RULE_UID,
 )
 from denali.domain import (
@@ -1679,6 +1685,146 @@ def test_runtime_detections_are_evidence_linked_and_idempotent(repository) -> No
         AWS_UNDECLARED_MODEL_RULE_UID: ("unknown", 0),
         AWS_UNAPPROVED_TOOL_RULE_UID: ("unknown", 0),
         AWS_RISKY_SEQUENCE_RULE_UID: ("unknown", 0),
+        OPENSHELL_BOUNDARY_RULE_UID: ("unknown", 0),
+        OPENSHELL_PROVER_AUTHORITY_RULE_UID: ("unknown", 0),
+        OPENSHELL_CREDENTIAL_DESTINATION_RULE_UID: ("unknown", 0),
+        RUNTIME_DENIAL_PATH_RULE_UID: ("unknown", 0),
+        RUNTIME_TELEMETRY_INTEGRITY_RULE_UID: ("unknown", 0),
+        RUNTIME_POLICY_MISMATCH_RULE_UID: ("unknown", 0),
+    }
+
+
+def test_openshell_runtime_policy_mismatch_persists_exact_activity_and_assets(
+    repository,
+) -> None:
+    tenant, repo = repository
+    now = datetime.now(UTC)
+    scope = "openshell:gateway-1:sandbox:sandbox-1"
+    workload = AssetRef(AssetKind.AI_WORKLOAD, scope)
+    effective = AssetRef(AssetKind.AI_GUARDRAIL, f"{scope}:effective_policy")
+    repo.ingest(
+        tenant,
+        InventoryBatch(
+            connector_id="denali.openshell.policy",
+            connection_id="openshell:gateway-1",
+            run_id="openshell-policy-run",
+            scope_key="gateway=gateway-1,sandbox=sandbox-1",
+            collected_at=now,
+            coverage=(
+                Coverage("openshell_runtime_identity", CoverageState.COMPLETE, scope),
+                Coverage("openshell_effective_policy", CoverageState.COMPLETE, scope),
+            ),
+            assets=(
+                AssetAssertion(
+                    asset=workload,
+                    coverage_plane="openshell_runtime_identity",
+                    display_name="Review agent",
+                    assertion_type=AssertionType.OBSERVED,
+                    confidence=1.0,
+                    evidence=Evidence("openshell_manifest", "fixture://manifest", now),
+                    attributes={
+                        "provider": "nvidia_openshell",
+                        "capture_complete": True,
+                        "loss_signals": [],
+                    },
+                ),
+                AssetAssertion(
+                    asset=effective,
+                    coverage_plane="openshell_effective_policy",
+                    display_name="Review agent effective policy",
+                    assertion_type=AssertionType.OBSERVED,
+                    confidence=1.0,
+                    evidence=Evidence("openshell_policy", "fixture://effective", now),
+                    attributes={
+                        "provider": "nvidia_openshell",
+                        "policy_role": "effective_policy",
+                        "policy_sha256": "effective-digest",
+                        "network_binaries": ["/usr/bin/curl"],
+                        "network_destinations": [
+                            {
+                                "host": "api.github.com",
+                                "port": 443,
+                                "ports": [],
+                                "protocol": "rest",
+                                "enforcement": "enforce",
+                                "access": "read-only",
+                                "methods": [],
+                                "credentialed": False,
+                            }
+                        ],
+                    },
+                ),
+            ),
+        ),
+    )
+    event = ActivityRecord(
+        source_uid="openshell-event-1",
+        category=ActivityCategory.DATA_ACCESS,
+        activity_name="openshell.ocsf.4002.3",
+        title="OpenShell HTTP Activity: Get",
+        occurred_at=now,
+        observed_at=now,
+        outcome=ActivityOutcome.SUCCESS,
+        provider="nvidia_openshell",
+        session_uid="sandbox-1",
+        evidence=Evidence("openshell_ocsf_jsonl", "fixture://events#line=1", now),
+        entities=(
+            ActivityEntity(
+                role=ActivityEntityRole.WORKLOAD,
+                external_uid="sandbox-1",
+                display_name="Review agent",
+                asset=workload,
+                correlation=ActivityCorrelation.EXACT_IDENTIFIER,
+                confidence=1.0,
+            ),
+        ),
+        attributes={
+            "action": "Allowed",
+            "status": "Success",
+            "disposition": "Allowed",
+            "destination_domain": "uploads.example.net",
+            "destination_port": 443,
+            "process_name": "/usr/bin/curl",
+            "http_method": "GET",
+        },
+    )
+    repo.ingest_activity(
+        tenant,
+        ActivityBatch(
+            connector_id="denali.openshell.ocsf_activity",
+            connection_id="openshell:gateway-1",
+            run_id="openshell-activity-run",
+            scope_key="gateway=gateway-1,sandbox=sandbox-1",
+            collected_at=now,
+            coverage=tuple(
+                Coverage(plane, CoverageState.COMPLETE, scope)
+                for plane in (
+                    "openshell_ocsf_base",
+                    "openshell_ocsf_process",
+                    "openshell_ocsf_network",
+                    "openshell_ocsf_http",
+                    "openshell_ocsf_ssh",
+                    "openshell_ocsf_policy_config",
+                    "openshell_ocsf_lifecycle",
+                )
+            ),
+            activities=(event,),
+        ),
+    )
+
+    result = repo.evaluate_runtime_detections(tenant)
+    rows = repo.list_runtime_detections(tenant)
+
+    assert result["confirmed_detections"] == 1
+    assert rows[0]["rule_uid"] == RUNTIME_POLICY_MISMATCH_RULE_UID
+    assert rows[0]["activity_count"] == 1
+    assert rows[0]["asset_count"] == 2
+    detail = repo.get_runtime_detection(tenant, str(rows[0]["id"]))
+    assert detail is not None
+    assert detail["activities"][0]["source_uid"] == "openshell-event-1"
+    assert {asset["natural_key"] for asset in detail["assets"]} == {
+        workload.natural_key,
+        effective.natural_key,
     }
 
 

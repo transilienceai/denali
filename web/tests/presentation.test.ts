@@ -24,6 +24,11 @@ const awsEvaluation: RuntimeDetectionEvaluation = {
   rule_uid: "DENALI-RUNTIME-AWS-RISKY-SEQUENCE-001",
 };
 
+const openshellEvaluation: RuntimeDetectionEvaluation = {
+  ...entraEvaluation,
+  rule_uid: "DENALI-RUNTIME-POLICY-MISMATCH-001",
+};
+
 test("Entra rules are hidden when the tenant has no Entra evidence boundary", () => {
   assert.deepEqual(applicableDetectionEvaluations([entraEvaluation], [], []), []);
 });
@@ -44,6 +49,22 @@ test("AWS AgentCore rules require runtime coverage or a retained detection", () 
 
   const detections = [{ rule_uid: awsEvaluation.rule_uid }] as RuntimeDetection[];
   assert.deepEqual(applicableDetectionEvaluations([awsEvaluation], detections, []), [awsEvaluation]);
+});
+
+test("OpenShell rules require OpenShell coverage or a retained detection", () => {
+  assert.deepEqual(applicableDetectionEvaluations([openshellEvaluation], [], []), []);
+
+  const coverage = [{ plane: "openshell_ocsf_http" }] as Coverage[];
+  assert.deepEqual(
+    applicableDetectionEvaluations([openshellEvaluation], [], coverage),
+    [openshellEvaluation],
+  );
+
+  const detections = [{ rule_uid: openshellEvaluation.rule_uid }] as RuntimeDetection[];
+  assert.deepEqual(
+    applicableDetectionEvaluations([openshellEvaluation], detections, []),
+    [openshellEvaluation],
+  );
 });
 
 test("inventory evidence wording does not present source declarations as verified runtime", () => {
