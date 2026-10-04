@@ -274,6 +274,7 @@ class PostgresInventoryRepository:
 
                 self._refresh_asset_lifecycle(connection, tenant_id)
                 self._refresh_vulnerability_asset_links(connection, tenant_id)
+                self._refresh_activity_entity_asset_links(connection, tenant_id)
 
         return {
             "assets": len(batch.assets),
@@ -5567,6 +5568,31 @@ class PostgresInventoryRepository:
                 batch.collected_at,
                 batch.run_id,
             ),
+        )
+
+    @staticmethod
+    def _refresh_activity_entity_asset_links(connection, tenant_id: str) -> None:
+        """Complete exact entity links after inventory establishes the asset.
+
+        Runtime evidence remains immutable and never creates inventory.  This update
+        only fills a previously empty foreign key when the same tenant later observes
+        the provider-native kind and natural key through an inventory connector.
+        """
+
+        connection.execute(
+            """
+            UPDATE activity_entity entity
+            SET asset_id = asset.id
+            FROM asset
+            WHERE entity.tenant_id = %s::uuid
+              AND entity.asset_id IS NULL
+              AND entity.asset_kind IS NOT NULL
+              AND entity.asset_natural_key IS NOT NULL
+              AND asset.tenant_id = entity.tenant_id
+              AND asset.kind = entity.asset_kind
+              AND asset.natural_key = entity.asset_natural_key
+            """,
+            (tenant_id,),
         )
 
     @staticmethod
