@@ -80,7 +80,7 @@ Implemented collection and import paths include:
 | Microsoft Azure | Container Apps, Function Apps, and AKS cluster inventory through Azure Resource Graph with exact Azure code-to-cloud identity; opt-in, metadata-only Foundry agent/model/tool spans through Application Insights; Entra activity remains a separate connector |
 | Microsoft Entra | AI application, permission, sign-in, and application-management collection through a separate Microsoft Graph connector |
 | External findings and scanners | OCSF findings, Syft SBOMs, and Grype vulnerability reports |
-| Runtime exports | AWS Bedrock CloudTrail, Google Cloud Vertex AI, Google Workspace Gemini, and Microsoft Entra AI sign-in JSON; hosted AgentCore and Azure Foundry spans use their existing keyless or consent-based cloud connections instead of browser upload |
+| Runtime exports | AWS Bedrock CloudTrail, Google Cloud Vertex AI, Google Workspace Gemini, Microsoft Entra AI sign-in JSON, and bounded NVIDIA OpenShell OCSF/policy/prover evidence bundles; hosted AgentCore and Azure Foundry spans use their existing keyless or consent-based cloud connections instead of browser upload |
 
 Provider validation and collection remain separate boundaries. A healthy connection does not
 claim that collection ran. GitHub validation reads no source blobs; an explicit collection

@@ -61,16 +61,22 @@ class OcsfFindingConnector:
         scope_key: str,
         source_locator: str,
         authoritative: bool = False,
+        record_positions: list[int] | None = None,
     ) -> FindingBatch:
+        if record_positions is not None and len(record_positions) != len(records):
+            raise OcsfImportError("record_positions must match the record count")
         collected_at = datetime.now(UTC)
         findings: dict[str, FindingAssertion] = {}
         warnings: list[str] = []
 
         for position, record in enumerate(records):
+            source_position = (
+                record_positions[position] if record_positions is not None else position
+            )
             try:
                 finding, item_warnings = _normalize_record(
                     record,
-                    position=position,
+                    position=source_position,
                     source_locator=source_locator,
                     fallback_time=collected_at,
                 )
