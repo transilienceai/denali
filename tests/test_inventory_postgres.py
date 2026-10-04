@@ -1037,7 +1037,7 @@ def test_azure_setup_completion_consumes_token_and_binds_selected_subscriptions(
     assert completed is not None
     assert completed["configuration"]["subscriptions"] == subscriptions
     assert completed["credential_reference"]["service_principal_id"] == service_principal_id
-    assert len(completed["coverage_plan"]) == 18
+    assert len(completed["coverage_plan"]) == 20
     completed_target = repo.get_connection_validation_target(tenant, connection_id)
     assert completed_target is not None
     assert "setup_token_sha256" not in completed_target["credential_reference"]

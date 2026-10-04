@@ -21,7 +21,9 @@ from denali.connections.aws_onboarding import (
 )
 from denali.connections.azure import (
     AZURE_CLOUD_PUBLIC,
+    AZURE_DEFAULT_SCOPES,
     AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY,
+    AZURE_SCOPE_AGENT_RUNTIME_INVENTORY,
     AZURE_SCOPE_AI_ACTIVITY,
     AZURE_SCOPE_AI_PLATFORM,
     AZURE_SCOPE_AI_SERVICES,
@@ -103,11 +105,13 @@ __all__ = [
     "AwsCloudFormationLauncher",
     "AwsConnectionValidator",
     "AZURE_CLOUD_PUBLIC",
+    "AZURE_DEFAULT_SCOPES",
     "AZURE_ONBOARDING_SCRIPT_VERSION",
     "AZURE_SCOPE_AI_ACTIVITY",
     "AZURE_SCOPE_AI_PLATFORM",
     "AZURE_SCOPE_AI_SERVICES",
     "AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY",
+    "AZURE_SCOPE_AGENT_RUNTIME_INVENTORY",
     "AZURE_SCOPE_CODE_TO_CLOUD",
     "AZURE_SCOPES",
     "AzureConnectionValidator",

@@ -11,10 +11,13 @@ from denali.connections.azure import (
     AZURE_ACTIVITY_API_VERSION,
     AZURE_MANAGEMENT_ENDPOINT,
     AZURE_RESOURCE_GRAPH_API_VERSION,
+    AZURE_SCOPE_AGENT_RUNTIME_INVENTORY,
     AZURE_SCOPE_AI_ACTIVITY,
     AZURE_SCOPE_AI_PLATFORM,
     AZURE_SCOPE_AI_SERVICES,
     AZURE_SCOPE_CODE_TO_CLOUD,
+    _foundry_project_endpoint,
+    authorized_azure_foundry_request,
     authorized_azure_request,
     valid_azure_uuid,
 )
@@ -42,12 +45,15 @@ CAPABILITIES = ConnectorCapabilities(inventory=True, relationships=True)
 CONTAINER_APP_RESOURCE_TYPE = "microsoft.app/containerapps"
 FUNCTION_APP_RESOURCE_TYPE = "microsoft.web/sites"
 AKS_CLUSTER_RESOURCE_TYPE = "microsoft.containerservice/managedclusters"
+FOUNDRY_PROJECT_RESOURCE_TYPE = "microsoft.cognitiveservices/accounts/projects"
 CONTAINER_APP_INVENTORY_PLANE = "azure_container_apps_inventory"
 CONTAINER_APP_RELATIONSHIP_PLANE = "azure_container_apps_relationships"
 FUNCTION_APP_INVENTORY_PLANE = "azure_function_apps_inventory"
 FUNCTION_APP_RELATIONSHIP_PLANE = "azure_function_apps_relationships"
 AKS_CLUSTER_INVENTORY_PLANE = "azure_aks_cluster_inventory"
 AKS_CLUSTER_RELATIONSHIP_PLANE = "azure_aks_cluster_relationships"
+FOUNDRY_AGENT_INVENTORY_PLANE = "azure_foundry_agent_inventory"
+FOUNDRY_AGENT_RELATIONSHIP_PLANE = "azure_foundry_agent_relationships"
 MAX_RESOURCES_PER_TYPE = 10_000
 MAX_PAGES_PER_TYPE = 100
 PAGE_SIZE = 1_000
@@ -102,6 +108,10 @@ class AzureResourceClient(Protocol):
         self, *, subscription_id: str, start_time: datetime, end_time: datetime
     ) -> tuple[dict[str, Any], ...]: ...
 
+    def list_foundry_agents(
+        self, *, subscription_id: str, project: dict[str, Any]
+    ) -> tuple[dict[str, Any], ...]: ...
+
 
 class InventorySink(Protocol):
     def ingest(self, tenant_id: str, batch: InventoryBatch) -> dict[str, int]: ...
@@ -112,8 +122,13 @@ class InventorySink(Protocol):
 class AzureResourceGraphRestClient:
     """Small bounded Azure Resource Graph client for exact resource types."""
 
-    def __init__(self, request: Callable[..., Any]):
+    def __init__(
+        self,
+        request: Callable[..., Any],
+        foundry_request: Callable[..., Any] | None = None,
+    ):
         self._request = request
+        self._foundry_request = foundry_request
 
     def list_resources(
         self, *, subscription_id: str, resource_type: str
@@ -122,6 +137,7 @@ class AzureResourceGraphRestClient:
             CONTAINER_APP_RESOURCE_TYPE,
             FUNCTION_APP_RESOURCE_TYPE,
             AKS_CLUSTER_RESOURCE_TYPE,
+            FOUNDRY_PROJECT_RESOURCE_TYPE,
             *(
                 resource_type
                 for planes in _AZURE_AI_PLANES.values()
@@ -187,6 +203,38 @@ class AzureResourceGraphRestClient:
             f"resourcegraph:Resources:page_limit_{MAX_PAGES_PER_TYPE}"
         )
 
+    def list_foundry_agents(
+        self, *, subscription_id: str, project: dict[str, Any]
+    ) -> tuple[dict[str, Any], ...]:
+        if self._foundry_request is None:
+            raise AzureDeploymentDiscoveryError("foundry:Agents:request_not_configured")
+        try:
+            endpoint = _foundry_project_endpoint(project, subscription_id)
+            response = self._foundry_request(
+                "GET",
+                f"{endpoint}/agents",
+                params={"api-version": "v1"},
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as error:
+            raise AzureDeploymentDiscoveryError(
+                f"foundry:Agents:{_safe_error_code(error)}"
+            ) from None
+        if not isinstance(payload, dict):
+            raise AzureDeploymentDiscoveryError("foundry:Agents:invalid_response_shape")
+        raw_agents = payload.get("data", payload.get("value"))
+        if not isinstance(raw_agents, list):
+            raise AzureDeploymentDiscoveryError("foundry:Agents:invalid_response_shape")
+        if len(raw_agents) > MAX_RESOURCES_PER_TYPE:
+            raise AzureDeploymentDiscoveryError(
+                f"foundry:Agents:record_limit_{MAX_RESOURCES_PER_TYPE}"
+            )
+        if payload.get("has_more") is True or payload.get("nextLink"):
+            raise AzureDeploymentDiscoveryError("foundry:Agents:pagination_not_supported")
+        return tuple(item for item in raw_agents if isinstance(item, dict))
+
     def list_activity(
         self, *, subscription_id: str, start_time: datetime, end_time: datetime
     ) -> tuple[dict[str, Any], ...]:
@@ -238,7 +286,10 @@ class AzureConnectionDeploymentCollector:
         resource_client_factory: Callable[[str], AzureResourceClient] | None = None,
     ):
         self._resource_client_factory = resource_client_factory or (
-            lambda tenant: AzureResourceGraphRestClient(authorized_azure_request(tenant))
+            lambda tenant: AzureResourceGraphRestClient(
+                authorized_azure_request(tenant),
+                authorized_azure_foundry_request(tenant),
+            )
         )
 
     def collect(
@@ -258,6 +309,7 @@ class AzureConnectionDeploymentCollector:
             AZURE_SCOPE_AI_SERVICES,
             AZURE_SCOPE_AI_PLATFORM,
             AZURE_SCOPE_AI_ACTIVITY,
+            AZURE_SCOPE_AGENT_RUNTIME_INVENTORY,
         }:
             raise ValueError("Azure connection has no supported collection scope")
         subscriptions = connection.get("configuration", {}).get("subscriptions", [])
@@ -303,6 +355,14 @@ class AzureConnectionDeploymentCollector:
                         subscription_id=subscription_id,
                         resource_client=client,
                     ).collect(connection_id=str(connection["id"]))
+                )
+            if AZURE_SCOPE_AGENT_RUNTIME_INVENTORY in scopes:
+                batches.append(
+                    _azure_foundry_inventory_batch(
+                        subscription_id=subscription_id,
+                        connection_id=str(connection["id"]),
+                        client=client,
+                    )
                 )
             for batch in batches:
                 repository.ingest(tenant_id, batch)
@@ -592,6 +652,331 @@ def _azure_ai_inventory_batch(
         collected_at=observed_at,
         coverage=(Coverage(plane, state, scope, detail),),
         assets=tuple(assertions),
+    )
+
+
+def _azure_foundry_inventory_batch(
+    *,
+    subscription_id: str,
+    connection_id: str,
+    client: AzureResourceClient,
+) -> InventoryBatch:
+    """Collect only identifier-level Foundry configuration from independent APIs."""
+
+    observed_at = datetime.now(UTC)
+    scope = f"azure:subscription:{subscription_id}:foundry-projects"
+    run_id = f"azure-foundry-inventory-{subscription_id}-{observed_at.isoformat()}"
+    try:
+        projects = client.list_resources(
+            subscription_id=subscription_id,
+            resource_type=FOUNDRY_PROJECT_RESOURCE_TYPE,
+        )
+    except AzureDeploymentDiscoveryError as error:
+        failed = CoverageState.FAILED
+        return InventoryBatch(
+            connector_id="denali.azure_foundry_inventory",
+            connection_id=connection_id,
+            run_id=run_id,
+            scope_key=scope,
+            collected_at=observed_at,
+            coverage=(
+                Coverage(FOUNDRY_AGENT_INVENTORY_PLANE, failed, scope, str(error)),
+                Coverage(FOUNDRY_AGENT_RELATIONSHIP_PLANE, failed, scope, str(error)),
+            ),
+        )
+
+    assets: dict[AssetRef, AssetAssertion] = {}
+    relationships: dict[tuple[AssetRef, AssetRef, RelationshipKind], RelationshipAssertion] = {}
+    warnings: list[str] = []
+    queried_projects = 0
+    agent_count = 0
+    for position, project in enumerate(projects):
+        parsed_project = _foundry_project(project, subscription_id)
+        if parsed_project is None:
+            warnings.append(f"project item {position}: invalid resource boundary")
+            continue
+        project_ref, project_name = parsed_project
+        project_evidence = Evidence(
+            source_type="azure_resource_graph",
+            locator=f"azure://resourcegraph{project_ref.natural_key}",
+            observed_at=observed_at,
+            payload={
+                "subscription_id": subscription_id,
+                "resource_id": project_ref.natural_key,
+                "resource_type": FOUNDRY_PROJECT_RESOURCE_TYPE,
+            },
+        )
+        assets[project_ref] = AssetAssertion(
+            asset=project_ref,
+            coverage_plane=FOUNDRY_AGENT_INVENTORY_PLANE,
+            display_name=project_name,
+            assertion_type=AssertionType.OBSERVED,
+            confidence=1.0,
+            evidence=project_evidence,
+            attributes={
+                "provider": "azure",
+                "subscription_id": subscription_id,
+                "resource_id": project_ref.natural_key,
+                "resource_type": FOUNDRY_PROJECT_RESOURCE_TYPE,
+            },
+        )
+        try:
+            raw_agents = client.list_foundry_agents(
+                subscription_id=subscription_id,
+                project=project,
+            )
+            queried_projects += 1
+        except AzureDeploymentDiscoveryError as error:
+            warnings.append(f"{project_ref.natural_key}: {error}")
+            continue
+        for agent_position, raw_agent in enumerate(raw_agents):
+            parsed_agent = _foundry_agent(
+                raw_agent,
+                project=project_ref,
+                project_name=project_name,
+                subscription_id=subscription_id,
+                observed_at=observed_at,
+            )
+            if parsed_agent is None:
+                warnings.append(
+                    f"{project_ref.natural_key}: agent item {agent_position} is invalid"
+                )
+                continue
+            agent_assertion, related_assets, related_relationships = parsed_agent
+            assets[agent_assertion.asset] = agent_assertion
+            agent_count += 1
+            for assertion in related_assets:
+                assets[assertion.asset] = assertion
+            for relationship in (
+                RelationshipAssertion(
+                    source=agent_assertion.asset,
+                    target=project_ref,
+                    coverage_plane=FOUNDRY_AGENT_RELATIONSHIP_PLANE,
+                    kind=RelationshipKind.HOSTED_ON,
+                    assertion_type=AssertionType.OBSERVED,
+                    confidence=1.0,
+                    evidence=agent_assertion.evidence,
+                ),
+                *related_relationships,
+            ):
+                relationships[(relationship.source, relationship.target, relationship.kind)] = (
+                    relationship
+                )
+
+    if projects and queried_projects == 0:
+        state = CoverageState.FAILED
+    elif warnings:
+        state = CoverageState.PARTIAL
+    else:
+        state = CoverageState.COMPLETE
+    detail = (
+        f"Discovered {len(projects)} Foundry project(s), queried {queried_projects}, and "
+        f"observed {agent_count} agent configuration(s). Only provider identifiers, agent kind, "
+        "model deployment names, and tool names/types were retained."
+    )
+    if warnings:
+        detail += " " + "; ".join(warnings[:10])
+    return InventoryBatch(
+        connector_id="denali.azure_foundry_inventory",
+        connection_id=connection_id,
+        run_id=run_id,
+        scope_key=scope,
+        collected_at=observed_at,
+        coverage=(
+            Coverage(FOUNDRY_AGENT_INVENTORY_PLANE, state, scope, detail),
+            Coverage(FOUNDRY_AGENT_RELATIONSHIP_PLANE, state, scope, detail),
+        ),
+        assets=tuple(assets.values()),
+        relationships=tuple(relationships.values()),
+    )
+
+
+def _foundry_project(raw: Any, subscription_id: str) -> tuple[AssetRef, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    resource_id = raw.get("id")
+    resource_type = raw.get("type")
+    observed_subscription = raw.get("subscriptionId")
+    name = raw.get("name")
+    prefix = f"/subscriptions/{subscription_id}/"
+    if (
+        not isinstance(resource_id, str)
+        or not resource_id.casefold().startswith(prefix.casefold())
+        or not isinstance(resource_type, str)
+        or resource_type.casefold() != FOUNDRY_PROJECT_RESOURCE_TYPE
+        or not isinstance(observed_subscription, str)
+        or observed_subscription.casefold() != subscription_id.casefold()
+        or not isinstance(name, str)
+        or not name.strip()
+    ):
+        return None
+    try:
+        _foundry_project_endpoint(raw, subscription_id)
+    except Exception:
+        return None
+    return AssetRef(AssetKind.CLOUD_RESOURCE, resource_id.casefold()), name[:512]
+
+
+def _foundry_agent(
+    raw: Any,
+    *,
+    project: AssetRef,
+    project_name: str,
+    subscription_id: str,
+    observed_at: datetime,
+) -> (
+    tuple[
+        AssetAssertion,
+        tuple[AssetAssertion, ...],
+        tuple[RelationshipAssertion, ...],
+    ]
+    | None
+):
+    if not isinstance(raw, dict):
+        return None
+    agent_id = raw.get("id")
+    name = raw.get("name")
+    versions = raw.get("versions")
+    latest = versions.get("latest") if isinstance(versions, dict) else None
+    definition = latest.get("definition") if isinstance(latest, dict) else None
+    if (
+        not isinstance(agent_id, str)
+        or not agent_id.strip()
+        or len(agent_id) > 512
+        or not isinstance(name, str)
+        or not name.strip()
+        or not isinstance(definition, dict)
+    ):
+        return None
+    agent_ref = AssetRef(
+        AssetKind.AI_AGENT,
+        f"{project.natural_key}/agents/{agent_id.casefold()}",
+    )
+    kind = definition.get("kind")
+    if not isinstance(kind, str) or kind not in {"prompt", "hosted", "container_app", "workflow"}:
+        return None
+    version = latest.get("version")
+    safe_version = version[:256] if isinstance(version, str) else None
+    model = definition.get("model")
+    safe_model = model[:512] if isinstance(model, str) and model.strip() else None
+    tools = definition.get("tools")
+    safe_tools = _foundry_tools(tools)
+    evidence = Evidence(
+        source_type="azure_foundry_agent_configuration",
+        locator=(f"azure://foundry{project.natural_key}#agent={agent_id.casefold()}"),
+        observed_at=observed_at,
+        payload={
+            "subscription_id": subscription_id,
+            "project_id": project.natural_key,
+            "agent_id": agent_id,
+            "agent_kind": kind,
+            "agent_version": safe_version,
+            "model_deployment": safe_model,
+            "tool_count": len(safe_tools),
+        },
+    )
+    agent = AssetAssertion(
+        asset=agent_ref,
+        coverage_plane=FOUNDRY_AGENT_INVENTORY_PLANE,
+        display_name=name[:512],
+        assertion_type=AssertionType.OBSERVED,
+        confidence=1.0,
+        evidence=evidence,
+        attributes={
+            "provider": "azure_foundry",
+            "subscription_id": subscription_id,
+            "project_id": project.natural_key,
+            "project_name": project_name,
+            "agent_id": agent_id,
+            "agent_kind": kind,
+            "agent_version": safe_version,
+            "model_deployment": safe_model,
+            "tool_types": sorted({tool_type for _, tool_type in safe_tools}),
+        },
+    )
+    related_assets: list[AssetAssertion] = []
+    relationships: list[RelationshipAssertion] = []
+    if safe_model:
+        model_ref = AssetRef(
+            AssetKind.AI_MODEL,
+            f"{project.natural_key}/model-deployments/{safe_model.casefold()}",
+        )
+        related_assets.append(
+            AssetAssertion(
+                asset=model_ref,
+                coverage_plane=FOUNDRY_AGENT_INVENTORY_PLANE,
+                display_name=safe_model,
+                assertion_type=AssertionType.OBSERVED,
+                confidence=1.0,
+                evidence=evidence,
+                attributes={
+                    "provider": "azure_openai",
+                    "deployment_name": safe_model,
+                    "project_id": project.natural_key,
+                },
+            )
+        )
+        relationships.append(_foundry_uses_relationship(agent_ref, model_ref, evidence))
+    for tool_name, tool_type in safe_tools:
+        tool_ref = AssetRef(
+            AssetKind.AI_TOOL,
+            f"{agent_ref.natural_key}/tools/{tool_name.casefold()}",
+        )
+        related_assets.append(
+            AssetAssertion(
+                asset=tool_ref,
+                coverage_plane=FOUNDRY_AGENT_INVENTORY_PLANE,
+                display_name=tool_name,
+                assertion_type=AssertionType.OBSERVED,
+                confidence=1.0,
+                evidence=evidence,
+                attributes={
+                    "provider": "azure_foundry",
+                    "tool_name": tool_name,
+                    "tool_type": tool_type,
+                    "agent_id": agent_id,
+                    "project_id": project.natural_key,
+                },
+            )
+        )
+        relationships.append(_foundry_uses_relationship(agent_ref, tool_ref, evidence))
+    return agent, tuple(related_assets), tuple(relationships)
+
+
+def _foundry_tools(raw: Any) -> tuple[tuple[str, str], ...]:
+    if not isinstance(raw, list):
+        return ()
+    output: dict[str, str] = {}
+    for item in raw[:1_000]:
+        if not isinstance(item, dict):
+            continue
+        tool_type = item.get("type")
+        if not isinstance(tool_type, str) or not tool_type.strip():
+            continue
+        name: Any = item.get("name")
+        function = item.get("function")
+        if not isinstance(name, str) and isinstance(function, dict):
+            name = function.get("name")
+        if not isinstance(name, str) or not name.strip():
+            name = tool_type
+        safe_name = name.strip()[:512]
+        output.setdefault(safe_name, tool_type.strip()[:128])
+    return tuple(output.items())
+
+
+def _foundry_uses_relationship(
+    agent: AssetRef,
+    target: AssetRef,
+    evidence: Evidence,
+) -> RelationshipAssertion:
+    return RelationshipAssertion(
+        source=agent,
+        target=target,
+        coverage_plane=FOUNDRY_AGENT_RELATIONSHIP_PLANE,
+        kind=RelationshipKind.USES,
+        assertion_type=AssertionType.OBSERVED,
+        confidence=1.0,
+        evidence=evidence,
     )
 
 

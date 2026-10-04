@@ -5,6 +5,9 @@ from denali.connectors.azure_deployments import (
     AKS_CLUSTER_RESOURCE_TYPE,
     CONTAINER_APP_INVENTORY_PLANE,
     CONTAINER_APP_RESOURCE_TYPE,
+    FOUNDRY_AGENT_INVENTORY_PLANE,
+    FOUNDRY_AGENT_RELATIONSHIP_PLANE,
+    FOUNDRY_PROJECT_RESOURCE_TYPE,
     FUNCTION_APP_INVENTORY_PLANE,
     FUNCTION_APP_RESOURCE_TYPE,
     AzureConnectionDeploymentCollector,
@@ -13,6 +16,7 @@ from denali.connectors.azure_deployments import (
     AzureResourceGraphRestClient,
     _azure_ai_activity_batch,
     _azure_ai_inventory_batch,
+    _azure_foundry_inventory_batch,
 )
 from denali.domain import AssetKind, CoverageState, RelationshipKind
 
@@ -243,6 +247,41 @@ def test_rest_client_paginates_with_exact_subscription_and_resource_type() -> No
     assert calls[1]["json"]["options"]["$skipToken"] == "next"
 
 
+def test_rest_client_reads_agents_from_exact_foundry_project_endpoint() -> None:
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+    project = {
+        "id": (
+            f"/subscriptions/{SUBSCRIPTION}/resourceGroups/test/providers/"
+            "Microsoft.CognitiveServices/accounts/anna-foundry/projects/anna-aidr-dev"
+        )
+    }
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"data": [{"id": "agent-123"}], "has_more": False}
+
+    def foundry_request(method: str, url: str, **kwargs: Any) -> Response:
+        calls.append((method, url, kwargs))
+        return Response()
+
+    agents = AzureResourceGraphRestClient(
+        lambda *_args, **_kwargs: None,
+        foundry_request,
+    ).list_foundry_agents(subscription_id=SUBSCRIPTION, project=project)
+
+    assert agents == ({"id": "agent-123"},)
+    assert calls == [
+        (
+            "GET",
+            "https://anna-foundry.services.ai.azure.com/api/projects/anna-aidr-dev/agents",
+            {"params": {"api-version": "v1"}, "timeout": 30.0},
+        )
+    ]
+
+
 def test_connection_collector_requires_scope_and_reports_each_subscription() -> None:
     client = FakeResourceClient(
         {CONTAINER_APP_RESOURCE_TYPE: (container_app(name="denali-ai", ai=True),)}
@@ -310,6 +349,81 @@ def test_ai_inventory_keeps_exact_resource_boundary_without_raw_properties() -> 
     assert batch.assets[0].asset.natural_key == resource_id.lower()
     assert "must-not-be-retained" not in str(batch)
     assert batch.coverage[0].state is CoverageState.COMPLETE
+
+
+def test_foundry_inventory_emits_exact_agent_model_and_tool_keys_without_content() -> None:
+    project_id = (
+        f"/subscriptions/{SUBSCRIPTION}/resourceGroups/Denali-Test/providers/"
+        "Microsoft.CognitiveServices/accounts/anna-foundry/projects/anna-aidr-dev"
+    )
+    project = {
+        "id": project_id,
+        "name": "anna-aidr-dev",
+        "type": FOUNDRY_PROJECT_RESOURCE_TYPE,
+        "location": "eastus2",
+        "resourceGroup": "Denali-Test",
+        "subscriptionId": SUBSCRIPTION,
+        "properties": {"secret": "must-not-be-retained"},
+    }
+
+    class FoundryClient(FakeResourceClient):
+        def list_foundry_agents(self, **_kwargs: Any) -> tuple[dict[str, Any], ...]:
+            return (
+                {
+                    "id": "Agent-123",
+                    "name": "Anna",
+                    "versions": {
+                        "latest": {
+                            "version": "7",
+                            "description": "must-not-be-retained",
+                            "definition": {
+                                "kind": "prompt",
+                                "instructions": "must-not-be-retained",
+                                "model": "gpt-5.2-chat",
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "lookup_service",
+                                            "description": "must-not-be-retained",
+                                            "parameters": {"secret": "must-not-be-retained"},
+                                        },
+                                    },
+                                    {"type": "function", "name": "stage_followup"},
+                                ],
+                            },
+                        }
+                    },
+                },
+            )
+
+    batch = _azure_foundry_inventory_batch(
+        subscription_id=SUBSCRIPTION,
+        connection_id="connection",
+        client=FoundryClient({FOUNDRY_PROJECT_RESOURCE_TYPE: (project,)}),
+    )
+
+    assert {item.state for item in batch.coverage} == {CoverageState.COMPLETE}
+    assert {item.plane for item in batch.coverage} == {
+        FOUNDRY_AGENT_INVENTORY_PLANE,
+        FOUNDRY_AGENT_RELATIONSHIP_PLANE,
+    }
+    keys = {item.asset.natural_key for item in batch.assets}
+    normalized_project = project_id.lower()
+    agent_key = f"{normalized_project}/agents/agent-123"
+    assert keys == {
+        normalized_project,
+        agent_key,
+        f"{normalized_project}/model-deployments/gpt-5.2-chat",
+        f"{agent_key}/tools/lookup_service",
+        f"{agent_key}/tools/stage_followup",
+    }
+    assert {item.kind for item in batch.relationships} == {
+        RelationshipKind.HOSTED_ON,
+        RelationshipKind.USES,
+    }
+    serialized = repr(batch)
+    assert "must-not-be-retained" not in serialized
 
 
 def test_ai_activity_is_bounded_to_known_providers_and_omits_callers() -> None:

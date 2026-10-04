@@ -5,8 +5,10 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
+import denali.connections.azure as azure_module
 from denali.api.app import DEFAULT_LOCAL_TENANT, create_app
 from denali.connections import (
     AZURE_SCOPE_CODE_TO_CLOUD,
@@ -337,6 +339,7 @@ def test_azure_setup_enumerates_then_binds_only_selected_subscriptions() -> None
                 "provider": "azure",
                 "display_name": "Production Azure",
                 "tenant_id": TENANT_ID,
+                "declared_scopes": list(AZURE_SCOPES),
             },
         )
         assert created_response.status_code == 201
@@ -367,6 +370,8 @@ def test_azure_setup_enumerates_then_binds_only_selected_subscriptions() -> None
         assert "--assignee-principal-type ServicePrincipal" in script
         assert "--role 'acdd72a7-3385-48ef-bd42-f606fba81ae7'" not in script
         assert "DENALI_READER_ROLE_ID='acdd72a7-3385-48ef-bd42-f606fba81ae7'" in script
+        assert "Microsoft.CognitiveServices/accounts/AIServices/agents/read" in script
+        assert "agents/write" not in script
 
         subscriptions = [
             {"id": SUBSCRIPTION_ONE, "name": "Production"},
@@ -391,8 +396,8 @@ def test_azure_setup_enumerates_then_binds_only_selected_subscriptions() -> None
         assert detail["health_state"] == "healthy"
         assert validator.calls == 2
         assert detail["configuration"]["subscriptions"] == subscriptions
-        assert len(detail["coverage_plan"]) == 9 * len(subscriptions)
-        assert len(detail["last_validation"]["results"]) == 9 * len(subscriptions)
+        assert len(detail["coverage_plan"]) == 10 * len(subscriptions)
+        assert len(detail["last_validation"]["results"]) == 10 * len(subscriptions)
         assert "setup_token" not in json.dumps(detail)
         assert (
             client.post(
@@ -474,6 +479,42 @@ class FakeResponse:
         return self.payload
 
 
+def test_foundry_request_is_token_scoped_and_endpoint_restricted(monkeypatch) -> None:
+    scopes: list[str] = []
+    requests: list[tuple[str, str, dict[str, Any]]] = []
+
+    class RecordingCredential:
+        def get_token(self, *requested: str, **_kwargs: Any) -> FakeToken:
+            scopes.extend(requested)
+            return FakeToken()
+
+    monkeypatch.setattr(
+        azure_module,
+        "_default_credential",
+        lambda _tenant_id: RecordingCredential(),
+    )
+    monkeypatch.setattr(
+        azure_module,
+        "_httpx_request",
+        lambda method, url, **kwargs: requests.append((method, url, kwargs)) or FakeResponse({}),
+    )
+    request = azure_module.authorized_azure_foundry_request(TENANT_ID)
+    request(
+        "GET",
+        "https://anna.services.ai.azure.com/api/projects/anna/agents",
+    )
+
+    assert scopes == ["https://ai.azure.com/.default"]
+    assert requests[0][2]["headers"]["Authorization"] == "Bearer azure-access-token"
+    for escaped in (
+        "https://services.ai.azure.com.evil.test/api/projects/anna/agents",
+        "https://anna.services.ai.azure.com/other/agents",
+        "http://anna.services.ai.azure.com/api/projects/anna/agents",
+    ):
+        with pytest.raises(ValueError, match="escaped"):
+            request("GET", escaped)
+
+
 def test_azure_validation_is_subscription_specific_and_all_locations() -> None:
     subscriptions = [
         {"id": SUBSCRIPTION_ONE, "name": "Production"},
@@ -483,6 +524,8 @@ def test_azure_validation_is_subscription_specific_and_all_locations() -> None:
 
     def request(method: str, url: str, **kwargs: Any) -> FakeResponse:
         requests.append((method, url, kwargs))
+        if ".services.ai.azure.com/" in url:
+            return FakeResponse({"data": []})
         if "api.applicationinsights.io" in url:
             return FakeResponse({"tables": [{"columns": [], "rows": []}]})
         if "/subscriptions/" in url and "/providers/" not in url:
@@ -490,6 +533,20 @@ def test_azure_validation_is_subscription_specific_and_all_locations() -> None:
             return FakeResponse({"subscriptionId": subscription_id, "tenantId": TENANT_ID})
         if "microsoft.insights/components" in kwargs.get("json", {}).get("query", ""):
             return FakeResponse({"data": [{"appId": CLIENT_ID}]})
+        if "accounts/projects" in kwargs.get("json", {}).get("query", ""):
+            subscription_id = kwargs["json"]["subscriptions"][0]
+            return FakeResponse(
+                {
+                    "data": [
+                        {
+                            "id": (
+                                f"/subscriptions/{subscription_id}/resourceGroups/test/providers/"
+                                "Microsoft.CognitiveServices/accounts/anna/projects/runtime"
+                            )
+                        }
+                    ]
+                }
+            )
         return FakeResponse({"data": []})
 
     validator = AzureConnectionValidator(
@@ -506,10 +563,13 @@ def test_azure_validation_is_subscription_specific_and_all_locations() -> None:
     validation = validator.validate(connection)
     assert validation["health_state"] == "healthy"
     assert validation["credential_state"] == "passed"
-    assert len(validation["results"]) == 18
+    assert len(validation["results"]) == 20
     assert all(item["region"] == "all-locations" for item in validation["results"])
     graph_calls = [item for item in requests if "ResourceGraph" in item[1]]
-    assert len(graph_calls) == 16
+    assert len(graph_calls) == 18
     assert all(len(item[2]["json"]["subscriptions"]) == 1 for item in graph_calls)
     monitor_calls = [item for item in requests if "api.applicationinsights.io" in item[1]]
     assert len(monitor_calls) == 2
+    foundry_calls = [item for item in requests if ".services.ai.azure.com/" in item[1]]
+    assert len(foundry_calls) == 2
+    assert all(item[2]["params"] == {"api-version": "v1"} for item in foundry_calls)

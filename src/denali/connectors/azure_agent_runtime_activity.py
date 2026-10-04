@@ -797,16 +797,19 @@ def _entities(
                 external_uid=model,
                 display_name=model,
                 asset=(
-                    AssetRef(AssetKind.AI_MODEL, f"azure_openai:{request_model}")
-                    if request_model
+                    AssetRef(
+                        AssetKind.AI_MODEL,
+                        f"{project_id}/model-deployments/{request_model.casefold()}",
+                    )
+                    if project_id and request_model
                     else None
                 ),
                 correlation=(
                     ActivityCorrelation.EXACT_IDENTIFIER
-                    if request_model
+                    if project_id and request_model
                     else ActivityCorrelation.UNRESOLVED
                 ),
-                confidence=1.0 if request_model else 0.0,
+                confidence=1.0 if project_id and request_model else 0.0,
             )
         )
     if category is ActivityCategory.TOOL_INVOCATION and tool_name:
