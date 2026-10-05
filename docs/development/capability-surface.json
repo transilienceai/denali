@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
-  "public_operation_count": 86,
-  "explicit_public_operation_count": 82,
+  "public_operation_count": 88,
+  "explicit_public_operation_count": 84,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
-  "release_named_read_count": 35,
+  "release_named_read_count": 37,
   "release_named_write_count": 16,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
-  "browser_operation_count": 67,
+  "browser_operation_count": 69,
   "exceptions": {
     "security_admin_user_creation": "Password-based Clerk user creation remains a secure browser workflow; passwords must never enter model/chat context.",
     "security_admin_invitations": "Bulk invitations affect shared Clerk Organization membership across applications. A future capability requires separate per-action, recipient-role, confirmation, and audit design; not included in this rollout.",
@@ -18,6 +18,24 @@
     "raw_connection_reads": "Raw credential references and configuration are replaced by reviewed tenant-scoped safe connection projections."
   },
   "operations": [
+    {
+      "method": "GET",
+      "path": "/v1/connections/{connection_id}/validation-jobs/{job_id}",
+      "handler": "connection_validation_job_status",
+      "browser_methods": ["connectionValidationJob"],
+      "class": "connector_product",
+      "disposition": "additive_sanitized_projection",
+      "capability": "connection-validation-job"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/{connection_id}/collection-jobs/{job_id}",
+      "handler": "connection_collection_job_status",
+      "browser_methods": ["connectionCollectionJob"],
+      "class": "connector_product",
+      "disposition": "additive_sanitized_projection",
+      "capability": "connection-collection-job"
+    },
     {
       "method": "GET",
       "path": "/v1/connection-setup-summaries/{connection_id}",

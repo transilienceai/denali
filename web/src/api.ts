@@ -52,6 +52,19 @@ export type DenaliContext = {
   can_write: boolean;
 };
 
+export type ConnectionJobStatus = {
+  job_id: string;
+  connection_id: string;
+  job_type: "validation" | "collection";
+  collection_kind: string | null;
+  state: "queued" | "running" | "succeeded" | "failed";
+  attempt_count: number;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error_code: "job_failed" | null;
+};
+
 export type OrganizationRole = "org:member" | "org:admin";
 
 export type BulkInviteResult = {
@@ -199,6 +212,10 @@ export const api = {
       `/v1/shared/connections/aws/${encodeURIComponent(id)}/disable`, { method: "POST" },
     ),
   connection: (id: string) => request<Connection>(`/v1/connections/${id}`),
+  connectionValidationJob: (connectionId: string, jobId: string) =>
+    request<ConnectionJobStatus>(`/v1/connections/${connectionId}/validation-jobs/${jobId}`),
+  connectionCollectionJob: (connectionId: string, jobId: string) =>
+    request<ConnectionJobStatus>(`/v1/connections/${connectionId}/collection-jobs/${jobId}`),
   createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | AzureReposConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate) =>
     request<Connection>("/v1/connections", {
       method: "POST",

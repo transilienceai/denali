@@ -58,6 +58,14 @@ READ_CAPABILITIES: dict[str, ReadCapability] = {
     "context": ReadCapability("/v1/context"),
     "connections": ReadCapability("/v1/connection-summaries", frozenset({"limit", "offset"})),
     "connection-detail": ReadCapability("/v1/connection-summaries/{id}", identifier="uuid"),
+    "connection-validation-job": ReadCapability(
+        "/v1/connections/{connection_id}/validation-jobs/{id}",
+        frozenset({"connection_id"}), identifier="uuid"
+    ),
+    "connection-collection-job": ReadCapability(
+        "/v1/connections/{connection_id}/collection-jobs/{id}",
+        frozenset({"connection_id"}), identifier="uuid"
+    ),
     "connection-setup-status": ReadCapability(
         "/v1/connection-setup-summaries/{id}", identifier="uuid"
     ),
@@ -153,6 +161,17 @@ def read_route(operation: str, query: QueryParams) -> tuple[str, bytes]:
             if identifier != raw_id.lower():
                 raise HTTPException(status_code=422, detail="invalid id")
         path = path.replace("{id}", identifier)
+    if "{connection_id}" in path:
+        raw_connection = values.pop("connection_id", None)
+        try:
+            connection_id = str(UUID(raw_connection))
+        except (ValueError, AttributeError, TypeError) as error:
+            raise HTTPException(
+                status_code=422, detail="canonical connection_id is required"
+            ) from error
+        if raw_connection != connection_id:
+            raise HTTPException(status_code=422, detail="canonical connection_id is required")
+        path = path.replace("{connection_id}", connection_id)
     if "asset_id" in values:
         try:
             asset_id = str(UUID(values["asset_id"]))

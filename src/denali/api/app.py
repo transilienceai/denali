@@ -205,6 +205,10 @@ class InventoryReader(Protocol):
 
     def connection_validation_job_state(self, tenant_id: str, connection_id: str) -> str: ...
 
+    def connection_job_status(
+        self, tenant_id: str, connection_id: str, job_id: str, *, job_type: str
+    ) -> dict[str, Any] | None: ...
+
     def create_connection_collection_job(
         self, tenant_id: str, connection_id: str, *, collection_kind: str
     ) -> tuple[dict[str, Any], bool]: ...
@@ -2536,6 +2540,40 @@ def create_app(
             return _with_validation_state(request, current_tenant, created)
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+
+    def read_connection_job(
+        request: Request, response: Response, connection_id: UUID, job_id: UUID, *, job_type: str
+    ) -> dict[str, Any]:
+        if request.query_params or any(
+            request.path_params[name] != str(value)
+            for name, value in (("connection_id", connection_id), ("job_id", job_id))
+        ):
+            raise HTTPException(status_code=422, detail="canonical job identifiers required")
+        repo, current_tenant = _context(request)
+        row = repo.connection_job_status(
+            current_tenant, str(connection_id), str(job_id), job_type=job_type
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="connection job not found")
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            key: row[key] for key in (
+                "job_id", "connection_id", "job_type", "collection_kind", "state",
+                "attempt_count", "created_at", "started_at", "completed_at", "error_code"
+            )
+        }
+
+    @app.get("/v1/connections/{connection_id}/validation-jobs/{job_id}")
+    def connection_validation_job_status(
+        request: Request, response: Response, connection_id: UUID, job_id: UUID
+    ) -> dict[str, Any]:
+        return read_connection_job(request, response, connection_id, job_id, job_type="validation")
+
+    @app.get("/v1/connections/{connection_id}/collection-jobs/{job_id}")
+    def connection_collection_job_status(
+        request: Request, response: Response, connection_id: UUID, job_id: UUID
+    ) -> dict[str, Any]:
+        return read_connection_job(request, response, connection_id, job_id, job_type="collection")
 
     @app.get("/v1/connections/{connection_id}")
     def connection_detail(request: Request, connection_id: UUID) -> dict[str, Any]:
