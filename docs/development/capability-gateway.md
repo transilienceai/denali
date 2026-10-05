@@ -30,6 +30,11 @@ handler; it never accepts a URL, tenant ID, or arbitrary route from the gateway.
 | Activity | `activity-summary`, `activity`, `activity-detail`, `runtime-sessions`, `runtime-session-detail` |
 | Detections | `detections-summary`, `detections`, `detection-detail`, `detection-evaluations` |
 
+This is **26 named reads across seven Denali areas**, not the whole Denali
+API. For scale, the current production OpenAPI has 68 public paths before
+this receiver. The browser retains all of those app-specific routes; MCP/CLI
+receives only this reviewed catalog.
+
 The asset-governance write operation is:
 
 `PATCH /internal/v1/capabilities/assets/{asset_id}/governance`
@@ -83,6 +88,18 @@ and validation/collection are **not yet** gateway capabilities; each needs its o
 authorization, audit, idempotency, and durable-work review. This change does not
 alter the production shared-AWS pilot, legacy connectors, or the development-only
 shared-GitHub connector. This is not full Denali API parity.
+
+| Surface | In this release | Still outside MCP/CLI |
+| --- | --- | --- |
+| Denali results | 26 bounded reads | Raw exports and unreviewed future API paths |
+| Denali records | 3 audited writes: asset governance, response proposal, independent response review | Connection lifecycle, provider setup/callbacks, import, scan/collection controls, invitations and admin |
+| Customer AWS/GitHub resources | No mutation | All resource-changing actions and remediation |
+
+Expand in that order: first review additional existing Denali-record mutations
+one operation at a time for RBAC, tenancy, idempotency, durable jobs, and tests;
+then design separately scoped customer-cloud actions with new provider grants,
+preview/dry-run, explicit approval, audit, and rollback. Never expose arbitrary
+Denali URLs or provider SDK calls through the gateway.
 
 ## Production enablement and release gate
 
