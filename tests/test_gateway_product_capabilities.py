@@ -212,6 +212,8 @@ def test_import_authorization_and_cross_tenant_target(token, status):
         ({"confirmed": False}, 422),
         ({"confirmed": 1}, 422),
         ({"confirmed": None}, 422),
+        ({"authoritative": 1}, 422),
+        ({"authoritative": "false"}, 422),
         ({"expected_org_id": "org_Beta2"}, 409),
         ({"tenant_id": "tenant-beta"}, 422),
         ({"target_asset_id": str(uuid4())}, 404),

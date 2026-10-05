@@ -25,7 +25,7 @@ from fastapi import Path as ApiPath
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from denali.api.auth import (
@@ -586,6 +586,7 @@ class VulnerabilityImportCreate(BaseModel):
 
 
 class GatewayVulnerabilityImportCreate(VulnerabilityImportCreate):
+    authoritative: StrictBool = True
     expected_org_id: str = Field(pattern=r"^org_[A-Za-z0-9]+$", max_length=128)
     confirmed: Literal[True]
 
