@@ -100,9 +100,9 @@ cross-org access or credential exposure.
 ## Production opt-in boundary
 
 Production code is dark by default. The bridge requires both a production
-Platform HTTPS origin and Denali's own production Clerk M2M sender secret in
-Modal; neither belongs in Vercel. Even when those are configured, the
-`DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` value in the Denali core Modal Secret
+Platform HTTPS origin and Denali's own production Clerk M2M sender secret. The
+key stays in Modal; neither value belongs in Vercel. Even when configured, the
+`DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` deployment value
 defaults to **no organizations**. Set it only to reviewed, comma-separated
 Clerk production Organization IDs. The first pilot is `Transilience Prod`
 (`org_3K8emWY2vMAQDvm9UaMlZBnrjVt`). Do not use the development `tran-test`
@@ -116,9 +116,15 @@ entitle only the pilot org in Platform production. The production Platform
 receiver and Denali sender are separate Clerk machines in the production
 instance; never copy either development secret. Deploy the bridge through the
 reviewed Denali `main` workflow, initially with the origin and sender key
-unset (a preprovisioned sender key alone also keeps the bridge dark). After smoke checks, add the production origin, sender key, and pilot
-allowlist to Denali Modal, then redeploy the exact reviewed `main` SHA. Keep
-the public origin in the deployment-scoped configuration object, as in dev.
+unset (a preprovisioned sender key alone also keeps the bridge dark). After
+smoke checks, retain the sender key in the Denali Modal Secret; add only the
+production origin and pilot allowlist to the Denali GitHub `production`
+environment variables, then rerun
+the protected workflow for the exact reviewed `main` SHA. The deployment-scoped
+configuration object mounts both public values into Modal; the sender key stays
+in the Denali core Modal Secret and is never placed in GitHub or Vercel. The
+deployment script rejects either value alone, a non-production Platform origin,
+or an org other than the reviewed `Transilience Prod` pilot.
 
 This does **not** migrate or alter any existing Denali connection. Legacy AWS
 continues to use its existing role and external ID. For an allowlisted org with a

@@ -42,11 +42,13 @@ def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
     monkeypatch.setenv("DENALI_MODAL_SECRET_NAME", "test-core")
     monkeypatch.setenv("DENALI_MODAL_PROVIDER_SECRET_NAME", "test-provider")
     monkeypatch.setenv("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN", "https://platform.example")
+    monkeypatch.setenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "org_pilot")
     monkeypatch.setenv("DENALI_MODAL_APP_NAME", "denali-dev")
 
     module = runpy.run_path(str(MODAL_APP))
 
     assert module["shared_connections_origin"] == "https://platform.example"
+    assert module["shared_connections_allowed_org_ids"] == "org_pilot"
     assert [secret.name for secret in module["runtime_secrets"][:2]] == [
         "test-core",
         "test-provider",
@@ -54,6 +56,9 @@ def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
     assert len(module["runtime_secrets"]) == 3
     assert len(module["shared_connections_secrets"]) == 3
     assert "DENALI_PLATFORM_CONNECTIONS_ORIGIN" in repr(
+        module["shared_connections_secrets"][2]
+    )
+    assert "DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS" in repr(
         module["shared_connections_secrets"][2]
     )
     assert [secret.name for secret in module["shasta_bridge_secrets"][:2]] == [
@@ -65,9 +70,14 @@ def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
     # The container import has no deploy-shell variables; its dependencies
     # must still match the deployment-side graph exactly.
     monkeypatch.delenv("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
+    monkeypatch.delenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS")
     monkeypatch.delenv("DENALI_MODAL_APP_NAME")
     module = runpy.run_path(str(MODAL_APP))
     assert module["shared_connections_origin"] is None
+    assert module["shared_connections_allowed_org_ids"] is None
+    assert "DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS" not in module[
+        "shared_connections_config"
+    ]
     assert len(module["shared_connections_secrets"]) == 3
     assert "DENALI_PLATFORM_CONNECTIONS_ORIGIN" in repr(
         module["shared_connections_secrets"][2]
