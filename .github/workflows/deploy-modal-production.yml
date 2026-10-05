@@ -77,6 +77,9 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # Public, reviewed pilot config. Empty values keep the bridge disabled.
+      DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN: ${{ vars.DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN }}
+      DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS: ${{ vars.DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS }}
     steps:
       - uses: actions/checkout@v4
         with:

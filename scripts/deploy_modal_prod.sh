@@ -40,6 +40,18 @@ export DENALI_MODAL_REGION="${DENALI_MODAL_REGION:-us-east}"
 production_modal_origin="${DENALI_PRODUCTION_MODAL_ORIGIN:-https://transilience-denali-prod--denali-production-api.modal.run}"
 production_web_origin="${DENALI_PRODUCTION_WEB_ORIGIN:-https://denali.transilience.cloud}"
 
+# For the first production pilot, either keep the bridge completely dark or
+# enable only the reviewed Platform production origin and Clerk organization.
+shared_origin="${DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN:-}"
+allowed_orgs="${DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS:-}"
+if [[ -n "${shared_origin}" || -n "${allowed_orgs}" ]]; then
+  if [[ "${shared_origin}" != "https://transilience-transilience-platform-prod--transilience-pl-8a9ce7.modal.run" \
+    || "${allowed_orgs}" != "org_3K8emWY2vMAQDvm9UaMlZBnrjVt" ]]; then
+    echo "Refusing shared-connector activation outside the reviewed production pilot." >&2
+    exit 2
+  fi
+fi
+
 required_configuration_groups="core,aws,azure,entra,gcp,google_workspace,github,azure_repos"
 modal run --env "${prod_modal_environment}" modal_app.py::configuration_status \
   --required-groups "${required_configuration_groups}"

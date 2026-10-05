@@ -26,10 +26,18 @@ image = (
 # also import the API module, so they need this public origin alongside the
 # machine key in the core Modal Secret even though only the API calls it.
 shared_connections_origin = os.environ.get("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
+shared_connections_allowed_org_ids = os.environ.get("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS")
+shared_connections_config = {"DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin}
+if shared_connections_allowed_org_ids:
+    # Dev already carries its allowlist in the core Modal Secret. Do not shadow
+    # that value with an empty deployment variable.
+    shared_connections_config["DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS"] = (
+        shared_connections_allowed_org_ids
+    )
 runtime_secrets = [
     modal.Secret.from_name(SECRET_NAME),
     modal.Secret.from_name(PROVIDER_SECRET_NAME),
-    modal.Secret.from_dict({"DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin}),
+    modal.Secret.from_dict(shared_connections_config),
 ]
 shared_connections_secrets = runtime_secrets
 shasta_bridge_secrets = [
