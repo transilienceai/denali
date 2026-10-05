@@ -352,20 +352,33 @@ class AwsConnectionValidator:
         configuration = connection["configuration"]
         credential = connection["credential_reference"]
         try:
-            base_session = self._session_factory()
-            sts = base_session.client("sts")
-            assumed = sts.assume_role(
-                RoleArn=credential["role_arn"],
-                RoleSessionName=f"denali-validation-{str(connection['id'])[:8]}",
-                ExternalId=credential["external_id"],
-                DurationSeconds=900,
-            )
-            credentials = assumed["Credentials"]
-            session = self._session_factory(
-                aws_access_key_id=credentials["AccessKeyId"],
-                aws_secret_access_key=credentials["SecretAccessKey"],
-                aws_session_token=credentials["SessionToken"],
-            )
+            if connection.get("credential_type") == "platform_shared_aws":
+                from denali.integrations.shared_aws_session import leased_aws_session
+
+                regions = configuration.get("regions") or []
+                if len(regions) != 1:
+                    raise ValueError("shared AWS validation requires one selected Region")
+                session = leased_aws_session(
+                    connection,
+                    region=regions[0],
+                    scopes=list(connection.get("declared_scopes") or []),
+                    session_factory=self._session_factory,
+                )
+            else:
+                base_session = self._session_factory()
+                sts = base_session.client("sts")
+                assumed = sts.assume_role(
+                    RoleArn=credential["role_arn"],
+                    RoleSessionName=f"denali-validation-{str(connection['id'])[:8]}",
+                    ExternalId=credential["external_id"],
+                    DurationSeconds=900,
+                )
+                credentials = assumed["Credentials"]
+                session = self._session_factory(
+                    aws_access_key_id=credentials["AccessKeyId"],
+                    aws_secret_access_key=credentials["SecretAccessKey"],
+                    aws_session_token=credentials["SessionToken"],
+                )
             identity = session.client("sts").get_caller_identity()
             observed_account = str(identity.get("Account", ""))
             if observed_account != configuration["account_id"]:
@@ -415,7 +428,13 @@ class AwsConnectionValidator:
                 )
 
         regional_plan = aws_coverage_plan(connection["declared_scopes"], scan_regions)
-        if self._max_workers == 1 or len(regional_plan) < 2:
+        if (
+            connection.get("credential_type") == "platform_shared_aws"
+            or self._max_workers == 1
+            or len(regional_plan) < 2
+        ):
+            # A platform lease stays inside this validation invocation. The
+            # parallel path creates per-thread sessions from legacy STS keys.
             regional_results = [
                 self._validate_plane(session, planned, configuration) for planned in regional_plan
             ]

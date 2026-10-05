@@ -1,0 +1,144 @@
+# Shared AWS connections: Denali pilot and production rollout
+
+This began as an **opt-in shared-service pilot** and is the default path for **new AWS onboarding**
+only in an explicitly entitled production pilot org. It does not replace Denali's existing AWS
+role or scanning path. The shared registry identifies an AWS account by Clerk org,
+partition, and account ID. It marks Denali's own validated connection as
+`legacy_validated`; other apps see `requires_shared_setup` until a separate
+platform-owned trust path is validated. No app may use a legacy Denali role as
+shared AWS access.
+
+## Dev-only setup
+
+After the platform service has a dedicated **development** Neon database and
+Modal app, provision a Clerk development machine for Denali and grant its M2M
+tokens access only to the platform receiver machine. In the platform registry,
+enable `registered_app(app_id='denali', clerk_machine_id=<Denali machine ID>)`
+and an explicit `app_entitlement` for each pilot Clerk org. Configure only the
+Denali **development** Modal environment with:
+
+- `DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN` in the dev deploy shell: public HTTPS
+  origin of the dev platform API. Modal injects it as
+  `DENALI_PLATFORM_CONNECTIONS_ORIGIN` into every function so its dependency graph
+  is stable and workers can import the API module, without overwriting the
+  existing multi-key core Secret.
+- `DENALI_PLATFORM_MACHINE_SECRET_KEY` in the existing `denali-dev` core Secret:
+  Denali's dedicated Clerk development machine secret. Do not reuse the human
+  Clerk secret or store this in Git/Vercel.
+
+The isolated platform API, Denali machine authentication, pilot-org isolation,
+CloudFormation role, live validation, signed-in staging Connections panel, and
+bounded AWS read were verified on 2026-09-24. The new **Use in Denali** flow
+below still requires PR review, development deployment, and hosted acceptance.
+
+Run `sync_shared_aws_connections` with an exact Clerk `org_...` ID in the
+`denali-dev` Modal environment after the PR is reviewed and deployed through the
+normal `dev` workflow. The function reads that org's complete AWS connection
+set from Denali Neon and sends at most 100 sanitized entries to the platform.
+An empty set intentionally tombstones earlier entries for that org; an unknown
+org or truncated set fails before sending. Repeat after create, validation,
+disable, or delete during the pilot. This manual sync is **not** a durable or
+real-time production integration.
+
+Verify from the platform API that Denali sees only its own org's imported
+metadata, another entitled app cannot use it as shared AWS access, and a
+subsequent empty snapshot removes deleted connections. Do not expose role ARNs,
+external IDs, machine secrets, or customer credentials in API responses/logs.
+
+Denali also has separate same-origin `/v1/shared/connections/*` routes. They
+derive the org from its verified Clerk session; write routes require an org
+admin. They let a dev admin create a **new platform-owned** AWS connection,
+download its read-only CloudFormation template, queue/check validation, and disable
+it. The template trusts a dedicated platform principal, not Denali's legacy
+principal. Existing Denali stacks require a one-time trust update; simply
+importing their metadata does not make them usable by other apps.
+
+The Connections page includes a small shared-AWS pilot panel when the dev
+backend has these routes configured. For the first end-to-end check, select one
+commercial AWS Region and the `aws.bedrock_agents` scope, deploy the template,
+validate, then click **Test scoped AWS read**. Denali asks the platform for a
+15-minute scoped lease and performs a bounded `ListAgents(maxResults=1)` call
+server-side. The response contains only the Region, pass state, and a zero-or-one
+sample count; it never returns temporary keys or agent identifiers to the
+browser. The platform rejects a lease for a Region outside selected coverage.
+This proves the identity and read path, not evidence collection or a safety
+conclusion. Existing Denali-owned AWS roles remain unchanged.
+
+After the platform connection is ready, **Use in Denali** creates an org-scoped
+Denali connection that points at its platform UUID, with one selected Region and
+explicit scopes. It does not copy the platform role ARN, external ID, or temporary
+credentials into Denali Neon. Denali's durable validation and collection workers
+reload the server-resolved Clerk organization, obtain a fresh scoped lease for
+the connection and Region, verify the observed AWS account, and keep the
+temporary credentials inside the worker. The first UI path uses
+`aws.bedrock_agents` in the selected Region. A healthy Denali connection is not
+proof of completed collection; use **Collect AWS evidence** and inspect its
+separate collection status and coverage. Disable/delete Denali's local use
+separately from the platform's global connection lifecycle.
+
+Before the Denali backend PR is reviewed and deployed, the isolated one-off
+`scripts/verify_shared_aws_dev.py` Modal runner can exercise the same lease and
+read implementation against the pilot binding. It mounts only the existing
+Denali development core Secret and a public origin configuration object; it
+does not replace the shared `denali-dev` API.
+The pilot role exists and its successful bounded read returns only a pass state
+and sample count; no temporary credentials or agent identifiers are returned.
+
+No additional Clerk key is required for this path beyond the existing Denali
+dev sender machine secret and platform dev receiver machine secret. Keep both
+in their respective Modal Secrets; Vercel and the browser receive neither.
+The stable `denali-dev.transilience.cloud` domain may require Vercel SSO for
+browser testing, while the backend's direct health endpoint remains separate.
+
+No production deployment, public `api.transilience.cloud` reverse proxy, MCP
+endpoint, automatic synchronization, or switch of existing Denali-owned roles
+is included in this PR. The new Denali-use path is not accepted until its
+reviewed revision reaches `dev` and the signed-in staging flow completes
+attach -> Denali validation -> collection -> local disable/delete without
+cross-org access or credential exposure.
+
+## Production opt-in boundary
+
+Production code is dark by default. The bridge requires both a production
+Platform HTTPS origin and Denali's own production Clerk M2M sender secret in
+Modal; neither belongs in Vercel. Even when those are configured, the
+`DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` value in the Denali core Modal Secret
+defaults to **no organizations**. Set it only to reviewed, comma-separated
+Clerk production Organization IDs. The first pilot is `Transilience Prod`
+(`org_3K8emWY2vMAQDvm9UaMlZBnrjVt`). Do not use the development `tran-test`
+ID in production. Requests from any other org receive 404 before an M2M token
+or Platform request is made; the operator snapshot task and worker leases use
+the same allowlist. An invalid ID fails configuration instead of widening it.
+
+The org allowlist is a second boundary, not a substitute for the Platform's
+registered Denali machine and explicit org/app entitlement. Register and
+entitle only the pilot org in Platform production. The production Platform
+receiver and Denali sender are separate Clerk machines in the production
+instance; never copy either development secret. Deploy the bridge through the
+reviewed Denali `main` workflow, initially with the origin and sender key
+unset (a preprovisioned sender key alone also keeps the bridge dark). After smoke checks, add the production origin, sender key, and pilot
+allowlist to Denali Modal, then redeploy the exact reviewed `main` SHA. Keep
+the public origin in the deployment-scoped configuration object, as in dev.
+
+This does **not** migrate or alter any existing Denali connection. Legacy AWS
+continues to use its existing role and external ID. For an allowlisted org with a
+healthy Platform bridge, **Add connection** points to the shared AWS form. A
+separate **Other providers or Denali-managed AWS** action opens the native form;
+choosing native AWS there is explicit and does not reuse the role across apps.
+The shared path currently covers only `aws.bedrock_agents` in one selected
+Region; use the explicit Denali-managed path for other AWS evidence planes.
+For a non-allowlisted org (404), or while the bridge is deliberately dark
+(503), the original native onboarding remains the default. Once the bridge is
+configured, upstream or network failure displays an error and offers retry;
+it does not silently create a second native AWS connection. The native AWS API
+route stays available for existing clients and explicit compatibility use.
+Azure, Microsoft Entra,
+Google Cloud (GCP), Google Workspace, GitHub, and Azure Repos continue to use
+their existing integrations. The Platform currently brokers shared AWS and
+GitHub only; this Denali pilot exposes shared AWS only. A Denali admin must
+choose **Use in Denali** for a validated Platform AWS connection,
+which creates a new Denali connection record without replacing an existing
+record. Test the exact pilot org, a non-pilot org, legacy AWS validation and
+collection, and each other provider's connection listing before enabling the
+pilot. Do not claim production onboarding complete until hosted create,
+role setup, validation, attachment, collection, disable, and deletion pass.

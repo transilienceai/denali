@@ -45,6 +45,8 @@ set -euo pipefail
 printf 'curl %s\n' "$*" >>"${FAKE_CALL_LOG}"
 if [[ "$*" == *"--write-out"* ]]; then
   printf '401'
+elif [[ "$*" == *"/openapi.json"* ]]; then
+  printf '%s' "${FAKE_OPENAPI}"
 fi
 """,
     )
@@ -55,6 +57,7 @@ fi
         "FAKE_GIT_STATUS": "",
         "FAKE_HEAD_SHA": SHA,
         "FAKE_ORIGIN_DEV_SHA": SHA,
+        "FAKE_OPENAPI": '{"paths":{"/v1/shared/connections":{}}}',
     }
     environment.pop("GITHUB_ACTIONS", None)
     environment.pop("GITHUB_REF", None)
@@ -121,5 +124,13 @@ def test_development_deploy_runs_checks_migration_deploy_and_smoke_tests(
     assert "modal run --env denali-dev modal_app.py::database_status" in calls
     assert "modal deploy --env denali-dev modal_app.py" in calls
     assert "https://transilience-denali-dev--denali-dev-api.modal.run/healthz" in calls
+    assert "https://transilience-denali-dev--denali-dev-api.modal.run/openapi.json" in calls
     assert "https://denali-dev.transilience.cloud/api/healthz" in calls
     assert "https://transilience-denali-dev--denali-dev-api.modal.run/v1/context" in calls
+
+
+def test_development_deploy_rejects_stale_backend_without_shared_route(tmp_path: Path) -> None:
+    result = _run(tmp_path, FAKE_OPENAPI='{"paths":{}}')
+
+    assert result.returncode == 1
+    assert "shared-connections route is absent" in result.stderr

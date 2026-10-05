@@ -8,6 +8,7 @@ from denali.connectors.aws_agent_runtime_activity import (
     ACTIVITY_PLANE,
     AwsAgentRuntimeRegionConnector,
     AwsAgentRuntimeSpanNormalizer,
+    AwsConnectionAgentRuntimeCollector,
     _collection_window,
 )
 
@@ -451,3 +452,35 @@ def test_collection_window_catches_up_with_overlap_and_exposes_24_hour_gap() -> 
     )
     assert capped_start == NOW - timedelta(hours=24)
     assert capped is True
+
+
+def test_shared_runtime_session_uses_platform_lease(monkeypatch) -> None:
+    from denali.integrations import shared_aws_session
+
+    class Sts:
+        def get_caller_identity(self):
+            return {"Account": ACCOUNT}
+
+    class LeasedSession:
+        def client(self, service):
+            assert service == "sts"
+            return Sts()
+
+    calls = []
+
+    def fake_lease(connection, *, region, scopes, session_factory):
+        calls.append((region, scopes))
+        return LeasedSession()
+
+    monkeypatch.setattr(shared_aws_session, "leased_aws_session", fake_lease)
+    collector = AwsConnectionAgentRuntimeCollector(
+        session_factory=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy role session was used")
+        )
+    )
+    connection = {
+        "credential_type": "platform_shared_aws",
+        "configuration": {"regions": [REGION]},
+    }
+    assert collector._assumed_session(connection, ACCOUNT) is not None
+    assert calls == [(REGION, ["aws.agent_runtime_activity"])]

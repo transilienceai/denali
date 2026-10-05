@@ -633,6 +633,22 @@ class AwsConnectionAgentRuntimeCollector:
         return result
 
     def _assumed_session(self, connection: dict[str, Any], account_id: str) -> Any:
+        if connection.get("credential_type") == "platform_shared_aws":
+            from denali.integrations.shared_aws_session import leased_aws_session
+
+            regions = connection.get("configuration", {}).get("regions") or []
+            if len(regions) != 1:
+                raise ValueError("shared AWS runtime collection requires one selected Region")
+            session = leased_aws_session(
+                connection,
+                region=regions[0],
+                scopes=[AWS_SCOPE_AGENT_RUNTIME_ACTIVITY],
+                session_factory=self._session_factory,
+            )
+            observed = str(session.client("sts").get_caller_identity().get("Account", ""))
+            if observed != account_id:
+                raise ValueError("AWS assumed role account did not match the connection boundary")
+            return session
         credential = connection["credential_reference"]
         base_session = self._session_factory()
         assumed = base_session.client("sts").assume_role(

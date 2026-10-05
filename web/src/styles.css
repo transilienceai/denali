@@ -599,7 +599,21 @@ body { font-size: 14px; }
 }
 
 /* Self-service AWS connections */
+.shared-aws-pilot { padding: 20px; display: grid; gap: 16px; }
+.shared-aws-pilot-heading { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
+.shared-aws-pilot-heading h3 { margin: 4px 0 6px; }
+.shared-aws-pilot-heading p, .shared-aws-pilot-detail p { margin: 0; color: var(--muted); }
+.shared-aws-pilot-form, .shared-aws-pilot-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
+.shared-aws-pilot-form label, .shared-aws-pilot-detail label { display: grid; gap: 5px; font-size: 12px; }
+.shared-aws-pilot-form input, .shared-aws-pilot-detail select { min-height: 38px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); }
+.shared-aws-pilot-actions button, .shared-aws-pilot-heading button { min-height: 36px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); cursor: pointer; }
+.shared-aws-pilot-detail { display: grid; gap: 12px; }
+.shared-aws-pilot-message { color: var(--green); margin: 0; }
+.shared-aws-pilot-error { color: var(--color-role-status-high-foreground); margin: 0; }
 .connection-intro { align-items: center; }
+.connection-intro-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.connection-intro-actions > button:not(.primary-action) { min-height: 38px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); font-size: 11px; cursor: pointer; }
+.connection-native-aws-notice { margin: 0 0 16px; padding: 10px 12px; border: 1px solid #efd1c8; border-radius: 9px; background: #fff7f4; color: #8c4e3a; font-size: 11px; line-height: 1.5; }
 .primary-action, .secondary-action { min-height: 38px; padding: 0 14px; border: 0; border-radius: 9px; background: var(--coral); color: white; display: inline-flex; align-items: center; justify-content: center; gap: 7px; font-size: 12px; font-weight: 750; text-decoration: none; cursor: pointer; }
 .primary-action:hover { background: #d95d42; }.primary-action:disabled { opacity: .55; cursor: wait; }.primary-action svg, .secondary-action svg { width: 16px; }
 .secondary-action { width: fit-content; min-height: 34px; margin-top: 10px; border: 1px solid #ced9e2; background: white; color: #43566b; }

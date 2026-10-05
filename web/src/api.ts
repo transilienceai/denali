@@ -71,11 +71,44 @@ export type CreatedOrganizationUser = {
   role: OrganizationRole;
 };
 
+export type SharedAwsConnection = {
+  id: string;
+  connection_kind: "shared_aws" | "legacy_metadata";
+  provider: "aws";
+  partition: string;
+  external_account_id: string;
+  availability: string;
+  validated_scopes: string[];
+  last_validated_at: string | null;
+};
+
+export type SharedAwsValidation = {
+  job_state: string | null;
+  health_state: string;
+  credential_state: string;
+  job_error_code: string | null;
+  validation_summary: string | null;
+};
+
+export type SharedAwsProbe = {
+  scope: "aws.bedrock_agents";
+  region: string;
+  read_state: "passed";
+  sample_count: number;
+};
+
 type TokenProvider = () => Promise<string | null>;
 let tokenProvider: TokenProvider = async () => null;
 
 export function configureApiTokenProvider(provider: TokenProvider) {
   tokenProvider = provider;
+}
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -92,9 +125,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
       const payload = await response.json() as { detail?: unknown };
-      if (typeof payload.detail === "string") throw new Error(payload.detail);
+      if (typeof payload.detail === "string") throw new ApiError(payload.detail, response.status);
     }
-    throw new Error(`Request failed (${response.status})`);
+    throw new ApiError(`Request failed (${response.status})`, response.status);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -105,7 +138,7 @@ async function requestBlob(path: string): Promise<Blob> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
-  if (!response.ok) throw new Error(`Request failed (${response.status})`);
+  if (!response.ok) throw new ApiError(`Request failed (${response.status})`, response.status);
   return response.blob();
 }
 
@@ -128,6 +161,43 @@ export const api = {
       body: JSON.stringify(account),
     }),
   connections: () => request<{ items: Connection[] }>("/v1/connections"),
+  sharedAwsConnections: () => request<{ items: SharedAwsConnection[] }>("/v1/shared/connections"),
+  createSharedAwsConnection: (accountId: string, region: string) =>
+    request<{ id: string; availability: string }>("/v1/shared/connections/aws", {
+      method: "POST",
+      body: JSON.stringify({
+        account_id: accountId,
+        partition: "aws",
+        deployment_region: region,
+        coverage_mode: "selected",
+        regions: [region],
+        declared_scopes: ["aws.bedrock_agents"],
+      }),
+    }),
+  sharedAwsTemplate: (id: string) =>
+    requestBlob(`/v1/shared/connections/aws/${encodeURIComponent(id)}/cloudformation.yaml`),
+  validateSharedAws: (id: string) =>
+    request<{ job_id: string; state: string }>(
+      `/v1/shared/connections/aws/${encodeURIComponent(id)}/validate`, { method: "POST" },
+    ),
+  sharedAwsValidation: (id: string) =>
+    request<SharedAwsValidation>(
+      `/v1/shared/connections/aws/${encodeURIComponent(id)}/validation`,
+    ),
+  probeSharedAws: (id: string, region: string) =>
+    request<SharedAwsProbe>(`/v1/shared/connections/aws/${encodeURIComponent(id)}/probe`, {
+      method: "POST",
+      body: JSON.stringify({ region }),
+    }),
+  useSharedAwsInDenali: (id: string, region: string) =>
+    request<Connection>(`/v1/shared/connections/aws/${encodeURIComponent(id)}/use-in-denali`, {
+      method: "POST",
+      body: JSON.stringify({ region, declared_scopes: ["aws.bedrock_agents"] }),
+    }),
+  disableSharedAws: (id: string) =>
+    request<{ status: string }>(
+      `/v1/shared/connections/aws/${encodeURIComponent(id)}/disable`, { method: "POST" },
+    ),
   connection: (id: string) => request<Connection>(`/v1/connections/${id}`),
   createConnection: (connection: AwsConnectionCreate | AzureConnectionCreate | AzureReposConnectionCreate | EntraConnectionCreate | GcpConnectionCreate | GitHubConnectionCreate | GoogleWorkspaceConnectionCreate) =>
     request<Connection>("/v1/connections", {

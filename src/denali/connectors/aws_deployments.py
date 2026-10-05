@@ -139,19 +139,32 @@ class AwsConnectionDeploymentCollector:
         if not isinstance(account_id, str) or not re.fullmatch(r"[0-9]{12}", account_id):
             raise ValueError("AWS account boundary is incomplete")
 
-        base_session = self._session_factory()
-        assumed = base_session.client("sts").assume_role(
-            RoleArn=credential["role_arn"],
-            RoleSessionName=f"denali-deployments-{str(connection['id'])[:8]}",
-            ExternalId=credential["external_id"],
-            DurationSeconds=900,
-        )
-        temporary = assumed["Credentials"]
-        session = self._session_factory(
-            aws_access_key_id=temporary["AccessKeyId"],
-            aws_secret_access_key=temporary["SecretAccessKey"],
-            aws_session_token=temporary["SessionToken"],
-        )
+        if connection.get("credential_type") == "platform_shared_aws":
+            from denali.integrations.shared_aws_session import leased_aws_session
+
+            regions = configuration.get("regions") or []
+            if len(regions) != 1:
+                raise ValueError("shared AWS collection requires one selected Region")
+            session = leased_aws_session(
+                connection,
+                region=regions[0],
+                scopes=sorted(scopes & supported_scopes),
+                session_factory=self._session_factory,
+            )
+        else:
+            base_session = self._session_factory()
+            assumed = base_session.client("sts").assume_role(
+                RoleArn=credential["role_arn"],
+                RoleSessionName=f"denali-deployments-{str(connection['id'])[:8]}",
+                ExternalId=credential["external_id"],
+                DurationSeconds=900,
+            )
+            temporary = assumed["Credentials"]
+            session = self._session_factory(
+                aws_access_key_id=temporary["AccessKeyId"],
+                aws_secret_access_key=temporary["SecretAccessKey"],
+                aws_session_token=temporary["SessionToken"],
+            )
         observed_account = str(session.client("sts").get_caller_identity().get("Account", ""))
         if observed_account != account_id:
             raise ValueError("AWS assumed role account did not match the connection boundary")
