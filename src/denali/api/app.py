@@ -25,7 +25,7 @@ from fastapi import Path as ApiPath
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from denali.api.auth import (
@@ -127,6 +127,8 @@ from denali.store.repository import PostgresInventoryRepository
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOCAL_TENANT = "00000000-0000-4000-8000-000000000001"
+MAX_GATEWAY_IMPORT_BYTES = 2 * 1024 * 1024
+MAX_GATEWAY_EXPORT_BYTES = 2 * 1024 * 1024
 
 
 class InventoryReader(Protocol):
@@ -583,6 +585,18 @@ class VulnerabilityImportCreate(BaseModel):
     authoritative: bool = True
 
 
+class GatewayVulnerabilityImportCreate(VulnerabilityImportCreate):
+    expected_org_id: str = Field(pattern=r"^org_[A-Za-z0-9]+$", max_length=128)
+    confirmed: Literal[True]
+
+    @field_validator("confirmed", mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value: Any) -> Any:
+        if value is not True:
+            raise ValueError("confirmed must be true")
+        return value
+
+
 class EvidenceReportDeclaration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1026,6 +1040,10 @@ def create_app(
         )
         capability_write = (
             (
+                request.method == "POST"
+                and original_path == "/internal/v1/capabilities/vulnerabilities/imports"
+            )
+            or (
                 request.method == "PATCH"
                 and re.fullmatch(
                     r"/internal/v1/capabilities/assets/[^/]{1,128}/governance",
@@ -1096,6 +1114,20 @@ def create_app(
                 principal.user_id, principal.organization_id, role
             )
             request.state.denali_tenant_id = tenant_id
+            if original_path == "/internal/v1/capabilities/vulnerabilities/imports":
+                if request.query_params:
+                    return JSONResponse(
+                        status_code=422, content={"detail": "unsupported query parameter"}
+                    )
+                body = bytearray()
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > MAX_GATEWAY_IMPORT_BYTES:
+                        return JSONResponse(
+                            status_code=413,
+                            content={"detail": "evidence import exceeds gateway limit"},
+                        )
+                    body.extend(chunk)
+                request._body = bytes(body)
             if capability_read:
                 operation = original_path.removeprefix("/internal/v1/capabilities/")
                 try:
@@ -1107,6 +1139,7 @@ def create_app(
                 request.scope["path"] = path
                 request.scope["raw_path"] = path.encode()
                 request.scope["query_string"] = query
+                request.state.denali_capability = operation
             response = await call_next(request)
             response.headers["Cache-Control"] = "no-store"
             return response
@@ -4120,6 +4153,108 @@ def create_app(
             ) from error
         return {"id": str(job["id"]), "state": str(job["state"])}
 
+    @app.post("/internal/v1/capabilities/vulnerabilities/imports", status_code=202)
+    def gateway_create_vulnerability_import(
+        request: Request, imported: GatewayVulnerabilityImportCreate
+    ) -> dict[str, str]:
+        repo, current_tenant = _context(request)
+        identity: AuthContext = request.state.denali_auth
+        if imported.expected_org_id != identity.organization_id:
+            raise HTTPException(status_code=409, detail="active organization changed")
+        key = _gateway_idempotency_key(request)
+        lookup = getattr(repo, "gateway_vulnerability_import_action", None)
+        create_once = getattr(repo, "create_vulnerability_import_job_idempotent", None)
+        if lookup is None or create_once is None:
+            raise HTTPException(status_code=503, detail="idempotent evidence import unavailable")
+        report_store = request.app.state.evidence_report_store
+        dispatcher = request.app.state.vulnerability_import_dispatcher
+        if report_store is None or dispatcher is None:
+            raise HTTPException(
+                status_code=503, detail="hosted vulnerability evidence import is not configured"
+            )
+        target_asset_id = str(imported.target_asset_id)
+        try:
+            validate_report_pair(imported.syft_report, imported.grype_report)
+            documents = {
+                "syft": encode_report(imported.syft_report),
+                "grype": encode_report(imported.grype_report),
+            }
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        request_hash = hashlib.sha256(
+            json.dumps(
+                [
+                    identity.user_id,
+                    target_asset_id,
+                    imported.authoritative,
+                    imported.syft_report,
+                    imported.grype_report,
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        try:
+            job = lookup(current_tenant, idempotency_key=key, request_hash=request_hash)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if job is None:
+            asset = repo.get_asset(current_tenant, target_asset_id)
+            if (
+                asset is None
+                or asset.get("kind") != "ai_workload"
+                or asset.get("lifecycle_state") != "active"
+            ):
+                raise HTTPException(status_code=404, detail="active AI workload not found")
+            job_id = str(uuid4())
+            try:
+                object_keys = report_store.put_documents(
+                    tenant_id=current_tenant, job_id=job_id, documents=documents
+                )
+            except Exception as error:
+                raise HTTPException(
+                    status_code=502, detail="evidence reports could not be staged"
+                ) from error
+            try:
+                job, created = create_once(
+                    current_tenant,
+                    job_id=job_id,
+                    target_asset_id=target_asset_id,
+                    syft_object_key=object_keys["syft"],
+                    grype_object_key=object_keys["grype"],
+                    authoritative=imported.authoritative,
+                    actor=identity.user_id,
+                    idempotency_key=key,
+                    request_hash=request_hash,
+                )
+            except ValueError as error:
+                report_store.delete_documents(tuple(object_keys.values()))
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except Exception as error:
+                # A lost commit acknowledgement may have committed the job. Retain
+                # its evidence and let the same-key replay resolve durable state.
+                raise HTTPException(
+                    status_code=503, detail="evidence import storage unavailable"
+                ) from error
+            if not created:
+                # Concurrent retries stage into distinct random-job prefixes. Only
+                # the winning transaction's private objects belong to the job.
+                report_store.delete_documents(tuple(object_keys.values()))
+        if job["state"] == "queued" and not job.get("modal_call_id"):
+            # A replay repairs an API-container exit after the durable commit but
+            # before dispatch. Duplicate spawns are safe: the worker claims one lease.
+            try:
+                call_id = dispatcher(str(job["id"]))
+                if call_id:
+                    repo.set_vulnerability_import_call_id(str(job["id"]), call_id)
+            except Exception as error:
+                # Keep the durable queued job and its documents for a safe retry.
+                raise HTTPException(
+                    status_code=503, detail="evidence import worker unavailable"
+                ) from error
+        return {"id": str(job["id"]), "state": str(job["state"])}
+
     @app.get("/v1/vulnerabilities/imports/{job_id}")
     def vulnerability_import_status(request: Request, job_id: UUID) -> dict[str, Any]:
         repo, current_tenant = _context(request)
@@ -4271,31 +4406,41 @@ def create_app(
         session_key: str = ApiPath(pattern="^[0-9a-f]{64}$"),
     ) -> JSONResponse:
         repo, current_tenant = _context(request)
-        row = repo.get_runtime_session(current_tenant, session_key)
+        gateway_export = (
+            getattr(request.state, "denali_capability", None) == "runtime-session-export"
+        )
+        row = (
+            repo.get_runtime_session(current_tenant, session_key, activity_limit=100)
+            if gateway_export
+            else repo.get_runtime_session(current_tenant, session_key)
+        )
         if row is None:
             raise HTTPException(status_code=404, detail="runtime session not found")
         aws_compatible = row.get("provider") == "aws_agentcore"
         payload = {
             "schema_version": (
-                "denali.aws_agent_session.v1"
-                if aws_compatible
-                else "denali.agent_session.v1"
+                "denali.aws_agent_session.v1" if aws_compatible else "denali.agent_session.v1"
             ),
             "exported_at": datetime.now(UTC),
             "content_policy": "metadata_only",
             "session": row,
         }
-        return JSONResponse(
+        response = JSONResponse(
             content=jsonable_encoder(payload),
             headers={
                 "Cache-Control": "no-store",
                 "Content-Disposition": (
                     f'attachment; filename="denali-'
-                    f'{"aws" if aws_compatible else "agent"}-session-'
+                    f"{'aws' if aws_compatible else 'agent'}-session-"
                     f'{session_key[:12]}.json"'
                 ),
             },
         )
+        if gateway_export and len(response.body) > MAX_GATEWAY_EXPORT_BYTES:
+            raise HTTPException(
+                status_code=413, detail="runtime session export exceeds gateway limit"
+            )
+        return response
 
     @app.get("/v1/activity")
     def list_activity(

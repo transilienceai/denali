@@ -1,0 +1,929 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
+  "public_operation_count": 81,
+  "explicit_public_operation_count": 77,
+  "existing_named_read_count": 28,
+  "existing_named_write_count": 3,
+  "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
+  "browser_operation_count": 67,
+  "exceptions": {
+    "security_admin_user_creation": "Password-based Clerk user creation remains a secure browser workflow; passwords must never enter model/chat context.",
+    "security_admin_invitations": "Bulk invitations affect shared Clerk Organization membership across applications. A future capability requires separate per-action, recipient-role, confirmation, and audit design; not included in this rollout.",
+    "ci_oidc": "GitHub Actions ingestion binds a verified CI workflow/run/repository to the workload. Human MCP identities cannot impersonate or bypass that separate trust boundary.",
+    "provider_callback": "One-time state/consent callbacks are provider protocols, not user-invoked capabilities.",
+    "operator": "Health, navigation, API documentation, deployment, migrations, and direct CLI evaluation execution are operator workflows. Evaluation result histories remain product capabilities.",
+    "raw_connection_reads": "Raw credential references and configuration are replaced by reviewed tenant-scoped safe connection projections."
+  },
+  "operations": [
+    {
+      "method": "GET",
+      "path": "/",
+      "handler": "web_application",
+      "browser_methods": [],
+      "class": "operator",
+      "disposition": "excluded_health_navigation",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/healthz",
+      "handler": "health",
+      "browser_methods": [],
+      "class": "operator",
+      "disposition": "excluded_health_navigation",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/context",
+      "handler": "request_context",
+      "browser_methods": [
+        "context"
+      ],
+      "class": "product",
+      "disposition": "additive_capability",
+      "capability": "context",
+      "owner": "product_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/profile/organization/invitations/bulk",
+      "handler": "invite_organization_members",
+      "browser_methods": [
+        "inviteOrganizationMembers"
+      ],
+      "class": "security_admin",
+      "disposition": "excluded_sensitive_identity_workflow",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/profile/organization/users",
+      "handler": "create_organization_user",
+      "browser_methods": [
+        "createOrganizationUser"
+      ],
+      "class": "security_admin",
+      "disposition": "excluded_sensitive_identity_workflow",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections",
+      "handler": "list_connections",
+      "browser_methods": [
+        "connections"
+      ],
+      "class": "connector_product",
+      "disposition": "existing_sanitized_projection",
+      "capability": "connections"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connection-summaries",
+      "handler": "list_connection_summaries",
+      "browser_methods": [],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "connections"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connection-summaries/{connection_id}",
+      "handler": "connection_summary_detail",
+      "browser_methods": [],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "connection-detail"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections",
+      "handler": "list_shared_connections",
+      "browser_methods": [
+        "sharedAwsConnections"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/aws",
+      "handler": "create_shared_aws_connection",
+      "browser_methods": [
+        "createSharedAwsConnection"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/aws/{connection_id}/cloudformation.yaml",
+      "handler": "shared_aws_cloudformation",
+      "browser_methods": [
+        "sharedAwsTemplate"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/aws/{connection_id}/validate",
+      "handler": "validate_shared_aws_connection",
+      "browser_methods": [
+        "validateSharedAws"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/aws/{connection_id}/validation",
+      "handler": "shared_aws_validation_status",
+      "browser_methods": [
+        "sharedAwsValidation"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/aws/{connection_id}/probe",
+      "handler": "probe_shared_aws_connection",
+      "browser_methods": [
+        "probeSharedAws"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/aws/{connection_id}/use-in-denali",
+      "handler": "use_shared_aws_in_denali",
+      "browser_methods": [
+        "useSharedAwsInDenali"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/aws/{connection_id}/disable",
+      "handler": "disable_shared_aws_connection",
+      "browser_methods": [
+        "disableSharedAws"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections",
+      "handler": "create_connection",
+      "browser_methods": [
+        "createConnection"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/{connection_id}",
+      "handler": "connection_detail",
+      "browser_methods": [
+        "connection"
+      ],
+      "class": "connector_product",
+      "disposition": "existing_sanitized_projection",
+      "capability": "connection-detail"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/{connection_id}/aws/cloudformation.yaml",
+      "handler": "aws_connection_cloudformation",
+      "browser_methods": [
+        "cloudFormationTemplate"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/aws/cloudformation/launch",
+      "handler": "launch_aws_cloudformation",
+      "browser_methods": [
+        "launchCloudFormation"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/azure/setup/launch",
+      "handler": "launch_azure_setup",
+      "browser_methods": [
+        "launchAzureSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/azure/setup/complete",
+      "handler": "complete_azure_setup",
+      "browser_methods": [
+        "completeAzureSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/entra/setup/launch",
+      "handler": "launch_entra_setup",
+      "browser_methods": [
+        "launchEntraSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/entra/setup/callback",
+      "handler": "entra_setup_callback",
+      "browser_methods": [],
+      "class": "provider_callback",
+      "disposition": "excluded_one_time_provider_protocol",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/gcp/setup/launch",
+      "handler": "launch_gcp_setup",
+      "browser_methods": [
+        "launchGcpSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/gcp/setup/complete",
+      "handler": "complete_gcp_setup",
+      "browser_methods": [
+        "completeGcpSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/github/setup/launch",
+      "handler": "launch_github_setup",
+      "browser_methods": [
+        "launchGitHubSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/github/setup/callback",
+      "handler": "github_install_callback",
+      "browser_methods": [],
+      "class": "provider_callback",
+      "disposition": "excluded_one_time_provider_protocol",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/github/oauth/callback",
+      "handler": "github_oauth_callback",
+      "browser_methods": [],
+      "class": "provider_callback",
+      "disposition": "excluded_one_time_provider_protocol",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/google-workspace/setup/complete",
+      "handler": "complete_google_workspace_setup",
+      "browser_methods": [
+        "completeGoogleWorkspaceSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/azure-repos/setup/launch",
+      "handler": "launch_azure_repos_setup",
+      "browser_methods": [
+        "launchAzureReposSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/azure-repos/oauth/callback",
+      "handler": "azure_repos_oauth_callback",
+      "browser_methods": [],
+      "class": "provider_callback",
+      "disposition": "excluded_one_time_provider_protocol",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/azure-repos/setup/complete",
+      "handler": "complete_azure_repos_setup",
+      "browser_methods": [
+        "completeAzureReposSetup"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/validate",
+      "handler": "validate_connection",
+      "browser_methods": [
+        "validateConnection"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_job_receiver_pr_91",
+      "capability": null,
+      "owner": "job_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/entra/collect",
+      "handler": "collect_entra_evidence",
+      "browser_methods": [
+        "collectEntraEvidence"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_job_receiver_pr_91",
+      "capability": null,
+      "owner": "job_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/google-workspace/collect",
+      "handler": "collect_google_workspace_evidence",
+      "browser_methods": [
+        "collectGoogleWorkspaceEvidence"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_job_receiver_pr_91",
+      "capability": null,
+      "owner": "job_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/github/collect",
+      "handler": "collect_github_repository_source",
+      "browser_methods": [
+        "collectGitHubSource"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_job_receiver_pr_91",
+      "capability": null,
+      "owner": "job_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/azure-repos/collect",
+      "handler": "collect_azure_repos_source",
+      "browser_methods": [
+        "collectAzureReposSource"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_job_receiver_pr_91",
+      "capability": null,
+      "owner": "job_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/aws/collect-deployments",
+      "handler": "collect_aws_deployments",
+      "browser_methods": [
+        "collectAwsDeployments"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_job_receiver_pr_91",
+      "capability": null,
+      "owner": "job_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/azure/collect-deployments",
+      "handler": "collect_azure_deployments",
+      "browser_methods": [
+        "collectAzureDeployments"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_job_receiver_pr_91",
+      "capability": null,
+      "owner": "job_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/gcp/collect-deployments",
+      "handler": "collect_gcp_deployments",
+      "browser_methods": [
+        "collectGcpDeployments"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_job_receiver_pr_91",
+      "capability": null,
+      "owner": "job_surface"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/connections/{connection_id}/disable",
+      "handler": "disable_connection",
+      "browser_methods": [
+        "disableConnection"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/connections/{connection_id}",
+      "handler": "delete_connection",
+      "browser_methods": [
+        "deleteConnection"
+      ],
+      "class": "connector_product",
+      "disposition": "guarded_lifecycle_surface",
+      "capability": null,
+      "owner": "connection_surface"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/inventory/summary",
+      "handler": "inventory_summary",
+      "browser_methods": [
+        "summary"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "inventory-summary"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/inventory/assets",
+      "handler": "list_assets",
+      "browser_methods": [
+        "assets"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "assets"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/inventory/assets/{asset_id}",
+      "handler": "asset_detail",
+      "browser_methods": [
+        "asset"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "asset-detail"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/inventory/assets/{asset_id}/governance",
+      "handler": "update_governance",
+      "browser_methods": [
+        "governance"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "asset-governance"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sources/coverage",
+      "handler": "source_coverage",
+      "browser_methods": [
+        "coverage"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "sources-coverage"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/findings/summary",
+      "handler": "finding_summary",
+      "browser_methods": [
+        "findingSummary"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "findings-summary"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/findings",
+      "handler": "list_findings",
+      "browser_methods": [
+        "findings"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "findings"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/findings/{finding_id}",
+      "handler": "finding_detail",
+      "browser_methods": [
+        "finding"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "finding-detail"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/vulnerabilities/summary",
+      "handler": "vulnerability_summary",
+      "browser_methods": [
+        "vulnerabilitySummary"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "vulnerabilities-summary"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/ci/github/{connection_id}/vulnerability-imports",
+      "handler": "create_github_vulnerability_import",
+      "browser_methods": [],
+      "class": "ci_oidc",
+      "disposition": "excluded_machine_ingestion_trust_boundary",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/ci/github/{connection_id}/vulnerability-imports/{job_id}/complete",
+      "handler": "complete_github_vulnerability_import",
+      "browser_methods": [],
+      "class": "ci_oidc",
+      "disposition": "excluded_machine_ingestion_trust_boundary",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/ci/github/{connection_id}/vulnerability-imports/{job_id}",
+      "handler": "github_vulnerability_import_status",
+      "browser_methods": [],
+      "class": "ci_oidc",
+      "disposition": "excluded_machine_ingestion_trust_boundary",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/vulnerabilities/imports",
+      "handler": "create_vulnerability_import",
+      "browser_methods": [
+        "createVulnerabilityImport"
+      ],
+      "class": "product",
+      "disposition": "additive_guarded_durable_write",
+      "capability": "vulnerability-import",
+      "owner": "product_surface"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/vulnerabilities/imports/{job_id}",
+      "handler": "vulnerability_import_status",
+      "browser_methods": [
+        "vulnerabilityImport"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "vulnerability-import-status"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/vulnerabilities",
+      "handler": "list_vulnerabilities",
+      "browser_methods": [
+        "vulnerabilities"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "vulnerabilities"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/vulnerabilities/{vulnerability_id}",
+      "handler": "vulnerability_detail",
+      "browser_methods": [
+        "vulnerability"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "vulnerability-detail"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/issues/summary",
+      "handler": "issue_summary",
+      "browser_methods": [
+        "issueSummary"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "issues-summary"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/issues",
+      "handler": "list_issues",
+      "browser_methods": [
+        "issues"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "issues"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/issues/evaluations",
+      "handler": "issue_evaluations",
+      "browser_methods": [
+        "issueEvaluations"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "issue-evaluations"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/issues/{issue_id}",
+      "handler": "issue_detail",
+      "browser_methods": [
+        "issue"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "issue-detail"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/code-to-cloud/deployments",
+      "handler": "code_to_cloud_deployments",
+      "browser_methods": [
+        "codeToCloudDeployments"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "code-to-cloud-deployments"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/code-to-cloud/observations",
+      "handler": "code_to_cloud_observations",
+      "browser_methods": [
+        "codeToCloudObservations"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "code-to-cloud-observations"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/activity/summary",
+      "handler": "activity_summary",
+      "browser_methods": [
+        "activitySummary"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "activity-summary"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/runtime/sessions",
+      "handler": "list_runtime_sessions",
+      "browser_methods": [
+        "runtimeSessions"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "runtime-sessions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/runtime/sessions/{session_key}",
+      "handler": "runtime_session_detail",
+      "browser_methods": [
+        "runtimeSession"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "runtime-session-detail"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/runtime/sessions/{session_key}/export",
+      "handler": "export_runtime_session",
+      "browser_methods": [
+        "runtimeSessionExport"
+      ],
+      "class": "product",
+      "disposition": "additive_bounded_metadata_export",
+      "capability": "runtime-session-export",
+      "owner": "product_surface"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/activity",
+      "handler": "list_activity",
+      "browser_methods": [
+        "activity",
+        "activityForAsset"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "activity"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/activity/{activity_id}",
+      "handler": "activity_detail",
+      "browser_methods": [
+        "activityDetail"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "activity-detail"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/detections/summary",
+      "handler": "runtime_detection_summary",
+      "browser_methods": [
+        "detectionSummary"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "detections-summary"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/detections",
+      "handler": "list_runtime_detections",
+      "browser_methods": [
+        "detections"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "detections"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/detections/evaluations",
+      "handler": "runtime_detection_evaluations",
+      "browser_methods": [
+        "detectionEvaluations"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "detection-evaluations"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/detections/{detection_id}/responses",
+      "handler": "create_runtime_response",
+      "browser_methods": [
+        "createRuntimeResponse"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "runtime-response-create"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/detections/{detection_id}/responses/{response_id}",
+      "handler": "review_runtime_response",
+      "browser_methods": [
+        "reviewRuntimeResponse"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "runtime-response-review"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/detections/{detection_id}",
+      "handler": "runtime_detection_detail",
+      "browser_methods": [
+        "detection"
+      ],
+      "class": "product",
+      "disposition": "existing_capability",
+      "capability": "detection-detail"
+    },
+    {
+      "method": "GET",
+      "path": "/openapi.json",
+      "handler": "FastAPI-generated",
+      "browser_methods": [],
+      "class": "operator",
+      "disposition": "excluded_api_documentation",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/docs",
+      "handler": "FastAPI-generated",
+      "browser_methods": [],
+      "class": "operator",
+      "disposition": "excluded_api_documentation",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/docs/oauth2-redirect",
+      "handler": "FastAPI-generated",
+      "browser_methods": [],
+      "class": "operator",
+      "disposition": "excluded_api_documentation",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/redoc",
+      "handler": "FastAPI-generated",
+      "browser_methods": [],
+      "class": "operator",
+      "disposition": "excluded_api_documentation",
+      "capability": null
+    }
+  ],
+  "non_http_workflows": [
+    {
+      "operation": "denali-evaluate-issues",
+      "class": "operator",
+      "disposition": "CLI evaluation execution; result histories exposed as issue-evaluations; no public write API"
+    },
+    {
+      "operation": "denali-evaluate-detections",
+      "class": "operator",
+      "disposition": "CLI evaluation execution; result histories exposed as detection-evaluations; no public write API"
+    },
+    {
+      "operation": "runtime_collection configuration",
+      "class": "connector_product",
+      "disposition": "accepted during AWS/Azure connection create; no public update API"
+    },
+    {
+      "operation": "customer-cloud remediation",
+      "class": "absent",
+      "disposition": "no existing Denali provider mutation APIs; requires separate design"
+    }
+  ]
+}

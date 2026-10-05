@@ -16,6 +16,12 @@ update the pinned Platform adapter in a separate reviewed PR. Keep old names
 as aliases during migration; do not silently repurpose one. Platform's CI
 checks its pinned read registry against this product-owned source revision.
 
-The three current write operations remain separately gated by `denali:write`,
-organization-admin RBAC, and idempotency. This contract does not authorize
-customer AWS or GitHub remediation.
+Governance, response proposal/review, and durable vulnerability-import submission
+remain separately gated by `denali:write`, organization-admin RBAC, and idempotency.
+Import submission additionally requires `expected_org_id` and explicit JSON
+`confirmed=true`; the complete request is bounded at 2 MiB. Additive context and
+metadata-only runtime export reads reuse the existing handlers; gateway runtime
+exports are bounded at 100 activities and 2 MiB, preserving `session.truncated`.
+The exhaustive operation dispositions and sensitive workflow exceptions are
+recorded in [capability-surface.json](capability-surface.json). This contract does
+not authorize customer AWS or GitHub remediation.
