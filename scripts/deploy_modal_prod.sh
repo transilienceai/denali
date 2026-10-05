@@ -32,6 +32,12 @@ if [[ "$(git rev-parse origin/main)" != "${head_sha}" ]]; then
   exit 2
 fi
 
+# Modal imports the local module before its image installs Denali. Use only the
+# checkout validated above, not the checkout containing an invoked script path.
+repository_root="$(git rev-parse --show-toplevel)"
+cd "${repository_root}"
+export PYTHONPATH="${repository_root}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 prod_modal_environment="denali-prod"
 export DENALI_MODAL_APP_NAME="denali-production"
 export DENALI_MODAL_SECRET_NAME="custom-secret"

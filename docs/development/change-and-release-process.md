@@ -152,6 +152,12 @@ an older or unmerged commit.
 The GitHub workflow is the normal production interface. A coding agent must not deploy merely
 because it has local Modal credentials.
 
+The production and development deployment jobs install only the local Modal CLI. After their
+clean-checkout and exact remote-SHA guards pass, both helpers prepend that verified checkout's
+absolute `src` directory to `PYTHONPATH` before Modal imports `modal_app.py`. This makes the
+shared worker-limit constants available without a local Denali installation. Full Denali
+dependencies still install inside the declared Modal image, not through the deploy interpreter.
+
 ### Required smoke checks
 
 - Direct Modal `/healthz` returns `200` and `status=ready`.

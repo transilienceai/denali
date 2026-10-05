@@ -26,6 +26,7 @@ case "$*" in
   "status --porcelain") printf '%s' "${FAKE_GIT_STATUS:-}" ;;
   "rev-parse HEAD") printf '%s\n' "${FAKE_HEAD_SHA}" ;;
   "fetch --quiet origin dev") ;;
+  "rev-parse --show-toplevel") printf '%s\n' "${FAKE_REPOSITORY_ROOT}" ;;
   "rev-parse origin/dev") printf '%s\n' "${FAKE_ORIGIN_DEV_SHA}" ;;
   *) printf 'unexpected git call: %s\n' "$*" >&2; exit 90 ;;
 esac
@@ -56,6 +57,7 @@ fi
         "FAKE_CALL_LOG": str(call_log),
         "FAKE_GIT_STATUS": "",
         "FAKE_HEAD_SHA": SHA,
+        "FAKE_REPOSITORY_ROOT": str(SCRIPT.parents[1]),
         "FAKE_ORIGIN_DEV_SHA": SHA,
         "FAKE_OPENAPI": '{"paths":{"/v1/shared/connections":{}}}',
     }
