@@ -3461,49 +3461,160 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
-                connection.execute(
-                    """
-                    UPDATE vulnerability_import_job
-                    SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
-                        error_summary = CASE
-                          WHEN state = 'queued' THEN 'Import dispatch timed out.'
-                          ELSE 'Import worker lease expired.'
-                        END
-                    WHERE tenant_id = %s::uuid AND target_asset_id = %s::uuid
-                      AND (
-                        (state = 'running' AND lease_expires_at < now())
-                        OR (state = 'queued' AND created_at < now() - interval '30 minutes')
-                      )
-                    """,
-                    (tenant_id, target_asset_id),
+                row = self._create_vulnerability_import_job(
+                    connection,
+                    tenant_id,
+                    job_id=job_id,
+                    target_asset_id=target_asset_id,
+                    syft_object_key=syft_object_key,
+                    grype_object_key=grype_object_key,
+                    authoritative=authoritative,
                 )
-                row = connection.execute(
-                    """
-                    INSERT INTO vulnerability_import_job
-                      (id, tenant_id, target_asset_id, authoritative,
-                       syft_object_key, grype_object_key)
-                    SELECT %s::uuid, %s::uuid, asset.id, %s, %s, %s
-                    FROM asset
-                    WHERE asset.tenant_id = %s::uuid AND asset.id = %s::uuid
-                      AND asset.kind = 'ai_workload' AND asset.lifecycle_state = 'active'
-                    ON CONFLICT (tenant_id, target_asset_id)
-                      WHERE state IN ('queued', 'running')
-                    DO NOTHING
-                    RETURNING id, state, created_at
-                    """,
-                    (
-                        job_id,
-                        tenant_id,
-                        authoritative,
-                        syft_object_key,
-                        grype_object_key,
-                        tenant_id,
-                        target_asset_id,
-                    ),
-                ).fetchone()
         if row is None:
             raise ValueError("target workload is unavailable or already has an active import")
         return dict(row)
+
+    @staticmethod
+    def _create_vulnerability_import_job(
+        connection: psycopg.Connection[Any],
+        tenant_id: str,
+        *,
+        job_id: str,
+        target_asset_id: str,
+        syft_object_key: str,
+        grype_object_key: str,
+        authoritative: bool,
+    ) -> dict[str, Any] | None:
+        connection.execute(
+            """
+            UPDATE vulnerability_import_job
+            SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                error_summary = CASE
+                  WHEN state = 'queued' THEN 'Import dispatch timed out.'
+                  ELSE 'Import worker lease expired.'
+                END
+            WHERE tenant_id = %s::uuid AND target_asset_id = %s::uuid
+              AND (
+                (state = 'running' AND lease_expires_at < now())
+                OR (state = 'queued' AND created_at < now() - interval '30 minutes')
+              )
+            """,
+            (tenant_id, target_asset_id),
+        )
+        return connection.execute(
+            """
+            INSERT INTO vulnerability_import_job
+              (id, tenant_id, target_asset_id, authoritative, syft_object_key, grype_object_key)
+            SELECT %s::uuid, %s::uuid, asset.id, %s, %s, %s
+            FROM asset
+            WHERE asset.tenant_id = %s::uuid AND asset.id = %s::uuid
+              AND asset.kind = 'ai_workload' AND asset.lifecycle_state = 'active'
+            ON CONFLICT (tenant_id, target_asset_id)
+              WHERE state IN ('staging', 'queued', 'running')
+            DO NOTHING
+            RETURNING id, state, created_at, modal_call_id
+            """,
+            (
+                job_id,
+                tenant_id,
+                authoritative,
+                syft_object_key,
+                grype_object_key,
+                tenant_id,
+                target_asset_id,
+            ),
+        ).fetchone()
+
+    @staticmethod
+    def _gateway_vulnerability_import_action(
+        connection: psycopg.Connection[Any],
+        tenant_id: str,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            """
+            SELECT action.request_hash, job.id, job.state, job.modal_call_id
+            FROM gateway_vulnerability_import_action action
+            JOIN vulnerability_import_job job
+              ON job.tenant_id = action.tenant_id AND job.id = action.job_id
+            WHERE action.tenant_id = %s::uuid AND action.idempotency_key = %s
+            """,
+            (tenant_id, idempotency_key),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["request_hash"] != request_hash:
+            raise ValueError("idempotency key was already used for another action")
+        return {name: row[name] for name in ("id", "state", "modal_call_id")}
+
+    def gateway_vulnerability_import_action(
+        self,
+        tenant_id: str,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> dict[str, Any] | None:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            return self._gateway_vulnerability_import_action(
+                connection,
+                tenant_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+            )
+
+    def create_vulnerability_import_job_idempotent(
+        self,
+        tenant_id: str,
+        *,
+        job_id: str,
+        target_asset_id: str,
+        syft_object_key: str,
+        grype_object_key: str,
+        authoritative: bool,
+        actor: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Commit the native durable job and gateway audit in one transaction."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"denali-gateway-import:{tenant_id}:{idempotency_key}",),
+                )
+                previous = self._gateway_vulnerability_import_action(
+                    connection,
+                    tenant_id,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                )
+                if previous is not None:
+                    return previous, False
+                job = self._create_vulnerability_import_job(
+                    connection,
+                    tenant_id,
+                    job_id=job_id,
+                    target_asset_id=target_asset_id,
+                    syft_object_key=syft_object_key,
+                    grype_object_key=grype_object_key,
+                    authoritative=authoritative,
+                )
+                if job is None:
+                    raise ValueError(
+                        "target workload is unavailable or already has an active import"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO gateway_vulnerability_import_action
+                      (tenant_id, idempotency_key, request_hash, actor_user_id, job_id)
+                    VALUES (%s::uuid, %s, %s, %s, %s::uuid)
+                    """,
+                    (tenant_id, idempotency_key, request_hash, actor, job_id),
+                )
+                return dict(job), True
 
     def github_ci_repository_context(
         self,

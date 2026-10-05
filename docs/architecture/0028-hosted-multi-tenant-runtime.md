@@ -79,6 +79,10 @@ bound to a verified user and Organization. Denali checks live Organization
 membership, resolves an existing tenant mapping without creating one, and
 requires an Organization admin plus an idempotency key for Denali-record writes.
 See [the capability gateway contract](../development/capability-gateway.md).
+Its metadata-only runtime-session export has explicit activity and byte limits.
+Evidence import submission also requires an expected-organization guard and
+explicit confirmation; the native durable job and gateway audit commit atomically,
+while the existing leased worker owns ingestion and evaluation.
 
 `/healthz`, API documentation, and the Entra and GitHub provider callbacks are public at
 the HTTP middleware layer. Callback authorization instead uses verified, expiring, one-time setup

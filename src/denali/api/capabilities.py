@@ -55,6 +55,7 @@ class ReadCapability:
 
 
 READ_CAPABILITIES: dict[str, ReadCapability] = {
+    "context": ReadCapability("/v1/context"),
     "connections": ReadCapability("/v1/connection-summaries", frozenset({"limit", "offset"})),
     "connection-detail": ReadCapability("/v1/connection-summaries/{id}", identifier="uuid"),
     "inventory-summary": ReadCapability("/v1/inventory/summary"),
@@ -95,6 +96,9 @@ READ_CAPABILITIES: dict[str, ReadCapability] = {
         "/v1/runtime/sessions", frozenset({"provider", "outcome", "limit", "offset"})
     ),
     "runtime-session-detail": ReadCapability("/v1/runtime/sessions/{id}", identifier="session_key"),
+    "runtime-session-export": ReadCapability(
+        "/v1/runtime/sessions/{id}/export", identifier="session_key"
+    ),
     "detections-summary": ReadCapability("/v1/detections/summary"),
     "detections": ReadCapability(
         "/v1/detections", frozenset({"state", "severity", "limit", "offset"})

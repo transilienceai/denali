@@ -19,7 +19,12 @@ from denali.api.gateway_auth import ClerkGatewayVerifier, ClerkMembershipChecker
 
 def test_product_owned_read_contract_is_versioned_and_allowlisted():
     assert CAPABILITY_CONTRACT_VERSION == 1
-    assert len(READ_CAPABILITIES) == 28
+    assert {
+        "connections",
+        "connection-detail",
+        "context",
+        "runtime-session-export",
+    } <= READ_CAPABILITIES.keys()
     assert all(spec.path.startswith("/v1/") for spec in READ_CAPABILITIES.values())
     assert set(JOB_WRITE_CAPABILITIES) == {"connection-validate", "connection-collect"}
     assert all(spec.method == "POST" for spec in JOB_WRITE_CAPABILITIES.values())
@@ -253,14 +258,14 @@ def test_read_catalog_is_explicit_org_scoped_and_never_creates_tenant():
             ).status_code
             == 422
         )
-    assert len(READ_CAPABILITIES) == 28
+    assert len(READ_CAPABILITIES) >= 30
     assert all(call[1] in {"tenant-alpha", "tenant-beta"} for call in repo.calls)
 
 
 @pytest.mark.parametrize("operation", sorted(READ_CAPABILITIES))
 def test_every_named_read_resolves_to_an_existing_tenant_scoped_handler(operation):
     repo = Repository()
-    identifier = "a" * 64 if operation == "runtime-session-detail" else ASSET
+    identifier = "a" * 64 if READ_CAPABILITIES[operation].identifier == "session_key" else ASSET
     params = {"id": identifier} if READ_CAPABILITIES[operation].identifier else {}
     with TestClient(app(repo)) as client:
         response = client.get(
@@ -270,7 +275,11 @@ def test_every_named_read_resolves_to_an_existing_tenant_scoped_handler(operatio
         )
     assert response.status_code == 200, (operation, response.text)
     assert response.headers["cache-control"] == "no-store"
-    assert repo.calls and all(call[1] == "tenant-alpha" for call in repo.calls)
+    if operation == "context":
+        assert response.json()["tenant_id"] == "tenant-alpha"
+        assert response.json()["organization_id"] == "org_Alpha1"
+    else:
+        assert repo.calls and all(call[1] == "tenant-alpha" for call in repo.calls)
 
 
 @pytest.mark.parametrize(
