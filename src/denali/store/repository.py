@@ -204,6 +204,80 @@ class PostgresInventoryRepository:
     def __init__(self, dsn: str):
         self._dsn = dsn
 
+    def claim_gateway_connection_action(
+        self,
+        tenant_id: str,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+        actor: str,
+        action_kind: str,
+        connection_id: str | None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Reserve before side effects; crash/timeout never permits duplicate execution."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                inserted = connection.execute(
+                    """
+                    INSERT INTO gateway_connection_action
+                        (tenant_id, idempotency_key, request_hash, actor_user_id,
+                         action_kind, connection_id)
+                    VALUES (%s::uuid, %s, %s, %s, %s, %s::uuid)
+                    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                    RETURNING connection_id, state, status_code
+                    """,
+                    (tenant_id, idempotency_key, request_hash, actor, action_kind, connection_id),
+                ).fetchone()
+                if inserted is not None:
+                    return True, dict(inserted)
+                previous = connection.execute(
+                    """
+                    SELECT request_hash, actor_user_id, action_kind,
+                           connection_id, state, status_code
+                    FROM gateway_connection_action
+                    WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                    """,
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if previous is None or (
+                    previous["request_hash"] != request_hash
+                    or previous["actor_user_id"] != actor
+                    or previous["action_kind"] != action_kind
+                ):
+                    raise ValueError("idempotency key was already used for another action")
+                return False, dict(previous)
+
+    def finish_gateway_connection_action(
+        self,
+        tenant_id: str,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+        connection_id: str | None,
+        status_code: int,
+    ) -> None:
+        """Persist identifiers and outcome only; never the action input or response."""
+
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE gateway_connection_action
+                SET state = %s, status_code = %s,
+                    connection_id = COALESCE(%s::uuid, connection_id), completed_at = now()
+                WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                  AND request_hash = %s AND state = 'claimed'
+                """,
+                (
+                    "completed" if status_code < 400 else "failed",
+                    status_code,
+                    connection_id,
+                    tenant_id,
+                    idempotency_key,
+                    request_hash,
+                ),
+            )
+
     def resolve_tenant(self, clerk_organization_id: str) -> str:
         """Return the stable Denali UUID for an authenticated Clerk organization."""
 

@@ -58,6 +58,21 @@ READ_CAPABILITIES: dict[str, ReadCapability] = {
     "context": ReadCapability("/v1/context"),
     "connections": ReadCapability("/v1/connection-summaries", frozenset({"limit", "offset"})),
     "connection-detail": ReadCapability("/v1/connection-summaries/{id}", identifier="uuid"),
+    "connection-setup-status": ReadCapability(
+        "/v1/connection-setup-summaries/{id}", identifier="uuid"
+    ),
+    "connection-aws-template": ReadCapability(
+        "/v1/connection-setup-templates/aws/{id}", identifier="uuid"
+    ),
+    "shared-connections": ReadCapability(
+        "/v1/shared/connection-summaries", frozenset({"limit", "offset"})
+    ),
+    "shared-aws-status": ReadCapability(
+        "/v1/shared/connection-summaries/aws/{id}", identifier="uuid"
+    ),
+    "shared-aws-template": ReadCapability(
+        "/v1/shared/connection-setup-templates/aws/{id}", identifier="uuid"
+    ),
     "inventory-summary": ReadCapability("/v1/inventory/summary"),
     "assets": ReadCapability(
         "/v1/inventory/assets",

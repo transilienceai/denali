@@ -23,6 +23,8 @@ from uuid import UUID, uuid4
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi import Path as ApiPath
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -42,6 +44,7 @@ from denali.api.clerk_admin import (
     ClerkOrganizationAdmin,
 )
 from denali.api.collection import COLLECTION_KINDS_BY_PROVIDER, run_durable_collection_job
+from denali.api.connection_capabilities import connection_summary, setup_summary, shared_summary
 from denali.api.evidence_import import (
     MAX_REPORT_BYTES,
     EvidenceReportStore,
@@ -826,6 +829,96 @@ ConnectionCreate = Annotated[
 ]
 
 
+class GatewayConnectionGuard(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_org_id: str = Field(min_length=5, max_length=128, pattern=r"^org_[A-Za-z0-9]+$")
+    confirmed: Literal[True]
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value):
+        if not isinstance(value, dict) or value.get("confirmed") is not True:
+            raise ValueError("explicit confirmation is required")
+        return value
+
+
+class GatewayConnectionCreate(GatewayConnectionGuard):
+    action: Literal["create"]
+    connection: ConnectionCreate
+
+
+class GatewayConnectionSetupLaunch(GatewayConnectionGuard):
+    action: Literal["setup-launch"]
+    connection_id: UUID
+    provider: Literal["aws", "azure", "entra", "gcp", "github", "azure_repos"]
+
+
+class GatewayConnectionSetupComplete(GatewayConnectionGuard):
+    action: Literal["setup-complete"]
+    connection_id: UUID
+    provider: Literal["azure", "gcp", "google_workspace", "azure_repos"]
+    completion_code: str | None = Field(default=None, min_length=16, max_length=32768)
+    repository_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def require_provider_completion(self):
+        if self.provider in {"azure", "gcp"}:
+            if self.completion_code is None or self.repository_ids is not None:
+                raise ValueError("this provider requires only a completion_code")
+        elif self.provider == "azure_repos":
+            if self.repository_ids is None or self.completion_code is not None:
+                raise ValueError("Azure Repos requires only repository_ids")
+        elif self.completion_code is not None or self.repository_ids is not None:
+            raise ValueError("Workspace completion accepts no provider payload")
+        return self
+
+
+class GatewayConnectionDisable(GatewayConnectionGuard):
+    action: Literal["disable", "delete"]
+    connection_id: UUID
+    confirmation_name: str = Field(min_length=1, max_length=120)
+
+
+class GatewaySharedConnectionCreate(GatewayConnectionGuard):
+    action: Literal["shared-create"]
+    connection: SharedAwsConnectionCreate
+
+
+class GatewaySharedConnectionAttach(GatewayConnectionGuard):
+    action: Literal["shared-attach"]
+    connection_id: UUID
+    region: str = Field(min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+    declared_scopes: list[str] = Field(min_length=1, max_length=len(AWS_SCOPES))
+
+
+class GatewaySharedConnectionControl(GatewayConnectionGuard):
+    action: Literal["shared-disable", "shared-validate", "shared-probe"]
+    connection_id: UUID
+    confirmation_account_id: str = Field(pattern=r"^[0-9]{12}$")
+    region: str | None = Field(
+        default=None, min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$"
+    )
+
+    @model_validator(mode="after")
+    def require_probe_region(self):
+        if (self.action == "shared-probe") != (self.region is not None):
+            raise ValueError("only shared-probe requires a region")
+        return self
+
+
+GatewayConnectionAction = Annotated[
+    GatewayConnectionCreate
+    | GatewayConnectionSetupLaunch
+    | GatewayConnectionSetupComplete
+    | GatewayConnectionDisable
+    | GatewaySharedConnectionCreate
+    | GatewaySharedConnectionAttach
+    | GatewaySharedConnectionControl,
+    Field(discriminator="action"),
+]
+
+
 def create_app(
     *,
     repository: InventoryReader | None = None,
@@ -1066,6 +1159,14 @@ def create_app(
         allow_headers=["Authorization", "Content-Type"],
     )
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_without_setup_material(
+        request: Request, error: RequestValidationError
+    ):
+        if request.url.path == "/internal/v1/capabilities/connections/actions":
+            return JSONResponse(status_code=422, content={"detail": "invalid connection action"})
+        return await request_validation_exception_handler(request, error)
+
     @app.middleware("http")
     async def authenticate_request_context(request: Request, call_next: Callable[..., Any]):
         original_path = request.scope["path"]
@@ -1080,7 +1181,10 @@ def create_app(
         capability_write = (
             (
                 request.method == "POST"
-                and original_path == "/internal/v1/capabilities/vulnerabilities/imports"
+                and original_path in {
+                    "/internal/v1/capabilities/vulnerabilities/imports",
+                    "/internal/v1/capabilities/connections/actions",
+                }
             )
             or (
                 request.method == "PATCH"
@@ -1126,6 +1230,24 @@ def create_app(
             authorization = request.headers.get("authorization", "")
             token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
             purpose = "denali:write" if capability_write else "results:read"
+            if original_path == "/internal/v1/capabilities/connections/actions":
+                # The action discriminant selects a required purpose, not authority.
+                # The machine verifier still authenticates that exact purpose below.
+                body = await request.body()
+                if len(body) > 65536:
+                    return JSONResponse(status_code=413, content={"detail": "action is too large"})
+                try:
+                    action_fields = json.loads(body)
+                except (ValueError, UnicodeDecodeError):
+                    return JSONResponse(
+                        status_code=422, content={"detail": "invalid connection action"}
+                    )
+                if not isinstance(action_fields, dict):
+                    return JSONResponse(
+                        status_code=422, content={"detail": "invalid connection action"}
+                    )
+                if action_fields.get("action") in {"disable", "delete", "shared-disable"}:
+                    purpose = "denali:connections:destructive"
             principal = await run_in_threadpool(verifier.verify, token, purpose=purpose)
             if principal is None:
                 return JSONResponse(
@@ -2033,8 +2155,7 @@ def create_app(
             existing = repo.get_connection(current_tenant, str(connection_id))
             if (
                 existing is not None
-                and existing.get("credential_reference", {}).get("type")
-                == "platform_shared_aws"
+                and existing.get("credential_reference", {}).get("type") == "platform_shared_aws"
                 and existing.get("lifecycle_state") == "active"
                 and existing.get("configuration", {}).get("regions") == [payload.region]
                 and set(existing.get("declared_scopes") or []) == set(scopes)
@@ -2052,6 +2173,7 @@ def create_app(
     @app.post("/v1/connections", status_code=201)
     def create_connection(request: Request, connection: ConnectionCreate) -> dict[str, Any]:
         repo, current_tenant = _context(request)
+        connection_id = str(getattr(request.state, "gateway_connection_id", None) or uuid4())
         display_name = connection.display_name.strip()
         if not display_name:
             raise HTTPException(status_code=422, detail="display_name must not be blank")
@@ -2072,7 +2194,6 @@ def create_app(
                     status_code=422,
                     detail=f"unsupported Azure scope: {', '.join(unsupported_scopes)}",
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2119,7 +2240,6 @@ def create_app(
                         "AI application evidence bundle"
                     ),
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2166,7 +2286,6 @@ def create_app(
                         "read-only audit bundle"
                     ),
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2215,7 +2334,6 @@ def create_app(
                     status_code=422,
                     detail=f"unsupported Google Cloud scope: {', '.join(unsupported_scopes)}",
                 )
-            connection_id = str(uuid4())
             try:
                 principal = provisioner.create_principal(
                     connection_id=connection_id,
@@ -2265,7 +2383,6 @@ def create_app(
                     status_code=422,
                     detail=f"unsupported GitHub scope: {', '.join(unsupported_scopes)}",
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2308,7 +2425,6 @@ def create_app(
                     status_code=422,
                     detail=f"unsupported Azure Repos scope: {', '.join(unsupported_scopes)}",
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2362,7 +2478,6 @@ def create_app(
                 status_code=422,
                 detail=f"unsupported AWS scope: {', '.join(unsupported_scopes)}",
             )
-        connection_id = str(uuid4())
         external_id = f"denali-{current_tenant}-{connection_id}"
         role_arn = (
             f"arn:{connection.partition}:iam::{connection.account_id}:role/{connection.role_name}"
@@ -3629,6 +3744,305 @@ def create_app(
         if result == "not_found":
             raise HTTPException(status_code=404, detail="connection not found")
         return Response(status_code=204)
+
+    @app.get("/v1/connection-setup-summaries/{connection_id}")
+    def connection_setup_summary(request: Request, connection_id: UUID) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        # Existing public serialization removes internal setup state and PKCE.
+        row = repo.get_connection(current_tenant, str(connection_id))
+        if row is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        return setup_summary(row)
+
+    def bounded_setup_template(template: PlainTextResponse) -> dict[str, Any]:
+        if len(template.body) > 131072:
+            raise HTTPException(
+                status_code=502, detail="setup template exceeds the capability limit"
+            )
+        return {"media_type": "application/yaml", "template": template.body.decode()}
+
+    @app.get("/v1/connection-setup-templates/aws/{connection_id}")
+    def capability_aws_template(request: Request, connection_id: UUID) -> dict[str, Any]:
+        return bounded_setup_template(aws_connection_cloudformation(request, connection_id))
+
+    def shared_aws_boundary(request: Request, connection_id: UUID) -> dict[str, Any]:
+        listing = _shared_request(request, "GET", "/v1/connections")
+        if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
+            raise HTTPException(status_code=502, detail="invalid shared connection list")
+        shared = next(
+            (
+                item
+                for item in listing["items"]
+                if isinstance(item, dict)
+                and item.get("id") == str(connection_id)
+                and item.get("connection_kind") == "shared_aws"
+            ),
+            None,
+        )
+        if shared is None:
+            raise HTTPException(status_code=404, detail="shared AWS connection not found")
+        return shared
+
+    @app.get("/v1/shared/connection-summaries")
+    def shared_connection_summaries(
+        request: Request,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=100000),
+    ) -> dict[str, Any]:
+        listing = _shared_request(request, "GET", "/v1/connections")
+        if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
+            raise HTTPException(status_code=502, detail="invalid shared connection list")
+        rows = sorted(
+            (shared_summary(item) for item in listing["items"] if isinstance(item, dict)),
+            key=lambda item: str(item.get("id", "")),
+        )
+        return {
+            "items": rows[offset : offset + limit],
+            "limit": limit,
+            "offset": offset,
+            "has_more": len(rows) > offset + limit,
+        }
+
+    @app.get("/v1/shared/connection-summaries/aws/{connection_id}")
+    def shared_aws_summary(request: Request, connection_id: UUID) -> dict[str, Any]:
+        shared = shared_aws_boundary(request, connection_id)
+        status = shared_aws_validation_status(request, connection_id)
+        return {
+            "connection": shared_summary(shared),
+            "validation": {
+                key: status[key]
+                for key in (
+                    "health_state",
+                    "credential_state",
+                    "last_validated_at",
+                    "job_id",
+                    "job_state",
+                    "job_error_code",
+                )
+                if key in status
+            },
+        }
+
+    @app.get("/v1/shared/connection-setup-templates/aws/{connection_id}")
+    def capability_shared_aws_template(request: Request, connection_id: UUID) -> dict[str, Any]:
+        shared_aws_boundary(request, connection_id)
+        return bounded_setup_template(shared_aws_cloudformation(request, connection_id))
+
+    @app.post("/internal/v1/capabilities/connections/actions")
+    def gateway_connection_action(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        action: GatewayConnectionAction,
+    ) -> JSONResponse:
+        repo, current_tenant = _context(request)
+        if action.expected_org_id != request.state.denali_auth.organization_id:
+            raise HTTPException(status_code=409, detail="active organization changed")
+        if request.query_params:
+            raise HTTPException(status_code=422, detail="query parameters are not accepted")
+        key = _gateway_idempotency_key(request)
+        claim = getattr(repo, "claim_gateway_connection_action", None)
+        finish = getattr(repo, "finish_gateway_connection_action", None)
+        if claim is None or finish is None:
+            raise HTTPException(status_code=503, detail="connection action ledger unavailable")
+        request_hash = hashlib.sha256(action.model_dump_json().encode()).hexdigest()
+        connection_id = (
+            str(uuid4())
+            if action.action == "create"
+            else str(action.connection_id)
+            if hasattr(action, "connection_id")
+            else None
+        )
+        try:
+            fresh, previous = claim(
+                current_tenant,
+                idempotency_key=key,
+                request_hash=request_hash,
+                actor=request.state.denali_auth.user_id,
+                action_kind=action.action,
+                connection_id=connection_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if not fresh:
+            if previous["state"] != "completed":
+                raise HTTPException(
+                    status_code=409,
+                    detail="action is pending or failed; inspect its target before retrying",
+                )
+            return JSONResponse(
+                content=jsonable_encoder(
+                    {
+                        "action": action.action,
+                        "connection_id": previous["connection_id"],
+                        "status": "completed",
+                        "replayed": True,
+                        "previous_status_code": previous["status_code"],
+                    }
+                )
+            )
+
+        output: dict[str, Any] = {
+            "action": action.action,
+            "connection_id": connection_id,
+            "status": "completed",
+            "replayed": False,
+        }
+        status_code = 200
+        try:
+            if isinstance(action, GatewayConnectionCreate):
+                request.state.gateway_connection_id = connection_id
+                row = create_connection(request, action.connection)
+                output["connection"] = connection_summary(row)
+                status_code = 201
+            elif isinstance(action, (GatewayConnectionSetupLaunch, GatewayConnectionSetupComplete)):
+                target = repo.get_connection_validation_target(current_tenant, connection_id)
+                if target is None or target["provider"] != action.provider:
+                    raise HTTPException(status_code=404, detail="provider connection not found")
+                if target["lifecycle_state"] != "active":
+                    raise HTTPException(
+                        status_code=409, detail="disabled connections cannot be set up"
+                    )
+                if (
+                    action.action == "setup-complete" or action.provider == "aws"
+                ) and request.app.state.validation_dispatcher is None:
+                    raise HTTPException(
+                        status_code=503, detail="durable validation dispatcher unavailable"
+                    )
+                identifier = UUID(connection_id)
+                if isinstance(action, GatewayConnectionSetupLaunch):
+                    response = Response()
+                    if action.provider == "aws":
+                        result = launch_aws_cloudformation(
+                            request, response, background_tasks, identifier
+                        )
+                    else:
+                        handler = {
+                            "azure": launch_azure_setup,
+                            "entra": launch_entra_setup,
+                            "gcp": launch_gcp_setup,
+                            "github": launch_github_setup,
+                            "azure_repos": launch_azure_repos_setup,
+                        }[action.provider]
+                        result = handler(request, response, identifier)
+                    output["setup"] = {
+                        key: result[key] for key in (
+                            "launch_url", "stack_name", "stack_region", "template_version",
+                            "template_sha256", "expires_at", "validation_status",
+                            "cloud_shell_url", "script_url", "setup_command", "script_version",
+                            "script_sha256", "principal_email", "identity_prepared_in_script",
+                            "consent_url", "install_url", "app_slug", "authorize_url",
+                        ) if key in result
+                    }
+                    status_code = 201
+                else:
+                    if action.provider == "azure":
+                        result = complete_azure_setup(
+                            request,
+                            background_tasks,
+                            identifier,
+                            AzureSetupCompletion(completion_code=action.completion_code),
+                        )
+                    elif action.provider == "gcp":
+                        result = complete_gcp_setup(
+                            request,
+                            background_tasks,
+                            identifier,
+                            GcpSetupCompletion(completion_code=action.completion_code),
+                        )
+                    elif action.provider == "azure_repos":
+                        result = complete_azure_repos_setup(
+                            request,
+                            background_tasks,
+                            identifier,
+                            AzureReposSelection(repository_ids=action.repository_ids),
+                        )
+                    else:
+                        result = complete_google_workspace_setup(
+                            request, background_tasks, identifier
+                        )
+                    output["job"] = {
+                        key: result[key] for key in ("status", "connection_id") if key in result
+                    }
+                    status_code = 202
+            elif isinstance(action, GatewayConnectionDisable):
+                row = repo.get_connection(current_tenant, connection_id)
+                if row is None:
+                    raise HTTPException(status_code=404, detail="connection not found")
+                if action.confirmation_name != row["display_name"]:
+                    raise HTTPException(status_code=409, detail="confirmation name does not match")
+                if action.action == "disable":
+                    output["connection"] = connection_summary(
+                        disable_connection(request, UUID(connection_id))
+                    )
+                else:
+                    delete_connection(
+                        request, UUID(connection_id), confirm=action.confirmation_name
+                    )
+            elif isinstance(action, GatewaySharedConnectionCreate):
+                row = create_shared_aws_connection(request, action.connection)
+                connection_id = str(UUID(row["id"]))
+                output.update(connection_id=connection_id, connection=shared_summary(row))
+                status_code = 201
+            elif isinstance(action, GatewaySharedConnectionAttach):
+                row = use_shared_aws_in_denali(
+                    request,
+                    UUID(connection_id),
+                    SharedAwsUseInput(region=action.region, declared_scopes=action.declared_scopes),
+                )
+                output["connection"] = connection_summary(row)
+                status_code = 201
+            elif isinstance(action, GatewaySharedConnectionControl):
+                shared = shared_aws_boundary(request, UUID(connection_id))
+                if action.confirmation_account_id != shared.get("external_account_id"):
+                    raise HTTPException(
+                        status_code=409, detail="confirmation account does not match"
+                    )
+                if action.action == "shared-disable":
+                    disable_shared_aws_connection(request, UUID(connection_id))
+                elif action.action == "shared-validate":
+                    result = validate_shared_aws_connection(request, UUID(connection_id))
+                    output["job"] = {
+                        key: result[key] for key in ("job_id", "state") if key in result
+                    }
+                    status_code = 202
+                else:
+                    result = probe_shared_aws_connection(
+                        request,
+                        UUID(connection_id),
+                        SharedAwsReadProbeInput(region=action.region),
+                        Response(),
+                    )
+                    output["probe"] = {
+                        key: result[key]
+                        for key in ("scope", "region", "read_state", "sample_count")
+                        if key in result
+                    }
+        except HTTPException as error:
+            finish(
+                current_tenant,
+                idempotency_key=key,
+                request_hash=request_hash,
+                connection_id=connection_id,
+                status_code=error.status_code,
+            )
+            raise
+        except Exception as error:
+            finish(
+                current_tenant,
+                idempotency_key=key,
+                request_hash=request_hash,
+                connection_id=connection_id,
+                status_code=502,
+            )
+            raise HTTPException(status_code=502, detail="connection action failed") from error
+        finish(
+            current_tenant,
+            idempotency_key=key,
+            request_hash=request_hash,
+            connection_id=connection_id,
+            status_code=status_code,
+        )
+        return JSONResponse(status_code=status_code, content=jsonable_encoder(output))
 
     @app.get("/v1/inventory/summary")
     def inventory_summary(request: Request) -> dict[str, Any]:
