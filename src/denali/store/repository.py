@@ -3757,6 +3757,42 @@ class PostgresInventoryRepository:
             ).fetchall()
         return [_connection_response(row) for row in rows]
 
+    def list_connection_summaries(
+        self, tenant_id: str, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Return a bounded, tenant-scoped view with no setup or credential data."""
+
+        if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
+            raise ValueError("invalid connection summary page")
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, provider, display_name, lifecycle_state, health_state,
+                       declared_scopes, created_at, updated_at, last_validated_at
+                FROM provider_connection
+                WHERE tenant_id = %s::uuid
+                ORDER BY id
+                LIMIT %s OFFSET %s
+                """,
+                (tenant_id, limit + 1, offset),
+            ).fetchall()
+        return [dict(row) for row in rows[:limit]], len(rows) > limit
+
+    def get_connection_summary(self, tenant_id: str, connection_id: str) -> dict[str, Any] | None:
+        """Select only the non-sensitive connection fields exposed to capabilities."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                SELECT id, provider, display_name, lifecycle_state, health_state,
+                       declared_scopes, created_at, updated_at, last_validated_at
+                FROM provider_connection
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                """,
+                (tenant_id, connection_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
     def list_healthy_connection_ids(
         self, tenant_id: str, *, provider: str, limit: int = 50
     ) -> list[str]:

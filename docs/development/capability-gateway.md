@@ -25,6 +25,7 @@ routes retain the unbounded default when those parameters are omitted.
 
 | Area | Read operations |
 | --- | --- |
+| Connections | `connections`, `connection-detail` (Denali-local status, not Platform connector configuration) |
 | Inventory | `inventory-summary`, `assets`, `asset-detail`, `sources-coverage` |
 | Findings | `findings-summary`, `findings`, `finding-detail` |
 | Vulnerabilities | `vulnerabilities-summary`, `vulnerabilities`, `vulnerability-detail`, `vulnerability-import-status` |
@@ -33,10 +34,19 @@ routes retain the unbounded default when those parameters are omitted.
 | Activity | `activity-summary`, `activity`, `activity-detail`, `runtime-sessions`, `runtime-session-detail` |
 | Detections | `detections-summary`, `detections`, `detection-detail`, `detection-evaluations` |
 
-This is **26 named reads across seven Denali areas**, not the whole Denali
+This is **28 named reads across eight Denali areas**, not the whole Denali
 API. For scale, the current production OpenAPI has 68 public paths before
 this receiver. The browser retains all of those app-specific routes; MCP/CLI
 receives only this reviewed catalog.
+
+`connections` accepts `limit` (1–100, default 20) and `offset` (0–100000)
+and returns a stable ID-ordered page with `has_more`. `connection-detail`
+requires `?id=<UUID>`. Both read only the Denali-local connection's ID,
+provider, display name, lifecycle/health states, declared scopes, and
+created/updated/last-validated timestamps. They never query or return
+credential references, provider configuration, validation results, or setup
+state. This view does not grant connector creation, validation, collection,
+disable, or deletion through MCP/CLI.
 
 The asset-governance write operation is:
 
@@ -94,7 +104,7 @@ shared-GitHub connector. This is not full Denali API parity.
 
 | Surface | In this release | Still outside MCP/CLI |
 | --- | --- | --- |
-| Denali results | 26 bounded reads | Raw exports and unreviewed future API paths |
+| Denali results | 28 bounded reads | Raw exports and unreviewed future API paths |
 | Denali records | 3 audited writes: asset governance, response proposal, independent response review | Connection lifecycle, provider setup/callbacks, import, scan/collection controls, invitations and admin |
 | Customer AWS/GitHub resources | No mutation | All resource-changing actions and remediation |
 
