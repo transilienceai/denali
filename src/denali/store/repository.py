@@ -74,6 +74,10 @@ _RUNTIME_RESPONSE_TARGET_KINDS = {
 }
 
 
+class GatewayConnectionJobCooldown(Exception):
+    """A fresh gateway job is too soon after the previous completed action."""
+
+
 def _activity_session_key(batch: ActivityBatch, activity: Any) -> str | None:
     """Create a non-secret stable key scoped to one provider connection and session."""
 
@@ -2819,6 +2823,191 @@ class PostgresInventoryRepository:
         if active is None:
             raise RuntimeError("unable to create or find the connection validation job")
         return dict(active), False
+
+    def create_gateway_connection_job_idempotent(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        job_type: str,
+        collection_kind: str | None,
+        actor: str,
+        idempotency_key: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically audit and queue at most one job for a confirmed gateway action.
+
+        The returned boolean is true only when this call created a new job and
+        therefore owns its dispatch. Same-key retries return the immutable result.
+        """
+
+        if job_type not in {"validation", "collection"} or (
+            (job_type == "validation") != (collection_kind is None)
+        ):
+            raise ValueError("unsupported connection job action")
+        request_hash = hashlib.sha256(
+            json.dumps(
+                [actor, connection_id, job_type, collection_kind],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"denali-gateway-connection-key:{tenant_id}:{idempotency_key}",),
+                )
+                previous = connection.execute(
+                    """
+                    SELECT request_hash, result FROM gateway_connection_job_action
+                    WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                    """,
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if previous is not None:
+                    if previous["request_hash"] != request_hash:
+                        raise ValueError("idempotency key was already used for another action")
+                    return dict(previous["result"]), False
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (
+                        f"denali-gateway-connection-target:{tenant_id}:"
+                        f"{connection_id}:{job_type}:{collection_kind or ''}",
+                    ),
+                )
+                target = connection.execute(
+                    """
+                    SELECT lifecycle_state FROM provider_connection
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
+                    """,
+                    (tenant_id, connection_id),
+                ).fetchone()
+                if target is None or target["lifecycle_state"] != "active":
+                    raise ValueError("connection is no longer active")
+                recent_count = connection.execute(
+                    """
+                    SELECT count(*) AS total FROM gateway_connection_job_action
+                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                      AND job_type = %s AND collection_kind IS NOT DISTINCT FROM %s
+                      AND created_at > now() - interval '5 minutes'
+                    """,
+                    (tenant_id, connection_id, job_type, collection_kind),
+                ).fetchone()["total"]
+                if recent_count >= 10:
+                    raise GatewayConnectionJobCooldown()
+                table = (
+                    "connection_validation_job"
+                    if job_type == "validation"
+                    else "connection_collection_job"
+                )
+                kind_filter = "" if collection_kind is None else "AND collection_kind = %s"
+                job_params: tuple[Any, ...] = (
+                    (tenant_id, connection_id)
+                    if collection_kind is None
+                    else (tenant_id, connection_id, collection_kind)
+                )
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                        error_summary = CASE WHEN state = 'queued'
+                          THEN 'Job dispatch timed out.' ELSE 'Worker lease expired.' END
+                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                      {kind_filter}
+                      AND ((state = 'running' AND lease_expires_at < now())
+                        OR (state = 'queued' AND created_at < now() - interval '30 minutes'))
+                    """,
+                    job_params,
+                )
+                active = connection.execute(
+                    f"""
+                    SELECT id FROM {table}
+                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                      {kind_filter} AND state IN ('queued', 'running')
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    job_params,
+                ).fetchone()
+                created = False
+                if active is None:
+                    # A finished scan cannot be restarted with a fresh key in a
+                    # tight loop. Existing browser/scheduled jobs are unaffected.
+                    recent = connection.execute(
+                        """
+                        SELECT 1 FROM gateway_connection_job_action
+                        WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                          AND job_type = %s AND collection_kind IS NOT DISTINCT FROM %s
+                          AND created_at > now() - interval '5 minutes'
+                        LIMIT 1
+                        """,
+                        (tenant_id, connection_id, job_type, collection_kind),
+                    ).fetchone()
+                    if recent is not None:
+                        raise GatewayConnectionJobCooldown()
+                    if job_type == "validation":
+                        active = connection.execute(
+                            """
+                            INSERT INTO connection_validation_job
+                              (tenant_id, connection_id, wait_for_credentials, wait_for_healthy)
+                            VALUES (%s::uuid, %s::uuid, false, false)
+                            ON CONFLICT (tenant_id, connection_id)
+                              WHERE state IN ('queued', 'running') DO NOTHING
+                            RETURNING id
+                            """,
+                            (tenant_id, connection_id),
+                        ).fetchone()
+                    else:
+                        active = connection.execute(
+                            """
+                            INSERT INTO connection_collection_job
+                              (tenant_id, connection_id, collection_kind)
+                            VALUES (%s::uuid, %s::uuid, %s)
+                            ON CONFLICT (tenant_id, connection_id, collection_kind)
+                              WHERE state IN ('queued', 'running') DO NOTHING
+                            RETURNING id
+                            """,
+                            (tenant_id, connection_id, collection_kind),
+                        ).fetchone()
+                    created = active is not None
+                    if active is None:
+                        active = connection.execute(
+                            f"""
+                            SELECT id FROM {table}
+                            WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                              {kind_filter} AND state IN ('queued', 'running')
+                            ORDER BY created_at DESC LIMIT 1
+                            """,
+                            job_params,
+                        ).fetchone()
+                if active is None:
+                    raise RuntimeError("unable to create or find the connection job")
+                result: dict[str, Any] = {
+                    "status": "started" if created else "already_running",
+                    "connection_id": connection_id,
+                    "job_id": str(active["id"]),
+                    "job_type": job_type,
+                }
+                if collection_kind is not None:
+                    result["collection_kind"] = collection_kind
+                connection.execute(
+                    """
+                    INSERT INTO gateway_connection_job_action
+                      (tenant_id, idempotency_key, request_hash, actor_user_id,
+                       connection_id, job_type, collection_kind, job_id, result)
+                    VALUES (%s::uuid, %s, %s, %s, %s::uuid, %s, %s, %s::uuid, %s::jsonb)
+                    """,
+                    (
+                        tenant_id,
+                        idempotency_key,
+                        request_hash,
+                        actor,
+                        connection_id,
+                        job_type,
+                        collection_kind,
+                        str(active["id"]),
+                        json.dumps(result),
+                    ),
+                )
+                return result, created
 
     def claim_connection_validation_job(
         self, job_id: str, *, lease_seconds: int

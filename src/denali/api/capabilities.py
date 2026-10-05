@@ -16,6 +16,36 @@ from starlette.datastructures import QueryParams
 # coordinated with the gateway/CLI/MCP rollout.
 CAPABILITY_CONTRACT_VERSION = 1
 
+GATEWAY_COLLECTION_KINDS = frozenset(
+    {
+        "aws_deployments",
+        "aws_agent_runtime",
+        "azure_deployments",
+        "azure_agent_runtime",
+        "gcp_deployments",
+        "entra_ai",
+        "github_source",
+        "azure_repos_source",
+        "google_workspace_ai",
+    }
+)
+
+
+@dataclass(frozen=True)
+class JobWriteCapability:
+    method: str
+    path: str
+
+
+JOB_WRITE_CAPABILITIES: dict[str, JobWriteCapability] = {
+    "connection-validate": JobWriteCapability(
+        "POST", "/internal/v1/capabilities/connections/{connection_id}/validate"
+    ),
+    "connection-collect": JobWriteCapability(
+        "POST", "/internal/v1/capabilities/connections/{connection_id}/collect"
+    ),
+}
+
 
 @dataclass(frozen=True)
 class ReadCapability:

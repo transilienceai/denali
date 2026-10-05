@@ -16,6 +16,9 @@ update the pinned Platform adapter in a separate reviewed PR. Keep old names
 as aliases during migration; do not silently repurpose one. Platform's CI
 checks its pinned read registry against this product-owned source revision.
 
-The three current write operations remain separately gated by `denali:write`,
-organization-admin RBAC, and idempotency. This contract does not authorize
-customer AWS or GitHub remediation.
+The three record writes and two Denali-local connection job-start operations
+remain separately gated by `denali:write`, current organization-admin RBAC,
+explicit confirmation, and idempotency. Job starts use exact receiver paths and
+allowlisted provider-specific collection kinds; the Platform shared-AWS
+validation bridge is not included. This contract does not authorize customer
+AWS or GitHub remediation.

@@ -46,7 +46,7 @@ provider, display name, lifecycle/health states, declared scopes, and
 created/updated/last-validated timestamps. They never query or return
 credential references, provider configuration, validation results, or setup
 state. This view does not grant connector creation, validation, collection,
-disable, or deletion through MCP/CLI.
+disable, or deletion through MCP/CLI on its own.
 
 The asset-governance write operation is:
 
@@ -78,6 +78,27 @@ Both require the same distinct `denali:write` M2M purpose, current organization
 admin membership, and `Idempotency-Key` as governance. Migration 022 records their
 request hashes, actors, and outcomes atomically with the app-owned mutation.
 
+Two confirmed job-start controls are also available for **Denali-local**
+connections, not Platform-owned shared-connector validation:
+
+- `POST /internal/v1/capabilities/connections/{connection_id}/validate` with
+  `{ "confirm": true }`.
+- `POST /internal/v1/capabilities/connections/{connection_id}/collect` with
+  `{ "collection_kind": "<allowlisted kind>", "confirm": true }`.
+
+Both require the same live org-admin and `denali:write` checks, a UUID connection
+owned by the mapped tenant, an active/fully configured provider, and an
+`Idempotency-Key` (the public Platform adapters require UUID-v4). Collection
+kinds are explicitly matched to the connection's
+provider and selected scopes. A successful call returns a bounded 202 job receipt,
+not provider data. Migration 023 stores immutable action receipts and existing
+durable job tables track execution. Same-key retries return the same receipt;
+active jobs are deduplicated; a new key cannot restart a recently completed job
+within five minutes (429). Missing dispatch/storage fails closed. These actions
+only start existing read-only validation/collection work; they never mutate
+customer AWS/GitHub resources. Platform shared AWS validation is a separate
+cross-database operation and is not covered by these routes.
+
 Every request requires a short-lived Clerk M2M token from the configured gateway
 machine, scoped to the Denali receiver machine and bound to `org_id` and `user_id`.
 GET requires token purpose `results:read`; mutations (POST/PATCH) require
@@ -96,16 +117,16 @@ and missing assets 404. Clerk membership lookup failure returns 503, never acces
 The receiver does not expose health, account administration, invitations, provider
 callbacks, CloudFormation/setup artifacts, raw connection configuration, credential
 leases, runtime-session export, connection disable/delete, customer-cloud mutation,
-or arbitrary API forwarding. Existing Denali write APIs for vulnerability imports
-and validation/collection are **not yet** gateway capabilities; each needs its own
-authorization, audit, idempotency, and durable-work review. This change does not
+or arbitrary API forwarding. Existing Denali write APIs for vulnerability imports,
+connection lifecycle, provider setup/callbacks, and Platform shared-AWS validation
+are **not yet** gateway capabilities. This change does not
 alter the production shared-AWS pilot, legacy connectors, or the development-only
 shared-GitHub connector. This is not full Denali API parity.
 
 | Surface | In this release | Still outside MCP/CLI |
 | --- | --- | --- |
 | Denali results | 28 bounded reads | Raw exports and unreviewed future API paths |
-| Denali records | 3 audited writes: asset governance, response proposal, independent response review | Connection lifecycle, provider setup/callbacks, import, scan/collection controls, invitations and admin |
+| Denali records/jobs | 3 audited record writes plus typed Denali-local connection validation/collection job starts | Connection lifecycle, provider setup/callbacks, imports, Platform shared-AWS validation, invitations and admin |
 | Customer AWS/GitHub resources | No mutation | All resource-changing actions and remediation |
 
 Expand in that order: first review additional existing Denali-record mutations
@@ -117,7 +138,7 @@ Denali URLs or provider SDK calls through the gateway.
 ## Production enablement and release gate
 
 Review and merge this PR to `main`; never deploy its feature branch. The protected
-production workflow applies migrations 021 and 022 before deploying the receiver.
+production workflow applies migrations 021, 022, and 023 before deploying the receiver.
 It must pass Ruff, the full Python and PostgreSQL integration suites, Modal
 compilation, and the frontend build. The new internal routes remain disabled
 until the production Modal core Secret has these names configured:
