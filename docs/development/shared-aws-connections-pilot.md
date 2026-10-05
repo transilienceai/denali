@@ -1,6 +1,7 @@
-# Shared AWS connections: Denali development pilot
+# Shared AWS connections: Denali pilot and production rollout
 
-This is an **opt-in shared-service pilot**, not a replacement for Denali's AWS
+This began as an **opt-in shared-service pilot** and is the default path for **new AWS onboarding**
+only in an explicitly entitled production pilot org. It does not replace Denali's existing AWS
 role or scanning path. The shared registry identifies an AWS account by Clerk org,
 partition, and account ID. It marks Denali's own validated connection as
 `legacy_validated`; other apps see `requires_shared_setup` until a separate
@@ -115,16 +116,27 @@ entitle only the pilot org in Platform production. The production Platform
 receiver and Denali sender are separate Clerk machines in the production
 instance; never copy either development secret. Deploy the bridge through the
 reviewed Denali `main` workflow, initially with the origin and sender key
-unset. After smoke checks, add the production origin, sender key, and pilot
+unset (a preprovisioned sender key alone also keeps the bridge dark). After smoke checks, add the production origin, sender key, and pilot
 allowlist to Denali Modal, then redeploy the exact reviewed `main` SHA. Keep
 the public origin in the deployment-scoped configuration object, as in dev.
 
 This does **not** migrate or alter any existing Denali connection. Legacy AWS
-continues to use its existing role and external ID. Azure, Microsoft Entra,
+continues to use its existing role and external ID. For an allowlisted org with a
+healthy Platform bridge, **Add connection** points to the shared AWS form. A
+separate **Other providers or Denali-managed AWS** action opens the native form;
+choosing native AWS there is explicit and does not reuse the role across apps.
+The shared path currently covers only `aws.bedrock_agents` in one selected
+Region; use the explicit Denali-managed path for other AWS evidence planes.
+For a non-allowlisted org (404), or while the bridge is deliberately dark
+(503), the original native onboarding remains the default. Once the bridge is
+configured, upstream or network failure displays an error and offers retry;
+it does not silently create a second native AWS connection. The native AWS API
+route stays available for existing clients and explicit compatibility use.
+Azure, Microsoft Entra,
 Google Cloud (GCP), Google Workspace, GitHub, and Azure Repos continue to use
 their existing integrations. The Platform currently brokers shared AWS and
 GitHub only; this Denali pilot exposes shared AWS only. A Denali admin must
-explicitly choose **Use in Denali** for a validated Platform AWS connection,
+choose **Use in Denali** for a validated Platform AWS connection,
 which creates a new Denali connection record without replacing an existing
 record. Test the exact pilot org, a non-pilot org, legacy AWS validation and
 collection, and each other provider's connection listing before enabling the

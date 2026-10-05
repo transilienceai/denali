@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { api, type SharedAwsConnection, type SharedAwsValidation } from "./api";
+import { sharedAwsFailureState, type SharedAwsAvailability } from "./connectionOnboarding";
 
-export function SharedAwsPilot({ canWrite, onChanged }: { canWrite: boolean; onChanged: () => Promise<void> }) {
-  const [available, setAvailable] = useState(false);
+export function SharedAwsPilot({ canWrite, onChanged, onAvailabilityChange }: { canWrite: boolean; onChanged: () => Promise<void>; onAvailabilityChange: (availability: SharedAwsAvailability) => void }) {
+  const [availability, setAvailability] = useState<SharedAwsAvailability>("checking");
+  const [loadError, setLoadError] = useState("");
   const [items, setItems] = useState<SharedAwsConnection[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -17,11 +19,16 @@ export function SharedAwsPilot({ canWrite, onChanged }: { canWrite: boolean; onC
     try {
       const result = await api.sharedAwsConnections();
       setItems(result.items.filter((item) => item.connection_kind === "shared_aws"));
-      setAvailable(true);
-    } catch {
-      setAvailable(false);
+      setAvailability("enabled");
+      setLoadError("");
+      onAvailabilityChange("enabled");
+    } catch (cause) {
+      const state = sharedAwsFailureState(cause);
+      setAvailability(state);
+      setLoadError(cause instanceof Error ? cause.message : "Shared AWS connection service is unavailable");
+      onAvailabilityChange(state);
     }
-  }, []);
+  }, [onAvailabilityChange]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -116,18 +123,19 @@ export function SharedAwsPilot({ canWrite, onChanged }: { canWrite: boolean; onC
     });
   }
 
-  if (!available) return null;
-  return <section className="panel shared-aws-pilot" aria-label="Shared AWS pilot">
+  if (availability === "not_enabled" || availability === "checking") return null;
+  return <section id="shared-aws-onboarding" className="panel shared-aws-pilot" aria-label="Shared AWS onboarding">
     <div className="shared-aws-pilot-heading">
-      <div><span className="eyebrow">SHARED CONNECTION PILOT</span><h3>Shared AWS connection</h3><p>This opt-in path creates a reusable read-only platform role. Add a ready connection to Denali to validate and collect with scoped temporary access; existing Denali roles remain unchanged.</p></div>
+      <div><span className="eyebrow">REUSABLE AWS CONNECTION</span><h3>Shared AWS connection</h3><p>Connect AWS once for authorized Transilience apps. This pilot supports Denali Bedrock agent evidence in one selected Region; other AWS evidence still uses a Denali-managed connection. Existing Denali connections remain unchanged.</p></div>
       <button type="button" onClick={() => void refresh()}>Refresh</button>
     </div>
-    {canWrite && <form className="shared-aws-pilot-form" onSubmit={create}>
+    {availability === "error" && <p className="shared-aws-pilot-error" role="alert">Shared AWS onboarding is unavailable: {loadError}. No Denali-managed AWS connection was created. Retry here or ask an operator to check the Platform service.</p>}
+    {availability === "enabled" && canWrite && <form className="shared-aws-pilot-form" onSubmit={create}>
       <label>AWS account ID<input required inputMode="numeric" pattern="[0-9]{12}" maxLength={12} value={accountId} onChange={(event) => setAccountId(event.target.value)} placeholder="123456789012" /></label>
       <label>Selected Region<input required value={region} onChange={(event) => setRegion(event.target.value)} placeholder="us-east-1" /></label>
       <button className="primary-action" disabled={busy !== null}>Register shared AWS</button>
     </form>}
-    {items.length > 0 && <div className="shared-aws-pilot-detail">
+    {availability === "enabled" && items.length > 0 && <div className="shared-aws-pilot-detail">
       <label>Shared connection<select value={selected?.id ?? ""} onChange={(event) => { setSelectedId(event.target.value); setValidation(null); }}>
         {items.map((item) => <option key={item.id} value={item.id}>{item.external_account_id} · {item.availability}</option>)}
       </select></label>

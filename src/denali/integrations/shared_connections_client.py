@@ -62,9 +62,10 @@ class SharedConnectionsClient:
     def from_environment(cls) -> SharedConnectionsClient | None:
         origin = os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "")
         key = os.environ.get("DENALI_PLATFORM_MACHINE_SECRET_KEY", "")
-        if not origin and not key:
+        # Provisioning the sender secret alone must not activate the bridge.
+        if not origin:
             return None
-        if not origin or not key:
+        if not key:
             raise ValueError(
                 "shared connections origin and machine secret must be configured together"
             )

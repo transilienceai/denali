@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from denali.api.app import create_app
 from denali.api.auth import AuthContext, AuthenticationError
+from denali.integrations.shared_connections_client import SharedConnectionsError
 
 
 class FakeAuthenticator:
@@ -80,6 +81,22 @@ def test_shared_routes_are_hidden_from_non_pilot_orgs():
             headers={"Authorization": "Bearer beta-admin"},
         ).status_code == 404
     assert all(call[2] == "org_alpha" for call in shared.calls)
+
+
+def test_upstream_list_404_is_not_confused_with_non_pilot_fallback():
+    class MissingUpstreamList(FakeSharedClient):
+        def request(self, method, path, *, clerk_org_id, payload=None, expect_text=False):
+            raise SharedConnectionsError(404)
+
+    with make_client(MissingUpstreamList(allowed_org_ids={"org_alpha"})) as client:
+        pilot = client.get(
+            "/v1/shared/connections", headers={"Authorization": "Bearer alpha-admin"}
+        )
+        non_pilot = client.get(
+            "/v1/shared/connections", headers={"Authorization": "Bearer beta-admin"}
+        )
+    assert pilot.status_code == 502
+    assert non_pilot.status_code == 404
 
 
 def test_admin_creation_uses_server_resolved_clerk_org_not_client_input():

@@ -1626,8 +1626,14 @@ def create_app(
                 method, path, clerk_org_id=clerk_org_id, payload=payload, expect_text=expect_text
             )
         except SharedConnectionsError as error:
+            status_code = error.status_code
+            # A missing upstream list route is a broken configured bridge, not an
+            # invitation to silently fall back to Denali-managed AWS onboarding.
+            if path == "/v1/connections" and status_code == 404:
+                status_code = 502
             raise HTTPException(
-                status_code=error.status_code, detail="shared connections request failed"
+                status_code=status_code,
+                detail="shared connections request failed",
             ) from error
 
     @app.get("/v1/shared/connections")

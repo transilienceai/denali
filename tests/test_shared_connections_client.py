@@ -67,6 +67,17 @@ def test_environment_client_defaults_to_no_organizations(monkeypatch):
     assert error.value.status_code == 404
 
 
+def test_preprovisioned_machine_key_does_not_activate_a_dark_bridge(monkeypatch):
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "")
+    monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "test-machine-key")
+    assert shared_connections_client.SharedConnectionsClient.from_environment() is None
+
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
+    monkeypatch.delenv("DENALI_PLATFORM_MACHINE_SECRET_KEY")
+    with pytest.raises(ValueError, match="machine secret"):
+        shared_connections_client.SharedConnectionsClient.from_environment()
+
+
 def test_environment_allowlist_is_exact_and_rejects_invalid_ids(monkeypatch):
     monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "test-machine-key")

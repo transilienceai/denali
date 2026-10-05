@@ -104,6 +104,13 @@ export function configureApiTokenProvider(provider: TokenProvider) {
   tokenProvider = provider;
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = await tokenProvider();
   const response = await fetch(`${API_BASE}${path}`, {
@@ -118,9 +125,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
       const payload = await response.json() as { detail?: unknown };
-      if (typeof payload.detail === "string") throw new Error(payload.detail);
+      if (typeof payload.detail === "string") throw new ApiError(payload.detail, response.status);
     }
-    throw new Error(`Request failed (${response.status})`);
+    throw new ApiError(`Request failed (${response.status})`, response.status);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -131,7 +138,7 @@ async function requestBlob(path: string): Promise<Blob> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
-  if (!response.ok) throw new Error(`Request failed (${response.status})`);
+  if (!response.ok) throw new ApiError(`Request failed (${response.status})`, response.status);
   return response.blob();
 }
 

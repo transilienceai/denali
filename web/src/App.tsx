@@ -52,6 +52,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { SharedAwsPilot } from "./SharedAwsPilot";
+import { showNativeConnectionForm, type SharedAwsAvailability } from "./connectionOnboarding";
 import {
   completedRunningConnectionIds,
   markConnectionOperationRunning,
@@ -2887,6 +2888,8 @@ function ConnectionsPage({
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [sharedAwsAvailability, setSharedAwsAvailability] = useState<SharedAwsAvailability>("checking");
+  const [nativeRequested, setNativeRequested] = useState(false);
   const creating = busy === "create";
   const selected = connections.find((connection) => connection.id === selectedId) ?? connections[0];
 
@@ -3382,11 +3385,20 @@ function ConnectionsPage({
   return <div className="page-stack connections-page">
     <section className="page-intro connection-intro">
       <div><span className="eyebrow">SELF-SERVICE ONBOARDING</span><h2>Connect evidence sources without handing Denali customer credentials.</h2><p>AWS uses assume-role; Azure and Google Cloud use provider-native, keyless identities; Entra and Google Workspace use disclosed directory read bundles; GitHub and Azure Repos use short-lived tokens with exact repository boundaries. Every declared plane is validated separately.</p></div>
-      {canWrite && <button className="primary-action" onClick={() => onShowCreate(!showCreate)}><Plus /> Add connection</button>}
+      {canWrite && <div className="connection-intro-actions">
+        <button className="primary-action" disabled={sharedAwsAvailability === "checking" && provider === "aws"} onClick={() => {
+          if (provider === "aws" && (sharedAwsAvailability === "enabled" || sharedAwsAvailability === "error")) {
+            document.getElementById("shared-aws-onboarding")?.scrollIntoView({ behavior: "smooth", block: "start" });
+          } else {
+            onShowCreate(!showCreate);
+          }
+        }}><Plus /> {sharedAwsAvailability === "checking" && provider === "aws" ? "Checking connection service…" : "Add connection"}</button>
+        {(sharedAwsAvailability === "enabled" || sharedAwsAvailability === "error") && <button type="button" onClick={() => { setNativeRequested(true); onShowCreate(true); }}>Other providers or Denali-managed AWS</button>}
+      </div>}
     </section>
     {!canWrite && <section className="read-only-banner"><ShieldCheck /><div><strong>Read-only organization role</strong><span>An organization admin must create, validate, disable, or delete connections.</span></div></section>}
     <section className="connection-boundary"><ShieldCheck /><div><strong>Connection health is not a risk verdict.</strong><span>A healthy connection means the configured role and declared validation calls worked. It does not mean collection is complete, findings are absent, or the connected environment is safe.</span></div></section>
-    <SharedAwsPilot canWrite={canWrite} onChanged={onChanged} />
+    <SharedAwsPilot canWrite={canWrite} onChanged={onChanged} onAvailabilityChange={setSharedAwsAvailability} />
     {entraSetupReturn && <div className={`connection-consent-return ${entraSetupReturn.state}`}>
       {entraSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{entraSetupReturn.state === "succeeded" ? "Microsoft Entra admin consent recorded" : "Microsoft Entra admin consent was not completed"}</strong><small>{entraSetupReturn.state === "succeeded" ? "Denali verified the one-time callback, bound the exact customer tenant, discarded the setup state, and started read-only Microsoft Graph validation." : entraSetupReturn.detail ?? "Return to this connection and launch consent again. No tenant access was recorded."}</small></span>
@@ -3402,7 +3414,8 @@ function ConnectionsPage({
     {actionNotice && <div className="connection-notice" role="status" aria-live="polite"><CircleCheck aria-hidden="true" /><span>{actionNotice}</span></div>}
     {actionError && <div className="connection-error" role="alert"><CircleAlert aria-hidden="true" /><span>{actionError}</span></div>}
     {selected && <ConnectionOperationStatus connection={selected} busy={busy} />}
-    {canWrite && showCreate && <form className={`panel connection-create${creating ? " submitting" : ""}`} aria-busy={creating} onSubmit={(event) => void createConnection(event)}>
+    {canWrite && showNativeConnectionForm(provider, showCreate, sharedAwsAvailability, nativeRequested) && <form className={`panel connection-create${creating ? " submitting" : ""}`} aria-busy={creating} onSubmit={(event) => void createConnection(event)}>
+      {(sharedAwsAvailability === "enabled" || sharedAwsAvailability === "error") && provider === "aws" && <p className="connection-native-aws-notice">This creates a Denali-only AWS connection. It will not be reusable in other Transilience apps. Use the shared AWS form above for new cross-app connections.</p>}
       <fieldset className="connection-create-lock" disabled={creating}>
       <div className="connection-provider-picker"><button type="button" className={provider === "aws" ? "active" : ""} onClick={() => selectProvider("aws")}>Amazon Web Services</button><button type="button" className={provider === "azure" ? "active" : ""} onClick={() => selectProvider("azure")}>Microsoft Azure</button><button type="button" className={provider === "azure_repos" ? "active" : ""} onClick={() => selectProvider("azure_repos")}>Azure Repos</button><button type="button" className={provider === "entra" ? "active" : ""} onClick={() => selectProvider("entra")}>Microsoft Entra</button><button type="button" className={provider === "gcp" ? "active" : ""} onClick={() => selectProvider("gcp")}>Google Cloud</button><button type="button" className={provider === "google_workspace" ? "active" : ""} onClick={() => selectProvider("google_workspace")}>Google Workspace</button><button type="button" className={provider === "github" ? "active" : ""} onClick={() => selectProvider("github")}>GitHub</button></div>
       <div className="connection-create-head"><div><span>NEW CONNECTION</span><h3>{CONNECTION_PROVIDER_LABELS[provider]}</h3><p>{provider === "aws" ? "CloudFormation creates one read-only role with an external-ID trust condition. No access keys are created or stored." : provider === "azure" ? "Denali’s multi-tenant application receives Reader only on subscriptions you select in Azure Cloud Shell. No customer client secret is created or stored." : provider === "azure_repos" ? "Microsoft sign-in proves access to one Azure DevOps organization. Denali then uses its read-only service principal for exact repositories; no PAT or user token is stored." : provider === "entra" ? "A tenant administrator grants Denali application-only Microsoft Graph read permissions. Denali stores the tenant boundary, not access tokens or customer credentials." : provider === "gcp" ? "Denali creates a unique keyless service account for this connection. Google Cloud Shell grants it bounded read roles only on projects you select; no customer key or user token is stored." : provider === "google_workspace" ? "A Workspace super administrator authorizes Denali’s service account for one disclosed read-only audit scope. Denali stores the domain boundary and delegated admin identity, never a customer token or JSON key." : "Install Denali’s GitHub App on repositories you select. Denali uses short-lived, exact-repository installation tokens and never stores a personal access token or GitHub user token."}</p></div><span className="provider-mark">{provider === "aws" ? "AWS" : provider === "azure" ? "AZURE" : provider === "azure_repos" ? "AZURE REPOS" : provider === "entra" ? "ENTRA" : provider === "gcp" ? "GCP" : provider === "google_workspace" ? "WORKSPACE" : "GITHUB"}</span></div>
@@ -3431,7 +3444,7 @@ function ConnectionsPage({
       </fieldset>
       <fieldset className="connection-scope-picker" disabled={creating}><legend>{provider === "entra" ? "Required Entra evidence bundle" : provider === "google_workspace" ? "Required Workspace evidence bundle" : "Declared collection planes"}</legend>{connectionScopes(provider).map((scope) => <label key={scope.id}><input type="checkbox" checked={scopes.includes(scope.id)} disabled={provider === "entra" || provider === "google_workspace"} onChange={() => toggleScope(scope.id)} /><span><strong>{scope.label}</strong><small>{scope.detail}</small></span></label>)}</fieldset>
       {creating && <div className="connection-submit-status" id="connection-submit-status" role="status" aria-live="polite"><RefreshCw className="spin" aria-hidden="true" /><span><strong>Creating the {CONNECTION_PROVIDER_LABELS[provider]} onboarding plan…</strong><small>Your entries are locked while Denali creates the tenant-scoped connection.</small></span></div>}
-      <div className="connection-form-actions"><button type="button" disabled={creating} onClick={() => onShowCreate(false)}>Cancel</button><button className="primary-action" type="submit" aria-describedby={creating ? "connection-submit-status" : undefined} disabled={creating || busy !== null || scopes.length === 0}>{creating && <RefreshCw className="spin" aria-hidden="true" />}{creating ? "Creating onboarding plan…" : "Create onboarding plan"}</button></div>
+      <div className="connection-form-actions"><button type="button" disabled={creating} onClick={() => { setNativeRequested(false); onShowCreate(false); }}>Cancel</button><button className="primary-action" type="submit" aria-describedby={creating ? "connection-submit-status" : undefined} disabled={creating || busy !== null || scopes.length === 0}>{creating && <RefreshCw className="spin" aria-hidden="true" />}{creating ? "Creating onboarding plan…" : "Create onboarding plan"}</button></div>
     </form>}
     <div className="connections-layout">
       <section className="panel connection-list-panel">
