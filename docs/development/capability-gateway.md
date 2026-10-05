@@ -196,8 +196,9 @@ each action, recipient role, confirmation, and audit before becoming a human
 MCP capability. GitHub CI OIDC ingestion retains its verified workflow/run/repository
 trust boundary rather than accepting a human gateway identity. Operator-only
 CLI evaluation execution has no browser/API write route; its issue and detection
-evaluation histories are already named reads. Runtime collection settings are
-accepted during AWS/Azure connection creation, with no standalone update API.
+evaluation histories are already named reads. AWS/Azure connection creation
+uses `declared_scopes` to select allowed read planes; it does not accept arbitrary
+runtime collection settings. There is no standalone runtime-settings update API.
 
 ## Production enablement and release gate
 

@@ -30,7 +30,7 @@
     {
       "method": "GET",
       "path": "/v1/connection-setup-templates/aws/{connection_id}",
-      "handler": "connection_aws_template_summary",
+      "handler": "capability_aws_template",
       "browser_methods": [],
       "class": "connector_product",
       "disposition": "additive_sanitized_projection",
@@ -57,7 +57,7 @@
     {
       "method": "GET",
       "path": "/v1/shared/connection-setup-templates/aws/{connection_id}",
-      "handler": "shared_aws_template_summary",
+      "handler": "capability_shared_aws_template",
       "browser_methods": [],
       "class": "shared_pilot",
       "disposition": "additive_sanitized_projection",
@@ -963,9 +963,9 @@
       "disposition": "CLI evaluation execution; result histories exposed as detection-evaluations; no public write API"
     },
     {
-      "operation": "runtime_collection configuration",
+      "operation": "runtime collection plane selection",
       "class": "connector_product",
-      "disposition": "accepted during AWS/Azure connection create; no public update API"
+      "disposition": "declared_scopes selects allowed read planes during AWS/Azure connection creation; no standalone runtime-settings update API"
     },
     {
       "operation": "customer-cloud remediation",

@@ -402,11 +402,14 @@ def test_exhaustive_public_surface_map_covers_every_explicit_route_and_browser_m
             ):
                 route = ast.literal_eval(decorator.args[0])
                 if not route.startswith("/internal/"):
-                    actual.add((decorator.func.attr.upper(), route))
+                    actual.add((decorator.func.attr.upper(), route, node.name))
     rows = mapped["operations"]
     assert actual == {
-        (row["method"], row["path"]) for row in rows if row["handler"] != "FastAPI-generated"
+        (row["method"], row["path"], row["handler"])
+        for row in rows
+        if row["handler"] != "FastAPI-generated"
     }
+    assert len(actual) == mapped["explicit_public_operation_count"]
     assert len(rows) == mapped["public_operation_count"]
     assert all(row["disposition"] != "unclassified" for row in rows)
     assert all("browser_methods" in row for row in rows)
