@@ -2840,14 +2840,20 @@ class PostgresInventoryRepository:
     ) -> tuple[dict[str, Any], bool]:
         """Atomically audit and queue at most one job for a confirmed gateway action.
 
-        The returned boolean is true only when this call created a new job and
-        therefore owns its dispatch. Same-key retries return the immutable result.
+        The returned boolean requests dispatch for a queued job without a Modal
+        call ID, including recovery after an API crash. Duplicate deliveries are
+        safe under the durable worker claim. Receipts remain immutable.
         """
 
         if job_type not in {"validation", "collection"} or (
             (job_type == "validation") != (collection_kind is None)
         ):
             raise ValueError("unsupported connection job action")
+        table = (
+            "connection_validation_job"
+            if job_type == "validation"
+            else "connection_collection_job"
+        )
         request_hash = hashlib.sha256(
             json.dumps(
                 [actor, connection_id, job_type, collection_kind],
@@ -2870,7 +2876,21 @@ class PostgresInventoryRepository:
                 if previous is not None:
                     if previous["request_hash"] != request_hash:
                         raise ValueError("idempotency key was already used for another action")
-                    return dict(previous["result"]), False
+                    result = dict(previous["result"])
+                    job = connection.execute(
+                        f"""
+                        SELECT state, modal_call_id FROM {table}
+                        WHERE tenant_id = %s::uuid AND id = %s::uuid
+                        """,
+                        (tenant_id, result["job_id"]),
+                    ).fetchone()
+                    if job is None:
+                        raise ValueError("connection job is unavailable")
+                    if job["state"] == "failed":
+                        raise ValueError(
+                            "connection job failed; retry with a new key after cooldown"
+                        )
+                    return result, job["state"] == "queued" and not job["modal_call_id"]
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (
@@ -2898,11 +2918,6 @@ class PostgresInventoryRepository:
                 ).fetchone()["total"]
                 if recent_count >= 10:
                     raise GatewayConnectionJobCooldown()
-                table = (
-                    "connection_validation_job"
-                    if job_type == "validation"
-                    else "connection_collection_job"
-                )
                 kind_filter = "" if collection_kind is None else "AND collection_kind = %s"
                 job_params: tuple[Any, ...] = (
                     (tenant_id, connection_id)
@@ -2924,7 +2939,7 @@ class PostgresInventoryRepository:
                 )
                 active = connection.execute(
                     f"""
-                    SELECT id FROM {table}
+                    SELECT id, state, modal_call_id FROM {table}
                     WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
                       {kind_filter} AND state IN ('queued', 'running')
                     ORDER BY created_at DESC LIMIT 1
@@ -2955,7 +2970,7 @@ class PostgresInventoryRepository:
                             VALUES (%s::uuid, %s::uuid, false, false)
                             ON CONFLICT (tenant_id, connection_id)
                               WHERE state IN ('queued', 'running') DO NOTHING
-                            RETURNING id
+                            RETURNING id, state, modal_call_id
                             """,
                             (tenant_id, connection_id),
                         ).fetchone()
@@ -2967,7 +2982,7 @@ class PostgresInventoryRepository:
                             VALUES (%s::uuid, %s::uuid, %s)
                             ON CONFLICT (tenant_id, connection_id, collection_kind)
                               WHERE state IN ('queued', 'running') DO NOTHING
-                            RETURNING id
+                            RETURNING id, state, modal_call_id
                             """,
                             (tenant_id, connection_id, collection_kind),
                         ).fetchone()
@@ -2975,7 +2990,7 @@ class PostgresInventoryRepository:
                     if active is None:
                         active = connection.execute(
                             f"""
-                            SELECT id FROM {table}
+                            SELECT id, state, modal_call_id FROM {table}
                             WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
                               {kind_filter} AND state IN ('queued', 'running')
                             ORDER BY created_at DESC LIMIT 1
@@ -3011,7 +3026,7 @@ class PostgresInventoryRepository:
                         json.dumps(result),
                     ),
                 )
-                return result, created
+                return result, active["state"] == "queued" and not active["modal_call_id"]
 
     def claim_connection_validation_job(
         self, job_id: str, *, lease_seconds: int

@@ -3965,7 +3965,7 @@ def create_app(
         if reserve is None:
             raise HTTPException(status_code=503, detail="durable connection jobs unavailable")
         try:
-            result, created = reserve(
+            result, dispatch_needed = reserve(
                 current_tenant,
                 str(connection_id),
                 job_type=job_type,
@@ -3981,7 +3981,7 @@ def create_app(
             ) from error
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        if created:
+        if dispatch_needed:
             job_id = result["job_id"]
             try:
                 call_id = dispatcher(job_id)

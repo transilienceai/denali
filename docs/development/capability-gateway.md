@@ -89,7 +89,10 @@ kinds are explicitly matched to the connection's
 provider and selected scopes. A successful call returns a bounded 202 job receipt,
 not provider data. Migration 023 stores immutable action receipts and existing
 durable job tables track execution. Same-key retries return the same receipt;
-active jobs are deduplicated; a new key cannot restart a recently completed job
+if the API stopped before dispatch, replay dispatches that saved queued job.
+Duplicate worker delivery is safe under the existing database claim. A failed
+referenced job instead returns 409; a deliberate retry uses a new key after cooldown.
+Active jobs are deduplicated; a new key cannot restart a recently completed job
 within five minutes (429). Missing dispatch/storage fails closed. These actions
 only start existing read-only validation/collection work; they never mutate
 customer AWS/GitHub resources. Platform shared AWS validation is a separate
