@@ -8,14 +8,29 @@ from fastapi.testclient import TestClient
 
 from denali.api.app import create_app
 from denali.api.auth import AuthContext, AuthenticationError
-from denali.api.capabilities import CAPABILITY_CONTRACT_VERSION, READ_CAPABILITIES
+from denali.api.capabilities import (
+    CAPABILITY_CONTRACT_VERSION,
+    GATEWAY_COLLECTION_KINDS,
+    JOB_WRITE_CAPABILITIES,
+    READ_CAPABILITIES,
+)
+from denali.api.connection_capabilities import CONNECTION_READS
 from denali.api.gateway_auth import ClerkGatewayVerifier, ClerkMembershipChecker, GatewayPrincipal
 
 
 def test_product_owned_read_contract_is_versioned_and_allowlisted():
     assert CAPABILITY_CONTRACT_VERSION == 1
-    assert len(READ_CAPABILITIES) == 28
+    assert {
+        "connections",
+        "connection-detail",
+        "context",
+        "runtime-session-export",
+    } <= READ_CAPABILITIES.keys()
+    assert len(READ_CAPABILITIES) == 35
     assert all(spec.path.startswith("/v1/") for spec in READ_CAPABILITIES.values())
+    assert set(JOB_WRITE_CAPABILITIES) == {"connection-validate", "connection-collect"}
+    assert all(spec.method == "POST" for spec in JOB_WRITE_CAPABILITIES.values())
+    assert len(GATEWAY_COLLECTION_KINDS) == 9
 
 
 ASSET = "11111111-1111-4111-8111-111111111111"
@@ -245,14 +260,14 @@ def test_read_catalog_is_explicit_org_scoped_and_never_creates_tenant():
             ).status_code
             == 422
         )
-    assert len(READ_CAPABILITIES) == 28
+    assert len(READ_CAPABILITIES) == 35
     assert all(call[1] in {"tenant-alpha", "tenant-beta"} for call in repo.calls)
 
 
-@pytest.mark.parametrize("operation", sorted(READ_CAPABILITIES))
+@pytest.mark.parametrize("operation", sorted(set(READ_CAPABILITIES) - CONNECTION_READS))
 def test_every_named_read_resolves_to_an_existing_tenant_scoped_handler(operation):
     repo = Repository()
-    identifier = "a" * 64 if operation == "runtime-session-detail" else ASSET
+    identifier = "a" * 64 if READ_CAPABILITIES[operation].identifier == "session_key" else ASSET
     params = {"id": identifier} if READ_CAPABILITIES[operation].identifier else {}
     with TestClient(app(repo)) as client:
         response = client.get(
@@ -262,7 +277,11 @@ def test_every_named_read_resolves_to_an_existing_tenant_scoped_handler(operatio
         )
     assert response.status_code == 200, (operation, response.text)
     assert response.headers["cache-control"] == "no-store"
-    assert repo.calls and all(call[1] == "tenant-alpha" for call in repo.calls)
+    if operation == "context":
+        assert response.json()["tenant_id"] == "tenant-alpha"
+        assert response.json()["organization_id"] == "org_Alpha1"
+    else:
+        assert repo.calls and all(call[1] == "tenant-alpha" for call in repo.calls)
 
 
 @pytest.mark.parametrize(
@@ -323,6 +342,142 @@ def test_connection_capability_reads_are_bounded_tenant_scoped_and_non_mutating(
         ("get_connection_summary", "tenant-alpha", (ASSET,), {}),
         ("get_connection_summary", "tenant-beta", (ASSET,), {}),
     ]
+
+
+class JobRepository(Repository):
+    def __init__(self):
+        super().__init__()
+        self.job_actions = {}
+        self.targets = {
+            ("tenant-alpha", ASSET): {
+                "id": ASSET,
+                "provider": "aws",
+                "lifecycle_state": "active",
+                "configuration": {"account_id": "123456789012"},
+                "declared_scopes": ["aws.bedrock_agents"],
+            }
+        }
+
+    def get_connection_validation_target(self, tenant, connection_id):
+        return self.targets.get((tenant, connection_id))
+
+    def create_gateway_connection_job_idempotent(
+        self, tenant, connection_id, *, job_type, collection_kind, actor, idempotency_key
+    ):
+        key = (tenant, idempotency_key)
+        payload = (connection_id, job_type, collection_kind, actor)
+        previous = self.job_actions.get(key)
+        if previous is not None:
+            if previous[0] != payload:
+                raise ValueError("idempotency key was already used for another action")
+            return previous[1], False
+        result = {
+            "status": "started",
+            "connection_id": connection_id,
+            "job_id": "22222222-2222-4222-8222-222222222222",
+            "job_type": job_type,
+        }
+        if collection_kind:
+            result["collection_kind"] = collection_kind
+        self.job_actions[key] = (payload, result)
+        return result, True
+
+    def set_connection_validation_call_id(self, job_id, call_id):
+        self.calls.append(("validation_call", job_id, call_id))
+
+    def set_connection_collection_call_id(self, job_id, call_id):
+        self.calls.append(("collection_call", job_id, call_id))
+
+
+def job_app(repository, *, dispatch=True):
+    return create_app(
+        repository=repository,
+        auth_mode="clerk",
+        authenticator=SessionAuthenticator(),
+        results_gateway_verifier=Verifier(),
+        gateway_membership_checker=Memberships(),
+        validation_dispatcher=(lambda job_id: "call-validation") if dispatch else None,
+        collection_dispatcher=(lambda job_id: "call-collection") if dispatch else None,
+        migrate_on_start=False,
+    )
+
+
+def test_gateway_connection_job_writes_require_admin_purpose_confirmation_and_key():
+    repo = JobRepository()
+    url = f"/internal/v1/capabilities/connections/{ASSET}/validate"
+    good = {"Authorization": "Bearer admin-write", "Idempotency-Key": "validate-001"}
+    with TestClient(job_app(repo)) as client:
+        assert client.post(url, json={"confirm": True}, headers=good).status_code == 202
+        assert client.post(
+            url, json={"confirm": True}, headers={**good, "Authorization": "Bearer admin-read"}
+        ).status_code == 401
+        assert client.post(
+            url, json={"confirm": True}, headers={**good, "Authorization": "Bearer member-write"}
+        ).status_code == 403
+        assert client.post(
+            url, json={"confirm": True}, headers={"Authorization": "Bearer admin-write"}
+        ).status_code == 422
+        assert client.post(url, json={"confirm": False}, headers=good).status_code == 422
+        assert client.post(url, json={"confirm": 1}, headers=good).status_code == 422
+        assert client.post(
+            url, json={"confirm": True, "extra": "x"}, headers=good
+        ).status_code == 422
+        assert client.post(
+            url, json={"confirm": True}, headers={**good, "Authorization": "Bearer other-write"}
+        ).status_code == 404
+    assert len(repo.job_actions) == 1
+    assert [call[0] for call in repo.calls] == ["validation_call"]
+
+
+def test_gateway_connection_collection_is_typed_entitled_and_idempotent():
+    repo = JobRepository()
+    url = f"/internal/v1/capabilities/connections/{ASSET}/collect"
+    headers = {"Authorization": "Bearer admin-write", "Idempotency-Key": "collect-001"}
+    with TestClient(job_app(repo)) as client:
+        first = client.post(
+            url, json={"confirm": True, "collection_kind": "aws_deployments"}, headers=headers
+        )
+        retry = client.post(
+            url, json={"confirm": True, "collection_kind": "aws_deployments"}, headers=headers
+        )
+        wrong_kind = client.post(
+            url, json={"confirm": True, "collection_kind": "gcp_deployments"}, headers=headers
+        )
+        unknown_kind = client.post(
+            url, json={"confirm": True, "collection_kind": "anything"}, headers=headers
+        )
+        repo.targets[("tenant-alpha", ASSET)]["declared_scopes"].append(
+            "aws.agent_runtime_activity"
+        )
+        changed = client.post(
+            url, json={"confirm": True, "collection_kind": "aws_agent_runtime"}, headers=headers
+        )
+        assert first.status_code == retry.status_code == 202
+        assert first.json() == retry.json()
+        assert first.json()["job_type"] == "collection"
+        assert first.json()["collection_kind"] == "aws_deployments"
+        assert wrong_kind.status_code == unknown_kind.status_code == 422
+        assert changed.status_code == 409
+        repo.targets[("tenant-alpha", ASSET)]["declared_scopes"] = []
+        unentitled = client.post(
+            url,
+            json={"confirm": True, "collection_kind": "aws_deployments"},
+            headers={**headers, "Idempotency-Key": "collect-002"},
+        )
+        assert unentitled.status_code == 409
+    assert [call[0] for call in repo.calls] == ["collection_call"]
+
+
+def test_gateway_connection_jobs_fail_closed_without_durable_dispatcher():
+    repo = JobRepository()
+    with TestClient(job_app(repo, dispatch=False)) as client:
+        response = client.post(
+            f"/internal/v1/capabilities/connections/{ASSET}/validate",
+            json={"confirm": True},
+            headers={"Authorization": "Bearer admin-write", "Idempotency-Key": "validate-002"},
+        )
+    assert response.status_code == 503
+    assert not repo.job_actions
 
 
 def test_gateway_write_requires_distinct_purpose_current_admin_and_idempotency():
@@ -499,6 +654,11 @@ def test_clerk_machine_verifier_and_live_membership_are_bounded(monkeypatch):
         "mch_Gateway1", "org_Alpha1", "user_Admin1", "denali:write"
     )
     assert verifier.verify("token", purpose="results:read") is None
+    assert verifier.verify("token", purpose="denali:connections:destructive") is None
+    token.claims["purpose"] = "denali:connections:destructive"
+    assert verifier.verify("token", purpose="denali:connections:destructive") is not None
+    assert verifier.verify("token", purpose="denali:write") is None
+    token.claims["purpose"] = "denali:write"
     assert ClerkMembershipChecker("sk_test").role("org_Alpha1", "user_Admin1") == "admin"
     token.subject = "mch_Other1"
     assert verifier.verify("token", purpose="denali:write") is None

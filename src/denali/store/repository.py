@@ -74,6 +74,10 @@ _RUNTIME_RESPONSE_TARGET_KINDS = {
 }
 
 
+class GatewayConnectionJobCooldown(Exception):
+    """A fresh gateway job is too soon after the previous completed action."""
+
+
 def _activity_session_key(batch: ActivityBatch, activity: Any) -> str | None:
     """Create a non-secret stable key scoped to one provider connection and session."""
 
@@ -199,6 +203,80 @@ def _deployment_identity_from_attributes(
 class PostgresInventoryRepository:
     def __init__(self, dsn: str):
         self._dsn = dsn
+
+    def claim_gateway_connection_action(
+        self,
+        tenant_id: str,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+        actor: str,
+        action_kind: str,
+        connection_id: str | None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Reserve before side effects; crash/timeout never permits duplicate execution."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                inserted = connection.execute(
+                    """
+                    INSERT INTO gateway_connection_action
+                        (tenant_id, idempotency_key, request_hash, actor_user_id,
+                         action_kind, connection_id)
+                    VALUES (%s::uuid, %s, %s, %s, %s, %s::uuid)
+                    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                    RETURNING connection_id, state, status_code
+                    """,
+                    (tenant_id, idempotency_key, request_hash, actor, action_kind, connection_id),
+                ).fetchone()
+                if inserted is not None:
+                    return True, dict(inserted)
+                previous = connection.execute(
+                    """
+                    SELECT request_hash, actor_user_id, action_kind,
+                           connection_id, state, status_code
+                    FROM gateway_connection_action
+                    WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                    """,
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if previous is None or (
+                    previous["request_hash"] != request_hash
+                    or previous["actor_user_id"] != actor
+                    or previous["action_kind"] != action_kind
+                ):
+                    raise ValueError("idempotency key was already used for another action")
+                return False, dict(previous)
+
+    def finish_gateway_connection_action(
+        self,
+        tenant_id: str,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+        connection_id: str | None,
+        status_code: int,
+    ) -> None:
+        """Persist identifiers and outcome only; never the action input or response."""
+
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE gateway_connection_action
+                SET state = %s, status_code = %s,
+                    connection_id = COALESCE(%s::uuid, connection_id), completed_at = now()
+                WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                  AND request_hash = %s AND state = 'claimed'
+                """,
+                (
+                    "completed" if status_code < 400 else "failed",
+                    status_code,
+                    connection_id,
+                    tenant_id,
+                    idempotency_key,
+                    request_hash,
+                ),
+            )
 
     def resolve_tenant(self, clerk_organization_id: str) -> str:
         """Return the stable Denali UUID for an authenticated Clerk organization."""
@@ -927,13 +1005,9 @@ class PostgresInventoryRepository:
                 if snapshot.truncated:
                     sign_in_coverage = self._partial_if_complete(sign_in_coverage)
                     consent_coverage = self._partial_if_complete(consent_coverage)
-                    model_activity_coverage = self._partial_if_complete(
-                        model_activity_coverage
-                    )
+                    model_activity_coverage = self._partial_if_complete(model_activity_coverage)
                     aws_runtime_coverage = self._partial_if_complete(aws_runtime_coverage)
-                    aws_model_drift_coverage = self._partial_if_complete(
-                        aws_model_drift_coverage
-                    )
+                    aws_model_drift_coverage = self._partial_if_complete(aws_model_drift_coverage)
                     aws_tool_coverage = self._partial_if_complete(aws_tool_coverage)
                 evaluations = (
                     evaluate_repeated_failed_ai_signins(snapshot, coverage_state=sign_in_coverage),
@@ -1421,7 +1495,6 @@ class PostgresInventoryRepository:
             request_fields=[decision, review_note],
             apply=apply,
         )
-
 
     @staticmethod
     def _runtime_response_result(connection, row: dict[str, Any]) -> dict[str, Any]:
@@ -2771,6 +2844,15 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                target = connection.execute(
+                    """
+                    SELECT lifecycle_state FROM provider_connection
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
+                    """,
+                    (tenant_id, connection_id),
+                ).fetchone()
+                if target is None or target["lifecycle_state"] != "active":
+                    raise ValueError("connection is no longer active")
                 connection.execute(
                     """
                     UPDATE connection_validation_job
@@ -2819,6 +2901,204 @@ class PostgresInventoryRepository:
         if active is None:
             raise RuntimeError("unable to create or find the connection validation job")
         return dict(active), False
+
+    def create_gateway_connection_job_idempotent(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        job_type: str,
+        collection_kind: str | None,
+        actor: str,
+        idempotency_key: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically audit and queue at most one job for a confirmed gateway action.
+
+        The returned boolean requests dispatch for a queued job without a Modal
+        call ID, including recovery after an API crash. Duplicate deliveries are
+        safe under the durable worker claim. Receipts remain immutable.
+        """
+
+        if job_type not in {"validation", "collection"} or (
+            (job_type == "validation") != (collection_kind is None)
+        ):
+            raise ValueError("unsupported connection job action")
+        table = (
+            "connection_validation_job" if job_type == "validation" else "connection_collection_job"
+        )
+        request_hash = hashlib.sha256(
+            json.dumps(
+                [actor, connection_id, job_type, collection_kind],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"denali-gateway-connection-key:{tenant_id}:{idempotency_key}",),
+                )
+                previous = connection.execute(
+                    """
+                    SELECT request_hash, result FROM gateway_connection_job_action
+                    WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                    """,
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if previous is not None:
+                    if previous["request_hash"] != request_hash:
+                        raise ValueError("idempotency key was already used for another action")
+                    result = dict(previous["result"])
+                    job = connection.execute(
+                        f"""
+                        SELECT state, modal_call_id FROM {table}
+                        WHERE tenant_id = %s::uuid AND id = %s::uuid
+                        """,
+                        (tenant_id, result["job_id"]),
+                    ).fetchone()
+                    if job is None:
+                        raise ValueError("connection job is unavailable")
+                    if job["state"] == "failed":
+                        raise ValueError(
+                            "connection job failed; retry with a new key after cooldown"
+                        )
+                    return result, job["state"] == "queued" and not job["modal_call_id"]
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (
+                        f"denali-gateway-connection-target:{tenant_id}:"
+                        f"{connection_id}:{job_type}:{collection_kind or ''}",
+                    ),
+                )
+                target = connection.execute(
+                    """
+                    SELECT lifecycle_state FROM provider_connection
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
+                    """,
+                    (tenant_id, connection_id),
+                ).fetchone()
+                if target is None or target["lifecycle_state"] != "active":
+                    raise ValueError("connection is no longer active")
+                recent_count = connection.execute(
+                    """
+                    SELECT count(*) AS total FROM gateway_connection_job_action
+                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                      AND job_type = %s AND collection_kind IS NOT DISTINCT FROM %s
+                      AND created_at > now() - interval '5 minutes'
+                    """,
+                    (tenant_id, connection_id, job_type, collection_kind),
+                ).fetchone()["total"]
+                if recent_count >= 10:
+                    raise GatewayConnectionJobCooldown()
+                kind_filter = "" if collection_kind is None else "AND collection_kind = %s"
+                job_params: tuple[Any, ...] = (
+                    (tenant_id, connection_id)
+                    if collection_kind is None
+                    else (tenant_id, connection_id, collection_kind)
+                )
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                        error_summary = CASE WHEN state = 'queued'
+                          THEN 'Job dispatch timed out.' ELSE 'Worker lease expired.' END
+                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                      {kind_filter}
+                      AND ((state = 'running' AND lease_expires_at < now())
+                        OR (state = 'queued' AND created_at < now() - interval '30 minutes'))
+                    """,
+                    job_params,
+                )
+                active = connection.execute(
+                    f"""
+                    SELECT id, state, modal_call_id FROM {table}
+                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                      {kind_filter} AND state IN ('queued', 'running')
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    job_params,
+                ).fetchone()
+                created = False
+                if active is None:
+                    # A finished scan cannot be restarted with a fresh key in a
+                    # tight loop. Existing browser/scheduled jobs are unaffected.
+                    recent = connection.execute(
+                        """
+                        SELECT 1 FROM gateway_connection_job_action
+                        WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                          AND job_type = %s AND collection_kind IS NOT DISTINCT FROM %s
+                          AND created_at > now() - interval '5 minutes'
+                        LIMIT 1
+                        """,
+                        (tenant_id, connection_id, job_type, collection_kind),
+                    ).fetchone()
+                    if recent is not None:
+                        raise GatewayConnectionJobCooldown()
+                    if job_type == "validation":
+                        active = connection.execute(
+                            """
+                            INSERT INTO connection_validation_job
+                              (tenant_id, connection_id, wait_for_credentials, wait_for_healthy)
+                            VALUES (%s::uuid, %s::uuid, false, false)
+                            ON CONFLICT (tenant_id, connection_id)
+                              WHERE state IN ('queued', 'running') DO NOTHING
+                            RETURNING id, state, modal_call_id
+                            """,
+                            (tenant_id, connection_id),
+                        ).fetchone()
+                    else:
+                        active = connection.execute(
+                            """
+                            INSERT INTO connection_collection_job
+                              (tenant_id, connection_id, collection_kind)
+                            VALUES (%s::uuid, %s::uuid, %s)
+                            ON CONFLICT (tenant_id, connection_id, collection_kind)
+                              WHERE state IN ('queued', 'running') DO NOTHING
+                            RETURNING id, state, modal_call_id
+                            """,
+                            (tenant_id, connection_id, collection_kind),
+                        ).fetchone()
+                    created = active is not None
+                    if active is None:
+                        active = connection.execute(
+                            f"""
+                            SELECT id, state, modal_call_id FROM {table}
+                            WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                              {kind_filter} AND state IN ('queued', 'running')
+                            ORDER BY created_at DESC LIMIT 1
+                            """,
+                            job_params,
+                        ).fetchone()
+                if active is None:
+                    raise RuntimeError("unable to create or find the connection job")
+                result: dict[str, Any] = {
+                    "status": "started" if created else "already_running",
+                    "connection_id": connection_id,
+                    "job_id": str(active["id"]),
+                    "job_type": job_type,
+                }
+                if collection_kind is not None:
+                    result["collection_kind"] = collection_kind
+                connection.execute(
+                    """
+                    INSERT INTO gateway_connection_job_action
+                      (tenant_id, idempotency_key, request_hash, actor_user_id,
+                       connection_id, job_type, collection_kind, job_id, result)
+                    VALUES (%s::uuid, %s, %s, %s, %s::uuid, %s, %s, %s::uuid, %s::jsonb)
+                    """,
+                    (
+                        tenant_id,
+                        idempotency_key,
+                        request_hash,
+                        actor,
+                        connection_id,
+                        job_type,
+                        collection_kind,
+                        str(active["id"]),
+                        json.dumps(result),
+                    ),
+                )
+                return result, active["state"] == "queued" and not active["modal_call_id"]
 
     def claim_connection_validation_job(
         self, job_id: str, *, lease_seconds: int
@@ -2938,6 +3218,15 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                target = connection.execute(
+                    """
+                    SELECT lifecycle_state FROM provider_connection
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
+                    """,
+                    (tenant_id, connection_id),
+                ).fetchone()
+                if target is None or target["lifecycle_state"] != "active":
+                    raise ValueError("connection is no longer active")
                 connection.execute(
                     """
                     UPDATE connection_collection_job
@@ -3257,49 +3546,160 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
-                connection.execute(
-                    """
-                    UPDATE vulnerability_import_job
-                    SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
-                        error_summary = CASE
-                          WHEN state = 'queued' THEN 'Import dispatch timed out.'
-                          ELSE 'Import worker lease expired.'
-                        END
-                    WHERE tenant_id = %s::uuid AND target_asset_id = %s::uuid
-                      AND (
-                        (state = 'running' AND lease_expires_at < now())
-                        OR (state = 'queued' AND created_at < now() - interval '30 minutes')
-                      )
-                    """,
-                    (tenant_id, target_asset_id),
+                row = self._create_vulnerability_import_job(
+                    connection,
+                    tenant_id,
+                    job_id=job_id,
+                    target_asset_id=target_asset_id,
+                    syft_object_key=syft_object_key,
+                    grype_object_key=grype_object_key,
+                    authoritative=authoritative,
                 )
-                row = connection.execute(
-                    """
-                    INSERT INTO vulnerability_import_job
-                      (id, tenant_id, target_asset_id, authoritative,
-                       syft_object_key, grype_object_key)
-                    SELECT %s::uuid, %s::uuid, asset.id, %s, %s, %s
-                    FROM asset
-                    WHERE asset.tenant_id = %s::uuid AND asset.id = %s::uuid
-                      AND asset.kind = 'ai_workload' AND asset.lifecycle_state = 'active'
-                    ON CONFLICT (tenant_id, target_asset_id)
-                      WHERE state IN ('queued', 'running')
-                    DO NOTHING
-                    RETURNING id, state, created_at
-                    """,
-                    (
-                        job_id,
-                        tenant_id,
-                        authoritative,
-                        syft_object_key,
-                        grype_object_key,
-                        tenant_id,
-                        target_asset_id,
-                    ),
-                ).fetchone()
         if row is None:
             raise ValueError("target workload is unavailable or already has an active import")
         return dict(row)
+
+    @staticmethod
+    def _create_vulnerability_import_job(
+        connection: psycopg.Connection[Any],
+        tenant_id: str,
+        *,
+        job_id: str,
+        target_asset_id: str,
+        syft_object_key: str,
+        grype_object_key: str,
+        authoritative: bool,
+    ) -> dict[str, Any] | None:
+        connection.execute(
+            """
+            UPDATE vulnerability_import_job
+            SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                error_summary = CASE
+                  WHEN state = 'queued' THEN 'Import dispatch timed out.'
+                  ELSE 'Import worker lease expired.'
+                END
+            WHERE tenant_id = %s::uuid AND target_asset_id = %s::uuid
+              AND (
+                (state = 'running' AND lease_expires_at < now())
+                OR (state = 'queued' AND created_at < now() - interval '30 minutes')
+              )
+            """,
+            (tenant_id, target_asset_id),
+        )
+        return connection.execute(
+            """
+            INSERT INTO vulnerability_import_job
+              (id, tenant_id, target_asset_id, authoritative, syft_object_key, grype_object_key)
+            SELECT %s::uuid, %s::uuid, asset.id, %s, %s, %s
+            FROM asset
+            WHERE asset.tenant_id = %s::uuid AND asset.id = %s::uuid
+              AND asset.kind = 'ai_workload' AND asset.lifecycle_state = 'active'
+            ON CONFLICT (tenant_id, target_asset_id)
+              WHERE state IN ('staging', 'queued', 'running')
+            DO NOTHING
+            RETURNING id, state, created_at, modal_call_id
+            """,
+            (
+                job_id,
+                tenant_id,
+                authoritative,
+                syft_object_key,
+                grype_object_key,
+                tenant_id,
+                target_asset_id,
+            ),
+        ).fetchone()
+
+    @staticmethod
+    def _gateway_vulnerability_import_action(
+        connection: psycopg.Connection[Any],
+        tenant_id: str,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> dict[str, Any] | None:
+        row = connection.execute(
+            """
+            SELECT action.request_hash, job.id, job.state, job.modal_call_id
+            FROM gateway_vulnerability_import_action action
+            JOIN vulnerability_import_job job
+              ON job.tenant_id = action.tenant_id AND job.id = action.job_id
+            WHERE action.tenant_id = %s::uuid AND action.idempotency_key = %s
+            """,
+            (tenant_id, idempotency_key),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["request_hash"] != request_hash:
+            raise ValueError("idempotency key was already used for another action")
+        return {name: row[name] for name in ("id", "state", "modal_call_id")}
+
+    def gateway_vulnerability_import_action(
+        self,
+        tenant_id: str,
+        *,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> dict[str, Any] | None:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            return self._gateway_vulnerability_import_action(
+                connection,
+                tenant_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+            )
+
+    def create_vulnerability_import_job_idempotent(
+        self,
+        tenant_id: str,
+        *,
+        job_id: str,
+        target_asset_id: str,
+        syft_object_key: str,
+        grype_object_key: str,
+        authoritative: bool,
+        actor: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Commit the native durable job and gateway audit in one transaction."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"denali-gateway-import:{tenant_id}:{idempotency_key}",),
+                )
+                previous = self._gateway_vulnerability_import_action(
+                    connection,
+                    tenant_id,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                )
+                if previous is not None:
+                    return previous, False
+                job = self._create_vulnerability_import_job(
+                    connection,
+                    tenant_id,
+                    job_id=job_id,
+                    target_asset_id=target_asset_id,
+                    syft_object_key=syft_object_key,
+                    grype_object_key=grype_object_key,
+                    authoritative=authoritative,
+                )
+                if job is None:
+                    raise ValueError(
+                        "target workload is unavailable or already has an active import"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO gateway_vulnerability_import_action
+                      (tenant_id, idempotency_key, request_hash, actor_user_id, job_id)
+                    VALUES (%s::uuid, %s, %s, %s, %s::uuid)
+                    """,
+                    (tenant_id, idempotency_key, request_hash, actor, job_id),
+                )
+                return dict(job), True
 
     def github_ci_repository_context(
         self,
@@ -4590,17 +4990,46 @@ class PostgresInventoryRepository:
         return None if row is None else self.get_connection(tenant_id, connection_id)
 
     def disable_connection(self, tenant_id: str, connection_id: str) -> dict[str, Any] | None:
+        """Serialize disable with every durable queue using the connection row lock."""
+
         with psycopg.connect(self._dsn) as connection:
-            row = connection.execute(
-                """
-                UPDATE provider_connection
-                SET lifecycle_state = 'disabled', health_state = 'disabled', updated_at = now()
-                WHERE tenant_id = %s::uuid AND id = %s::uuid
-                RETURNING id
-                """,
-                (tenant_id, connection_id),
-            ).fetchone()
-        return None if row is None else self.get_connection(tenant_id, connection_id)
+            with connection.transaction():
+                target = connection.execute(
+                    """
+                    SELECT id FROM provider_connection
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
+                    """,
+                    (tenant_id, connection_id),
+                ).fetchone()
+                if target is None:
+                    return None
+                # A separate statement after acquiring the lock sees a queue
+                # transaction that committed while disable waited for its lock.
+                busy = connection.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM connection_validation_job
+                        WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                          AND state IN ('queued', 'running')
+                    ) OR EXISTS (
+                        SELECT 1 FROM connection_collection_job
+                        WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                          AND state IN ('queued', 'running')
+                    )
+                    """,
+                    (tenant_id, connection_id, tenant_id, connection_id),
+                ).fetchone()
+                if busy is not None and busy[0]:
+                    return None
+                connection.execute(
+                    """
+                    UPDATE provider_connection
+                    SET lifecycle_state = 'disabled', health_state = 'disabled', updated_at = now()
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid
+                    """,
+                    (tenant_id, connection_id),
+                )
+        return self.get_connection(tenant_id, connection_id)
 
     def delete_connection(self, tenant_id: str, connection_id: str) -> str:
         """Delete only disabled configuration; collected evidence remains untouched."""
@@ -4929,7 +5358,6 @@ class PostgresInventoryRepository:
                     ),
                 )
                 return result
-
 
     @staticmethod
     def _detection_coverage_state(

@@ -7,6 +7,12 @@ from pathlib import Path
 
 import modal
 
+from denali.worker_limits import (
+    COLLECTION_WORKER_TIMEOUT_SECONDS,
+    VALIDATION_WORKER_TIMEOUT_SECONDS,
+    VULNERABILITY_IMPORT_WORKER_TIMEOUT_SECONDS,
+)
+
 APP_NAME = os.environ.get("DENALI_MODAL_APP_NAME", "denali-production")
 SECRET_NAME = os.environ.get("DENALI_MODAL_SECRET_NAME", "denali-production")
 PROVIDER_SECRET_NAME = os.environ.get(
@@ -122,7 +128,7 @@ def _validators():
 @app.function(
     image=image,
     secrets=runtime_secrets,
-    timeout=2400,
+    timeout=VALIDATION_WORKER_TIMEOUT_SECONDS,
     retries=0,
     **_region_options(),
 )
@@ -213,7 +219,7 @@ def _queue_primary_collection(tenant_id: str, connection_id: str, provider: str)
 @app.function(
     image=image,
     secrets=runtime_secrets,
-    timeout=2400,
+    timeout=COLLECTION_WORKER_TIMEOUT_SECONDS,
     retries=0,
     **_region_options(),
 )
@@ -352,7 +358,7 @@ def schedule_azure_agent_runtime_collection() -> dict[str, int]:
 @app.function(
     image=image,
     secrets=runtime_secrets,
-    timeout=1200,
+    timeout=VULNERABILITY_IMPORT_WORKER_TIMEOUT_SECONDS,
     retries=0,
     **_region_options(),
 )

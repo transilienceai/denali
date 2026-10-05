@@ -23,9 +23,11 @@ from uuid import UUID, uuid4
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi import Path as ApiPath
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from denali.api.auth import (
@@ -35,13 +37,14 @@ from denali.api.auth import (
     ClerkAuthenticator,
     RequestAuthenticator,
 )
-from denali.api.capabilities import read_route
+from denali.api.capabilities import GATEWAY_COLLECTION_KINDS, read_route
 from denali.api.clerk_admin import (
     ClerkAdminError,
     ClerkBackendOrganizationAdmin,
     ClerkOrganizationAdmin,
 )
-from denali.api.collection import run_durable_collection_job
+from denali.api.collection import COLLECTION_KINDS_BY_PROVIDER, run_durable_collection_job
+from denali.api.connection_capabilities import connection_summary, setup_summary, shared_summary
 from denali.api.evidence_import import (
     MAX_REPORT_BYTES,
     EvidenceReportStore,
@@ -69,11 +72,13 @@ from denali.connections import (
     AWS_SCOPE_BEDROCK_AGENTS,
     AWS_SCOPES,
     AZURE_CLOUD_PUBLIC,
+    AZURE_REPOS_SCOPE_CONTENTS,
     AZURE_REPOS_SCOPES,
     AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY,
     AZURE_SCOPES,
     ENTRA_SCOPES,
     GCP_SCOPES,
+    GITHUB_SCOPE_REPOSITORY_CONTENTS,
     GITHUB_SCOPES,
     GOOGLE_WORKSPACE_SCOPES,
     AwsCloudFormationLauncher,
@@ -122,11 +127,13 @@ from denali.integrations.shared_connections_client import (
     SharedConnectionsError,
 )
 from denali.store.db import migrate
-from denali.store.repository import PostgresInventoryRepository
+from denali.store.repository import GatewayConnectionJobCooldown, PostgresInventoryRepository
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_LOCAL_TENANT = "00000000-0000-4000-8000-000000000001"
+MAX_GATEWAY_IMPORT_BYTES = 2 * 1024 * 1024
+MAX_GATEWAY_EXPORT_BYTES = 2 * 1024 * 1024
 
 
 class InventoryReader(Protocol):
@@ -183,6 +190,17 @@ class InventoryReader(Protocol):
         *,
         wait_for_credentials: bool,
         wait_for_healthy: bool,
+    ) -> tuple[dict[str, Any], bool]: ...
+
+    def create_gateway_connection_job_idempotent(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        job_type: str,
+        collection_kind: str | None,
+        actor: str,
+        idempotency_key: str,
     ) -> tuple[dict[str, Any], bool]: ...
 
     def connection_validation_job_state(self, tenant_id: str, connection_id: str) -> str: ...
@@ -547,6 +565,36 @@ class GovernanceUpdate(BaseModel):
     notes: str | None = Field(default=None, max_length=4000)
 
 
+GatewayCollectionKind = Literal[
+    "aws_deployments",
+    "aws_agent_runtime",
+    "azure_deployments",
+    "azure_agent_runtime",
+    "gcp_deployments",
+    "entra_ai",
+    "github_source",
+    "azure_repos_source",
+    "google_workspace_ai",
+]
+
+
+class GatewayValidateJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: Literal[True]
+
+    @field_validator("confirm", mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value: Any) -> Any:
+        if value is not True:
+            raise ValueError("confirm must be true")
+        return value
+
+
+class GatewayCollectJob(GatewayValidateJob):
+    collection_kind: GatewayCollectionKind
+
+
 class RuntimeResponseCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -581,6 +629,19 @@ class VulnerabilityImportCreate(BaseModel):
     syft_report: dict[str, Any]
     grype_report: dict[str, Any]
     authoritative: bool = True
+
+
+class GatewayVulnerabilityImportCreate(VulnerabilityImportCreate):
+    authoritative: StrictBool = True
+    expected_org_id: str = Field(pattern=r"^org_[A-Za-z0-9]+$", max_length=128)
+    confirmed: Literal[True]
+
+    @field_validator("confirmed", mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value: Any) -> Any:
+        if value is not True:
+            raise ValueError("confirmed must be true")
+        return value
 
 
 class EvidenceReportDeclaration(BaseModel):
@@ -770,6 +831,96 @@ ConnectionCreate = Annotated[
     | AzureReposConnectionCreate
     | GoogleWorkspaceConnectionCreate,
     Field(discriminator="provider"),
+]
+
+
+class GatewayConnectionGuard(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_org_id: str = Field(min_length=5, max_length=128, pattern=r"^org_[A-Za-z0-9]+$")
+    confirmed: Literal[True]
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value):
+        if not isinstance(value, dict) or value.get("confirmed") is not True:
+            raise ValueError("explicit confirmation is required")
+        return value
+
+
+class GatewayConnectionCreate(GatewayConnectionGuard):
+    action: Literal["create"]
+    connection: ConnectionCreate
+
+
+class GatewayConnectionSetupLaunch(GatewayConnectionGuard):
+    action: Literal["setup-launch"]
+    connection_id: UUID
+    provider: Literal["aws", "azure", "entra", "gcp", "github", "azure_repos"]
+
+
+class GatewayConnectionSetupComplete(GatewayConnectionGuard):
+    action: Literal["setup-complete"]
+    connection_id: UUID
+    provider: Literal["azure", "gcp", "google_workspace", "azure_repos"]
+    completion_code: str | None = Field(default=None, min_length=16, max_length=32768)
+    repository_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def require_provider_completion(self):
+        if self.provider in {"azure", "gcp"}:
+            if self.completion_code is None or self.repository_ids is not None:
+                raise ValueError("this provider requires only a completion_code")
+        elif self.provider == "azure_repos":
+            if self.repository_ids is None or self.completion_code is not None:
+                raise ValueError("Azure Repos requires only repository_ids")
+        elif self.completion_code is not None or self.repository_ids is not None:
+            raise ValueError("Workspace completion accepts no provider payload")
+        return self
+
+
+class GatewayConnectionDisable(GatewayConnectionGuard):
+    action: Literal["disable", "delete"]
+    connection_id: UUID
+    confirmation_name: str = Field(min_length=1, max_length=120)
+
+
+class GatewaySharedConnectionCreate(GatewayConnectionGuard):
+    action: Literal["shared-create"]
+    connection: SharedAwsConnectionCreate
+
+
+class GatewaySharedConnectionAttach(GatewayConnectionGuard):
+    action: Literal["shared-attach"]
+    connection_id: UUID
+    region: str = Field(min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+    declared_scopes: list[str] = Field(min_length=1, max_length=len(AWS_SCOPES))
+
+
+class GatewaySharedConnectionControl(GatewayConnectionGuard):
+    action: Literal["shared-disable", "shared-validate", "shared-probe"]
+    connection_id: UUID
+    confirmation_account_id: str = Field(pattern=r"^[0-9]{12}$")
+    region: str | None = Field(
+        default=None, min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$"
+    )
+
+    @model_validator(mode="after")
+    def require_probe_region(self):
+        if (self.action == "shared-probe") != (self.region is not None):
+            raise ValueError("only shared-probe requires a region")
+        return self
+
+
+GatewayConnectionAction = Annotated[
+    GatewayConnectionCreate
+    | GatewayConnectionSetupLaunch
+    | GatewayConnectionSetupComplete
+    | GatewayConnectionDisable
+    | GatewaySharedConnectionCreate
+    | GatewaySharedConnectionAttach
+    | GatewaySharedConnectionControl,
+    Field(discriminator="action"),
 ]
 
 
@@ -1013,6 +1164,18 @@ def create_app(
         allow_headers=["Authorization", "Content-Type"],
     )
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_without_capability_material(
+        request: Request, error: RequestValidationError
+    ):
+        if request.url.path == "/internal/v1/capabilities/connections/actions":
+            return JSONResponse(status_code=422, content={"detail": "invalid connection action"})
+        if request.url.path == "/internal/v1/capabilities/vulnerabilities/imports":
+            # FastAPI's default errors include the rejected input. Reports and
+            # accidental credentials must never be reflected into tool results.
+            return JSONResponse(status_code=422, content={"detail": "invalid evidence import"})
+        return await request_validation_exception_handler(request, error)
+
     @app.middleware("http")
     async def authenticate_request_context(request: Request, call_next: Callable[..., Any]):
         original_path = request.scope["path"]
@@ -1026,6 +1189,13 @@ def create_app(
         )
         capability_write = (
             (
+                request.method == "POST"
+                and original_path in {
+                    "/internal/v1/capabilities/vulnerabilities/imports",
+                    "/internal/v1/capabilities/connections/actions",
+                }
+            )
+            or (
                 request.method == "PATCH"
                 and re.fullmatch(
                     r"/internal/v1/capabilities/assets/[^/]{1,128}/governance",
@@ -1049,6 +1219,14 @@ def create_app(
                 )
                 is not None
             )
+            or (
+                request.method == "POST"
+                and re.fullmatch(
+                    r"/internal/v1/capabilities/connections/[^/]{1,128}/(?:validate|collect)",
+                    original_path,
+                )
+                is not None
+            )
         )
         if original_path.startswith("/internal/v1/") and not (
             legacy_read or capability_read or capability_write
@@ -1061,6 +1239,29 @@ def create_app(
             authorization = request.headers.get("authorization", "")
             token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
             purpose = "denali:write" if capability_write else "results:read"
+            if original_path == "/internal/v1/capabilities/connections/actions":
+                # The action discriminant selects a required purpose, not authority.
+                # The machine verifier still authenticates that exact purpose below.
+                body = bytearray()
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > 65536:
+                        return JSONResponse(
+                            status_code=413, content={"detail": "action is too large"}
+                        )
+                    body.extend(chunk)
+                request._body = bytes(body)
+                try:
+                    action_fields = json.loads(body)
+                except (ValueError, UnicodeDecodeError):
+                    return JSONResponse(
+                        status_code=422, content={"detail": "invalid connection action"}
+                    )
+                if not isinstance(action_fields, dict):
+                    return JSONResponse(
+                        status_code=422, content={"detail": "invalid connection action"}
+                    )
+                if action_fields.get("action") in {"disable", "delete", "shared-disable"}:
+                    purpose = "denali:connections:destructive"
             principal = await run_in_threadpool(verifier.verify, token, purpose=purpose)
             if principal is None:
                 return JSONResponse(
@@ -1096,6 +1297,20 @@ def create_app(
                 principal.user_id, principal.organization_id, role
             )
             request.state.denali_tenant_id = tenant_id
+            if original_path == "/internal/v1/capabilities/vulnerabilities/imports":
+                if request.query_params:
+                    return JSONResponse(
+                        status_code=422, content={"detail": "unsupported query parameter"}
+                    )
+                body = bytearray()
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > MAX_GATEWAY_IMPORT_BYTES:
+                        return JSONResponse(
+                            status_code=413,
+                            content={"detail": "evidence import exceeds gateway limit"},
+                        )
+                    body.extend(chunk)
+                request._body = bytes(body)
             if capability_read:
                 operation = original_path.removeprefix("/internal/v1/capabilities/")
                 try:
@@ -1107,6 +1322,7 @@ def create_app(
                 request.scope["path"] = path
                 request.scope["raw_path"] = path.encode()
                 request.scope["query_string"] = query
+                request.state.denali_capability = operation
             response = await call_next(request)
             response.headers["Cache-Control"] = "no-store"
             return response
@@ -1185,12 +1401,17 @@ def create_app(
 
         create_job = getattr(repo, "create_connection_validation_job", None)
         if create_job is not None:
-            job, created = create_job(
-                current_tenant,
-                connection_id,
-                wait_for_credentials=wait_for_credentials,
-                wait_for_healthy=wait_for_healthy,
-            )
+            try:
+                job, created = create_job(
+                    current_tenant,
+                    connection_id,
+                    wait_for_credentials=wait_for_credentials,
+                    wait_for_healthy=wait_for_healthy,
+                )
+            except ValueError:
+                raise HTTPException(
+                    status_code=409, detail="connection is no longer active"
+                ) from None
             if not created:
                 return {"status": "already_running", "connection_id": connection_id}
             job_id = str(job["id"])
@@ -1266,11 +1487,14 @@ def create_app(
         create_job = getattr(repo, "create_connection_collection_job", None)
         if create_job is None:
             return None
-        job, created = create_job(
-            current_tenant,
-            connection_id,
-            collection_kind=collection_kind,
-        )
+        try:
+            job, created = create_job(
+                current_tenant,
+                connection_id,
+                collection_kind=collection_kind,
+            )
+        except ValueError:
+            raise HTTPException(status_code=409, detail="connection is no longer active") from None
         if not created:
             return {"status": "already_running", "connection_id": connection_id}
         job_id = str(job["id"])
@@ -1953,8 +2177,7 @@ def create_app(
             existing = repo.get_connection(current_tenant, str(connection_id))
             if (
                 existing is not None
-                and existing.get("credential_reference", {}).get("type")
-                == "platform_shared_aws"
+                and existing.get("credential_reference", {}).get("type") == "platform_shared_aws"
                 and existing.get("lifecycle_state") == "active"
                 and existing.get("configuration", {}).get("regions") == [payload.region]
                 and set(existing.get("declared_scopes") or []) == set(scopes)
@@ -1972,6 +2195,7 @@ def create_app(
     @app.post("/v1/connections", status_code=201)
     def create_connection(request: Request, connection: ConnectionCreate) -> dict[str, Any]:
         repo, current_tenant = _context(request)
+        connection_id = str(getattr(request.state, "gateway_connection_id", None) or uuid4())
         display_name = connection.display_name.strip()
         if not display_name:
             raise HTTPException(status_code=422, detail="display_name must not be blank")
@@ -1992,7 +2216,6 @@ def create_app(
                     status_code=422,
                     detail=f"unsupported Azure scope: {', '.join(unsupported_scopes)}",
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2039,7 +2262,6 @@ def create_app(
                         "AI application evidence bundle"
                     ),
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2086,7 +2308,6 @@ def create_app(
                         "read-only audit bundle"
                     ),
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2135,7 +2356,6 @@ def create_app(
                     status_code=422,
                     detail=f"unsupported Google Cloud scope: {', '.join(unsupported_scopes)}",
                 )
-            connection_id = str(uuid4())
             try:
                 principal = provisioner.create_principal(
                     connection_id=connection_id,
@@ -2185,7 +2405,6 @@ def create_app(
                     status_code=422,
                     detail=f"unsupported GitHub scope: {', '.join(unsupported_scopes)}",
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2228,7 +2447,6 @@ def create_app(
                     status_code=422,
                     detail=f"unsupported Azure Repos scope: {', '.join(unsupported_scopes)}",
                 )
-            connection_id = str(uuid4())
             try:
                 created = repo.create_connection(
                     current_tenant,
@@ -2282,7 +2500,6 @@ def create_app(
                 status_code=422,
                 detail=f"unsupported AWS scope: {', '.join(unsupported_scopes)}",
             )
-        connection_id = str(uuid4())
         external_id = f"denali-{current_tenant}-{connection_id}"
         role_arn = (
             f"arn:{connection.partition}:iam::{connection.account_id}:role/{connection.role_name}"
@@ -3550,6 +3767,305 @@ def create_app(
             raise HTTPException(status_code=404, detail="connection not found")
         return Response(status_code=204)
 
+    @app.get("/v1/connection-setup-summaries/{connection_id}")
+    def connection_setup_summary(request: Request, connection_id: UUID) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        # Existing public serialization removes internal setup state and PKCE.
+        row = repo.get_connection(current_tenant, str(connection_id))
+        if row is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        return setup_summary(row)
+
+    def bounded_setup_template(template: PlainTextResponse) -> dict[str, Any]:
+        if len(template.body) > 131072:
+            raise HTTPException(
+                status_code=502, detail="setup template exceeds the capability limit"
+            )
+        return {"media_type": "application/yaml", "template": template.body.decode()}
+
+    @app.get("/v1/connection-setup-templates/aws/{connection_id}")
+    def capability_aws_template(request: Request, connection_id: UUID) -> dict[str, Any]:
+        return bounded_setup_template(aws_connection_cloudformation(request, connection_id))
+
+    def shared_aws_boundary(request: Request, connection_id: UUID) -> dict[str, Any]:
+        listing = _shared_request(request, "GET", "/v1/connections")
+        if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
+            raise HTTPException(status_code=502, detail="invalid shared connection list")
+        shared = next(
+            (
+                item
+                for item in listing["items"]
+                if isinstance(item, dict)
+                and item.get("id") == str(connection_id)
+                and item.get("connection_kind") == "shared_aws"
+            ),
+            None,
+        )
+        if shared is None:
+            raise HTTPException(status_code=404, detail="shared AWS connection not found")
+        return shared
+
+    @app.get("/v1/shared/connection-summaries")
+    def shared_connection_summaries(
+        request: Request,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=100000),
+    ) -> dict[str, Any]:
+        listing = _shared_request(request, "GET", "/v1/connections")
+        if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
+            raise HTTPException(status_code=502, detail="invalid shared connection list")
+        rows = sorted(
+            (shared_summary(item) for item in listing["items"] if isinstance(item, dict)),
+            key=lambda item: str(item.get("id", "")),
+        )
+        return {
+            "items": rows[offset : offset + limit],
+            "limit": limit,
+            "offset": offset,
+            "has_more": len(rows) > offset + limit,
+        }
+
+    @app.get("/v1/shared/connection-summaries/aws/{connection_id}")
+    def shared_aws_summary(request: Request, connection_id: UUID) -> dict[str, Any]:
+        shared = shared_aws_boundary(request, connection_id)
+        status = shared_aws_validation_status(request, connection_id)
+        return {
+            "connection": shared_summary(shared),
+            "validation": {
+                key: status[key]
+                for key in (
+                    "health_state",
+                    "credential_state",
+                    "last_validated_at",
+                    "job_id",
+                    "job_state",
+                    "job_error_code",
+                )
+                if key in status
+            },
+        }
+
+    @app.get("/v1/shared/connection-setup-templates/aws/{connection_id}")
+    def capability_shared_aws_template(request: Request, connection_id: UUID) -> dict[str, Any]:
+        shared_aws_boundary(request, connection_id)
+        return bounded_setup_template(shared_aws_cloudformation(request, connection_id))
+
+    @app.post("/internal/v1/capabilities/connections/actions")
+    def gateway_connection_action(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        action: GatewayConnectionAction,
+    ) -> JSONResponse:
+        repo, current_tenant = _context(request)
+        if action.expected_org_id != request.state.denali_auth.organization_id:
+            raise HTTPException(status_code=409, detail="active organization changed")
+        if request.query_params:
+            raise HTTPException(status_code=422, detail="query parameters are not accepted")
+        key = _gateway_idempotency_key(request)
+        claim = getattr(repo, "claim_gateway_connection_action", None)
+        finish = getattr(repo, "finish_gateway_connection_action", None)
+        if claim is None or finish is None:
+            raise HTTPException(status_code=503, detail="connection action ledger unavailable")
+        request_hash = hashlib.sha256(action.model_dump_json().encode()).hexdigest()
+        connection_id = (
+            str(uuid4())
+            if action.action == "create"
+            else str(action.connection_id)
+            if hasattr(action, "connection_id")
+            else None
+        )
+        try:
+            fresh, previous = claim(
+                current_tenant,
+                idempotency_key=key,
+                request_hash=request_hash,
+                actor=request.state.denali_auth.user_id,
+                action_kind=action.action,
+                connection_id=connection_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if not fresh:
+            if previous["state"] != "completed":
+                raise HTTPException(
+                    status_code=409,
+                    detail="action is pending or failed; inspect its target before retrying",
+                )
+            return JSONResponse(
+                content=jsonable_encoder(
+                    {
+                        "action": action.action,
+                        "connection_id": previous["connection_id"],
+                        "status": "completed",
+                        "replayed": True,
+                        "previous_status_code": previous["status_code"],
+                    }
+                )
+            )
+
+        output: dict[str, Any] = {
+            "action": action.action,
+            "connection_id": connection_id,
+            "status": "completed",
+            "replayed": False,
+        }
+        status_code = 200
+        try:
+            if isinstance(action, GatewayConnectionCreate):
+                request.state.gateway_connection_id = connection_id
+                row = create_connection(request, action.connection)
+                output["connection"] = connection_summary(row)
+                status_code = 201
+            elif isinstance(action, (GatewayConnectionSetupLaunch, GatewayConnectionSetupComplete)):
+                target = repo.get_connection_validation_target(current_tenant, connection_id)
+                if target is None or target["provider"] != action.provider:
+                    raise HTTPException(status_code=404, detail="provider connection not found")
+                if target["lifecycle_state"] != "active":
+                    raise HTTPException(
+                        status_code=409, detail="disabled connections cannot be set up"
+                    )
+                if (
+                    action.action == "setup-complete" or action.provider == "aws"
+                ) and request.app.state.validation_dispatcher is None:
+                    raise HTTPException(
+                        status_code=503, detail="durable validation dispatcher unavailable"
+                    )
+                identifier = UUID(connection_id)
+                if isinstance(action, GatewayConnectionSetupLaunch):
+                    response = Response()
+                    if action.provider == "aws":
+                        result = launch_aws_cloudformation(
+                            request, response, background_tasks, identifier
+                        )
+                    else:
+                        handler = {
+                            "azure": launch_azure_setup,
+                            "entra": launch_entra_setup,
+                            "gcp": launch_gcp_setup,
+                            "github": launch_github_setup,
+                            "azure_repos": launch_azure_repos_setup,
+                        }[action.provider]
+                        result = handler(request, response, identifier)
+                    output["setup"] = {
+                        key: result[key] for key in (
+                            "launch_url", "stack_name", "stack_region", "template_version",
+                            "template_sha256", "expires_at", "validation_status",
+                            "cloud_shell_url", "script_url", "setup_command", "script_version",
+                            "script_sha256", "principal_email", "identity_prepared_in_script",
+                            "consent_url", "install_url", "app_slug", "authorize_url",
+                        ) if key in result
+                    }
+                    status_code = 201
+                else:
+                    if action.provider == "azure":
+                        result = complete_azure_setup(
+                            request,
+                            background_tasks,
+                            identifier,
+                            AzureSetupCompletion(completion_code=action.completion_code),
+                        )
+                    elif action.provider == "gcp":
+                        result = complete_gcp_setup(
+                            request,
+                            background_tasks,
+                            identifier,
+                            GcpSetupCompletion(completion_code=action.completion_code),
+                        )
+                    elif action.provider == "azure_repos":
+                        result = complete_azure_repos_setup(
+                            request,
+                            background_tasks,
+                            identifier,
+                            AzureReposSelection(repository_ids=action.repository_ids),
+                        )
+                    else:
+                        result = complete_google_workspace_setup(
+                            request, background_tasks, identifier
+                        )
+                    output["job"] = {
+                        key: result[key] for key in ("status", "connection_id") if key in result
+                    }
+                    status_code = 202
+            elif isinstance(action, GatewayConnectionDisable):
+                row = repo.get_connection(current_tenant, connection_id)
+                if row is None:
+                    raise HTTPException(status_code=404, detail="connection not found")
+                if action.confirmation_name != row["display_name"]:
+                    raise HTTPException(status_code=409, detail="confirmation name does not match")
+                if action.action == "disable":
+                    output["connection"] = connection_summary(
+                        disable_connection(request, UUID(connection_id))
+                    )
+                else:
+                    delete_connection(
+                        request, UUID(connection_id), confirm=action.confirmation_name
+                    )
+            elif isinstance(action, GatewaySharedConnectionCreate):
+                row = create_shared_aws_connection(request, action.connection)
+                connection_id = str(UUID(row["id"]))
+                output.update(connection_id=connection_id, connection=shared_summary(row))
+                status_code = 201
+            elif isinstance(action, GatewaySharedConnectionAttach):
+                row = use_shared_aws_in_denali(
+                    request,
+                    UUID(connection_id),
+                    SharedAwsUseInput(region=action.region, declared_scopes=action.declared_scopes),
+                )
+                output["connection"] = connection_summary(row)
+                status_code = 201
+            elif isinstance(action, GatewaySharedConnectionControl):
+                shared = shared_aws_boundary(request, UUID(connection_id))
+                if action.confirmation_account_id != shared.get("external_account_id"):
+                    raise HTTPException(
+                        status_code=409, detail="confirmation account does not match"
+                    )
+                if action.action == "shared-disable":
+                    disable_shared_aws_connection(request, UUID(connection_id))
+                elif action.action == "shared-validate":
+                    result = validate_shared_aws_connection(request, UUID(connection_id))
+                    output["job"] = {
+                        key: result[key] for key in ("job_id", "state") if key in result
+                    }
+                    status_code = 202
+                else:
+                    result = probe_shared_aws_connection(
+                        request,
+                        UUID(connection_id),
+                        SharedAwsReadProbeInput(region=action.region),
+                        Response(),
+                    )
+                    output["probe"] = {
+                        key: result[key]
+                        for key in ("scope", "region", "read_state", "sample_count")
+                        if key in result
+                    }
+        except HTTPException as error:
+            finish(
+                current_tenant,
+                idempotency_key=key,
+                request_hash=request_hash,
+                connection_id=connection_id,
+                status_code=error.status_code,
+            )
+            raise
+        except Exception as error:
+            finish(
+                current_tenant,
+                idempotency_key=key,
+                request_hash=request_hash,
+                connection_id=connection_id,
+                status_code=502,
+            )
+            raise HTTPException(status_code=502, detail="connection action failed") from error
+        finish(
+            current_tenant,
+            idempotency_key=key,
+            request_hash=request_hash,
+            connection_id=connection_id,
+            status_code=status_code,
+        )
+        return JSONResponse(status_code=status_code, content=jsonable_encoder(output))
+
     @app.get("/v1/inventory/summary")
     def inventory_summary(request: Request) -> dict[str, Any]:
         repo, current_tenant = _context(request)
@@ -3741,6 +4257,93 @@ def create_app(
                 detail="response unavailable, already reviewed, or requester cannot self-approve",
             )
         return row
+
+    def queue_gateway_connection_job(
+        request: Request,
+        connection_id: UUID,
+        *,
+        job_type: str,
+        collection_kind: str | None = None,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        key = _gateway_idempotency_key(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        _require_gateway_connection_job_ready(target, collection_kind=collection_kind)
+        if job_type == "validation":
+            validator = _gateway_validators(request).get(str(target["provider"]))
+            dispatcher = request.app.state.validation_dispatcher
+            unavailable = "connection validation is not configured"
+        else:
+            validator = _gateway_collectors(request).get(str(collection_kind))
+            dispatcher = request.app.state.collection_dispatcher
+            unavailable = "connection collection is not configured"
+        if validator is None or dispatcher is None:
+            raise HTTPException(status_code=503, detail=unavailable)
+        reserve = getattr(repo, "create_gateway_connection_job_idempotent", None)
+        if reserve is None:
+            raise HTTPException(status_code=503, detail="durable connection jobs unavailable")
+        try:
+            result, dispatch_needed = reserve(
+                current_tenant,
+                str(connection_id),
+                job_type=job_type,
+                collection_kind=collection_kind,
+                actor=request.state.denali_auth.user_id,
+                idempotency_key=key,
+            )
+        except GatewayConnectionJobCooldown as error:
+            raise HTTPException(
+                status_code=429,
+                detail="connection job recently requested; retry after five minutes",
+                headers={"Retry-After": "300"},
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if dispatch_needed:
+            job_id = result["job_id"]
+            try:
+                call_id = dispatcher(job_id)
+                if call_id:
+                    if job_type == "validation":
+                        repo.set_connection_validation_call_id(job_id, call_id)
+                    else:
+                        repo.set_connection_collection_call_id(job_id, call_id)
+            except Exception as error:
+                if job_type == "validation":
+                    repo.fail_connection_validation_job(
+                        job_id, "Unable to dispatch validation worker."
+                    )
+                else:
+                    repo.fail_connection_collection_job(
+                        job_id, "Unable to dispatch collection worker."
+                    )
+                raise HTTPException(
+                    status_code=503, detail="Unable to dispatch connection job"
+                ) from error
+        return result
+
+    @app.post("/internal/v1/capabilities/connections/{connection_id}/validate", status_code=202)
+    def gateway_validate_connection(
+        request: Request,
+        connection_id: UUID,
+        confirmation: GatewayValidateJob,
+    ) -> dict[str, Any]:
+        return queue_gateway_connection_job(request, connection_id, job_type="validation")
+
+    @app.post("/internal/v1/capabilities/connections/{connection_id}/collect", status_code=202)
+    def gateway_collect_connection(
+        request: Request,
+        connection_id: UUID,
+        confirmation: GatewayCollectJob,
+    ) -> dict[str, Any]:
+        return queue_gateway_connection_job(
+            request,
+            connection_id,
+            job_type="collection",
+            collection_kind=confirmation.collection_kind,
+        )
 
     @app.get("/v1/sources/coverage")
     def source_coverage(request: Request) -> dict[str, Any]:
@@ -4120,6 +4723,108 @@ def create_app(
             ) from error
         return {"id": str(job["id"]), "state": str(job["state"])}
 
+    @app.post("/internal/v1/capabilities/vulnerabilities/imports", status_code=202)
+    def gateway_create_vulnerability_import(
+        request: Request, imported: GatewayVulnerabilityImportCreate
+    ) -> dict[str, str]:
+        repo, current_tenant = _context(request)
+        identity: AuthContext = request.state.denali_auth
+        if imported.expected_org_id != identity.organization_id:
+            raise HTTPException(status_code=409, detail="active organization changed")
+        key = _gateway_idempotency_key(request)
+        lookup = getattr(repo, "gateway_vulnerability_import_action", None)
+        create_once = getattr(repo, "create_vulnerability_import_job_idempotent", None)
+        if lookup is None or create_once is None:
+            raise HTTPException(status_code=503, detail="idempotent evidence import unavailable")
+        report_store = request.app.state.evidence_report_store
+        dispatcher = request.app.state.vulnerability_import_dispatcher
+        if report_store is None or dispatcher is None:
+            raise HTTPException(
+                status_code=503, detail="hosted vulnerability evidence import is not configured"
+            )
+        target_asset_id = str(imported.target_asset_id)
+        try:
+            validate_report_pair(imported.syft_report, imported.grype_report)
+            documents = {
+                "syft": encode_report(imported.syft_report),
+                "grype": encode_report(imported.grype_report),
+            }
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        request_hash = hashlib.sha256(
+            json.dumps(
+                [
+                    identity.user_id,
+                    target_asset_id,
+                    imported.authoritative,
+                    imported.syft_report,
+                    imported.grype_report,
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        try:
+            job = lookup(current_tenant, idempotency_key=key, request_hash=request_hash)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if job is None:
+            asset = repo.get_asset(current_tenant, target_asset_id)
+            if (
+                asset is None
+                or asset.get("kind") != "ai_workload"
+                or asset.get("lifecycle_state") != "active"
+            ):
+                raise HTTPException(status_code=404, detail="active AI workload not found")
+            job_id = str(uuid4())
+            try:
+                object_keys = report_store.put_documents(
+                    tenant_id=current_tenant, job_id=job_id, documents=documents
+                )
+            except Exception as error:
+                raise HTTPException(
+                    status_code=502, detail="evidence reports could not be staged"
+                ) from error
+            try:
+                job, created = create_once(
+                    current_tenant,
+                    job_id=job_id,
+                    target_asset_id=target_asset_id,
+                    syft_object_key=object_keys["syft"],
+                    grype_object_key=object_keys["grype"],
+                    authoritative=imported.authoritative,
+                    actor=identity.user_id,
+                    idempotency_key=key,
+                    request_hash=request_hash,
+                )
+            except ValueError as error:
+                report_store.delete_documents(tuple(object_keys.values()))
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except Exception as error:
+                # A lost commit acknowledgement may have committed the job. Retain
+                # its evidence and let the same-key replay resolve durable state.
+                raise HTTPException(
+                    status_code=503, detail="evidence import storage unavailable"
+                ) from error
+            if not created:
+                # Concurrent retries stage into distinct random-job prefixes. Only
+                # the winning transaction's private objects belong to the job.
+                report_store.delete_documents(tuple(object_keys.values()))
+        if job["state"] == "queued" and not job.get("modal_call_id"):
+            # A replay repairs an API-container exit after the durable commit but
+            # before dispatch. Duplicate spawns are safe: the worker claims one lease.
+            try:
+                call_id = dispatcher(str(job["id"]))
+                if call_id:
+                    repo.set_vulnerability_import_call_id(str(job["id"]), call_id)
+            except Exception as error:
+                # Keep the durable queued job and its documents for a safe retry.
+                raise HTTPException(
+                    status_code=503, detail="evidence import worker unavailable"
+                ) from error
+        return {"id": str(job["id"]), "state": str(job["state"])}
+
     @app.get("/v1/vulnerabilities/imports/{job_id}")
     def vulnerability_import_status(request: Request, job_id: UUID) -> dict[str, Any]:
         repo, current_tenant = _context(request)
@@ -4271,31 +4976,41 @@ def create_app(
         session_key: str = ApiPath(pattern="^[0-9a-f]{64}$"),
     ) -> JSONResponse:
         repo, current_tenant = _context(request)
-        row = repo.get_runtime_session(current_tenant, session_key)
+        gateway_export = (
+            getattr(request.state, "denali_capability", None) == "runtime-session-export"
+        )
+        row = (
+            repo.get_runtime_session(current_tenant, session_key, activity_limit=100)
+            if gateway_export
+            else repo.get_runtime_session(current_tenant, session_key)
+        )
         if row is None:
             raise HTTPException(status_code=404, detail="runtime session not found")
         aws_compatible = row.get("provider") == "aws_agentcore"
         payload = {
             "schema_version": (
-                "denali.aws_agent_session.v1"
-                if aws_compatible
-                else "denali.agent_session.v1"
+                "denali.aws_agent_session.v1" if aws_compatible else "denali.agent_session.v1"
             ),
             "exported_at": datetime.now(UTC),
             "content_policy": "metadata_only",
             "session": row,
         }
-        return JSONResponse(
+        response = JSONResponse(
             content=jsonable_encoder(payload),
             headers={
                 "Cache-Control": "no-store",
                 "Content-Disposition": (
                     f'attachment; filename="denali-'
-                    f'{"aws" if aws_compatible else "agent"}-session-'
+                    f"{'aws' if aws_compatible else 'agent'}-session-"
                     f'{session_key[:12]}.json"'
                 ),
             },
         )
+        if gateway_export and len(response.body) > MAX_GATEWAY_EXPORT_BYTES:
+            raise HTTPException(
+                status_code=413, detail="runtime session export exceeds gateway limit"
+            )
+        return response
 
     @app.get("/v1/activity")
     def list_activity(
@@ -4458,6 +5173,80 @@ def _gateway_idempotency_key(request: Request) -> str:
     if re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key) is None:
         raise HTTPException(status_code=422, detail="valid Idempotency-Key is required")
     return key
+
+
+def _gateway_validators(request: Request) -> dict[str, Any]:
+    state = request.app.state
+    return {
+        "aws": state.connection_validator,
+        "azure": state.azure_connection_validator,
+        "entra": state.entra_connection_validator,
+        "gcp": state.gcp_connection_validator,
+        "github": state.github_connection_validator,
+        "azure_repos": state.azure_repos_connection_validator,
+        "google_workspace": state.google_workspace_connection_validator,
+    }
+
+
+def _gateway_collectors(request: Request) -> dict[str, Any]:
+    state = request.app.state
+    return {
+        "aws_deployments": state.aws_deployment_collector,
+        "aws_agent_runtime": state.aws_agent_runtime_collector,
+        "azure_deployments": state.azure_deployment_collector,
+        "azure_agent_runtime": state.azure_agent_runtime_collector,
+        "gcp_deployments": state.gcp_deployment_collector,
+        "entra_ai": state.entra_connection_collector,
+        "github_source": state.github_repository_collector,
+        "azure_repos_source": state.azure_repos_repository_collector,
+        "google_workspace_ai": state.google_workspace_connection_collector,
+    }
+
+
+def _require_gateway_connection_job_ready(
+    target: dict[str, Any], *, collection_kind: str | None
+) -> None:
+    """Apply the browser's setup checks and narrow a collection to one declared plane."""
+
+    provider = str(target["provider"])
+    configuration = target.get("configuration") or {}
+    scopes = set(target.get("declared_scopes") or [])
+    if target["lifecycle_state"] != "active":
+        raise HTTPException(status_code=409, detail="disabled connections cannot start jobs")
+    if provider not in COLLECTION_KINDS_BY_PROVIDER:
+        raise HTTPException(status_code=422, detail="connection provider is not supported")
+    if collection_kind is not None and collection_kind not in GATEWAY_COLLECTION_KINDS:
+        raise HTTPException(status_code=422, detail="collection kind is not supported")
+    if (
+        collection_kind is not None
+        and collection_kind not in COLLECTION_KINDS_BY_PROVIDER[provider]
+    ):
+        raise HTTPException(status_code=422, detail="collection kind does not match provider")
+    if provider == "azure" and not configuration.get("subscriptions"):
+        raise HTTPException(status_code=409, detail="complete Azure subscription selection first")
+    if provider == "gcp" and not configuration.get("projects"):
+        raise HTTPException(status_code=409, detail="complete Google Cloud project selection first")
+    if provider in {"github", "azure_repos"} and not configuration.get("repositories"):
+        raise HTTPException(status_code=409, detail="complete repository selection first")
+    if provider in {"entra", "google_workspace"} and not configuration.get(
+        "onboarding", {}
+    ).get("completed_at"):
+        raise HTTPException(status_code=409, detail="complete provider authorization first")
+    if collection_kind is None:
+        return
+    eligible_scopes = {
+        "aws_deployments": set(AWS_SCOPES) - {AWS_SCOPE_AGENT_RUNTIME_ACTIVITY},
+        "aws_agent_runtime": {AWS_SCOPE_AGENT_RUNTIME_ACTIVITY},
+        "azure_deployments": set(AZURE_SCOPES) - {AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY},
+        "azure_agent_runtime": {AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY},
+        "gcp_deployments": set(GCP_SCOPES),
+        "entra_ai": set(ENTRA_SCOPES),
+        "github_source": {GITHUB_SCOPE_REPOSITORY_CONTENTS},
+        "azure_repos_source": {AZURE_REPOS_SCOPE_CONTENTS},
+        "google_workspace_ai": set(GOOGLE_WORKSPACE_SCOPES),
+    }[collection_kind]
+    if not scopes & eligible_scopes:
+        raise HTTPException(status_code=409, detail="connection has no selected collection scope")
 
 
 def _clerk_admin_context(

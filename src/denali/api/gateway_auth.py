@@ -39,7 +39,11 @@ class ClerkGatewayVerifier:
         self._receiver_machine_id = receiver_machine_id
 
     def verify(self, token: str, *, purpose: str) -> GatewayPrincipal | None:
-        if not token or purpose not in {"results:read", "denali:write"}:
+        if not token or purpose not in {
+            "results:read",
+            "denali:write",
+            "denali:connections:destructive",
+        }:
             return None
         try:
             verified = self._clerk.m2m.verify_token(token=token)

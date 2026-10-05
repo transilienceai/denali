@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from denali.connectors.grype_json import GrypeJsonConnector
 from denali.connectors.syft_json import SyftJsonConnector
 from denali.domain import AssetKind, AssetRef
+from denali.worker_limits import VULNERABILITY_IMPORT_WORKER_LEASE_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ def run_durable_vulnerability_import_job(
     report_store: EvidenceReportStore,
     job_id: str,
     *,
-    lease_seconds: int = 900,
+    lease_seconds: int = VULNERABILITY_IMPORT_WORKER_LEASE_SECONDS,
     max_attempts: int = 3,
 ) -> None:
     """Normalize and ingest both evidence streams under a durable leased job."""

@@ -16,6 +16,36 @@ from starlette.datastructures import QueryParams
 # coordinated with the gateway/CLI/MCP rollout.
 CAPABILITY_CONTRACT_VERSION = 1
 
+GATEWAY_COLLECTION_KINDS = frozenset(
+    {
+        "aws_deployments",
+        "aws_agent_runtime",
+        "azure_deployments",
+        "azure_agent_runtime",
+        "gcp_deployments",
+        "entra_ai",
+        "github_source",
+        "azure_repos_source",
+        "google_workspace_ai",
+    }
+)
+
+
+@dataclass(frozen=True)
+class JobWriteCapability:
+    method: str
+    path: str
+
+
+JOB_WRITE_CAPABILITIES: dict[str, JobWriteCapability] = {
+    "connection-validate": JobWriteCapability(
+        "POST", "/internal/v1/capabilities/connections/{connection_id}/validate"
+    ),
+    "connection-collect": JobWriteCapability(
+        "POST", "/internal/v1/capabilities/connections/{connection_id}/collect"
+    ),
+}
+
 
 @dataclass(frozen=True)
 class ReadCapability:
@@ -25,8 +55,24 @@ class ReadCapability:
 
 
 READ_CAPABILITIES: dict[str, ReadCapability] = {
+    "context": ReadCapability("/v1/context"),
     "connections": ReadCapability("/v1/connection-summaries", frozenset({"limit", "offset"})),
     "connection-detail": ReadCapability("/v1/connection-summaries/{id}", identifier="uuid"),
+    "connection-setup-status": ReadCapability(
+        "/v1/connection-setup-summaries/{id}", identifier="uuid"
+    ),
+    "connection-aws-template": ReadCapability(
+        "/v1/connection-setup-templates/aws/{id}", identifier="uuid"
+    ),
+    "shared-connections": ReadCapability(
+        "/v1/shared/connection-summaries", frozenset({"limit", "offset"})
+    ),
+    "shared-aws-status": ReadCapability(
+        "/v1/shared/connection-summaries/aws/{id}", identifier="uuid"
+    ),
+    "shared-aws-template": ReadCapability(
+        "/v1/shared/connection-setup-templates/aws/{id}", identifier="uuid"
+    ),
     "inventory-summary": ReadCapability("/v1/inventory/summary"),
     "assets": ReadCapability(
         "/v1/inventory/assets",
@@ -65,6 +111,9 @@ READ_CAPABILITIES: dict[str, ReadCapability] = {
         "/v1/runtime/sessions", frozenset({"provider", "outcome", "limit", "offset"})
     ),
     "runtime-session-detail": ReadCapability("/v1/runtime/sessions/{id}", identifier="session_key"),
+    "runtime-session-export": ReadCapability(
+        "/v1/runtime/sessions/{id}/export", identifier="session_key"
+    ),
     "detections-summary": ReadCapability("/v1/detections/summary"),
     "detections": ReadCapability(
         "/v1/detections", frozenset({"state", "severity", "limit", "offset"})

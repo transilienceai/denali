@@ -7,6 +7,8 @@ from collections.abc import Callable, Mapping
 from time import monotonic, sleep
 from typing import Any, Protocol
 
+from denali.worker_limits import VALIDATION_WORKER_LEASE_SECONDS, WORKER_LEASE_GRACE_SECONDS
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,7 +47,12 @@ def run_durable_validation_job(
     """Claim and execute a database-backed validation job exactly once per lease."""
 
     job = repository.claim_connection_validation_job(
-        job_id, lease_seconds=timeout_seconds + 300
+        job_id,
+        # Preserve longer local soft deadlines, but never reclaim a hosted job
+        # while its original Modal container can still execute provider calls.
+        lease_seconds=max(
+            VALIDATION_WORKER_LEASE_SECONDS, timeout_seconds + WORKER_LEASE_GRACE_SECONDS
+        ),
     )
     if job is None:
         return
