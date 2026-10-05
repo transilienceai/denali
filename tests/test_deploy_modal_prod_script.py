@@ -26,6 +26,7 @@ case "$*" in
   "status --porcelain") printf '%s' "${FAKE_GIT_STATUS:-}" ;;
   "rev-parse HEAD") printf '%s\n' "${FAKE_HEAD_SHA}" ;;
   "branch --show-current") printf '%s\n' "${FAKE_BRANCH:-main}" ;;
+  "rev-parse --show-toplevel") printf '%s\n' "${FAKE_REPOSITORY_ROOT}" ;;
   "fetch --quiet origin main") ;;
   "rev-parse origin/main") printf '%s\n' "${FAKE_ORIGIN_MAIN_SHA}" ;;
   *) printf 'unexpected git call: %s\n' "$*" >&2; exit 90 ;;
@@ -55,6 +56,7 @@ fi
         "FAKE_CALL_LOG": str(call_log),
         "FAKE_GIT_STATUS": "",
         "FAKE_HEAD_SHA": SHA,
+        "FAKE_REPOSITORY_ROOT": str(SCRIPT.parents[1]),
         "FAKE_ORIGIN_MAIN_SHA": SHA,
         "FAKE_BRANCH": "main",
     }
