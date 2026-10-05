@@ -161,6 +161,14 @@ class InventoryReader(Protocol):
 
     def list_connections(self, tenant_id: str) -> list[dict[str, Any]]: ...
 
+    def list_connection_summaries(
+        self, tenant_id: str, *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], bool]: ...
+
+    def get_connection_summary(
+        self, tenant_id: str, connection_id: str
+    ) -> dict[str, Any] | None: ...
+
     def list_healthy_connection_ids(
         self, tenant_id: str, *, provider: str, limit: int = 50
     ) -> list[str]: ...
@@ -1800,6 +1808,29 @@ def create_app(
         repo, current_tenant = _context(request)
         rows = repo.list_connections(current_tenant)
         return {"items": [_with_validation_state(request, current_tenant, row) for row in rows]}
+
+    @app.get("/v1/connection-summaries")
+    def list_connection_summaries(
+        request: Request,
+        response: Response,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=100000),
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        items, has_more = repo.list_connection_summaries(current_tenant, limit=limit, offset=offset)
+        response.headers["Cache-Control"] = "no-store"
+        return {"items": items, "limit": limit, "offset": offset, "has_more": has_more}
+
+    @app.get("/v1/connection-summaries/{connection_id}")
+    def connection_summary_detail(
+        request: Request, response: Response, connection_id: UUID
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        row = repo.get_connection_summary(current_tenant, str(connection_id))
+        if row is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        response.headers["Cache-Control"] = "no-store"
+        return row
 
     def _shared_connections_context(request: Request) -> tuple[SharedConnectionsClient, str]:
         _context(request)

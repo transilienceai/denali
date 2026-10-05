@@ -55,6 +55,8 @@ class ReadCapability:
 
 
 READ_CAPABILITIES: dict[str, ReadCapability] = {
+    "connections": ReadCapability("/v1/connection-summaries", frozenset({"limit", "offset"})),
+    "connection-detail": ReadCapability("/v1/connection-summaries/{id}", identifier="uuid"),
     "inventory-summary": ReadCapability("/v1/inventory/summary"),
     "assets": ReadCapability(
         "/v1/inventory/assets",

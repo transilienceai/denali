@@ -20,17 +20,30 @@ routes retain the unbounded default when those parameters are omitted.
 
 | Area | Read operations |
 | --- | --- |
+| Connections | `connections`, `connection-detail` (Denali-local status, not Platform connector configuration) |
 | Inventory | `inventory-summary`, `assets`, `asset-detail`, `sources-coverage` |
 | Findings | `findings-summary`, `findings`, `finding-detail` |
 | Vulnerabilities | `vulnerabilities-summary`, `vulnerabilities`, `vulnerability-detail`, `vulnerability-import-status` |
 | Issues | `issues-summary`, `issues`, `issue-detail`, `issue-evaluations` |
 | Code-to-cloud | `code-to-cloud-deployments`, `code-to-cloud-observations` |
+| Connections | `connections`, `connection-detail` |
 | Activity | `activity-summary`, `activity`, `activity-detail`, `runtime-sessions`, `runtime-session-detail` |
 | Detections | `detections-summary`, `detections`, `detection-detail`, `detection-evaluations` |
 
-This dev branch currently exposes 26 named reads. The two bounded connection
-reads already present in production must be ported before the shared Platform
-adapter's newer 28-read contract can be tested against this branch.
+This is **28 named reads across eight Denali areas**, not the whole Denali
+API. For scale, the current production OpenAPI has 68 public paths before
+this receiver. The browser retains all of those app-specific routes; MCP/CLI
+receives only this reviewed catalog.
+
+`connections` accepts `limit` (1–100, default 20) and `offset` (0–100000)
+and returns a stable ID-ordered page with `has_more`. `connection-detail`
+requires `?id=<UUID>`. Both read only the Denali-local connection's ID,
+provider, display name, lifecycle/health states, declared scopes, and
+created/updated/last-validated timestamps. They never query or return
+credential references, provider configuration, validation results, or setup
+state. These read operations alone do not grant connection job starts;
+those require the separate write checks below.
+
 The asset-governance write operation is:
 
 `PATCH /internal/v1/capabilities/assets/{asset_id}/governance`
@@ -106,6 +119,12 @@ validation are **not yet** gateway capabilities. The typed job starts above
 apply only to Denali-local connections. The shared AWS/GitHub connector APIs
 remain on `dev`; this branch does not change their contracts. This is not full
 Denali API parity or customer-cloud resource write access.
+
+| Surface | In this release | Still outside MCP/CLI |
+| --- | --- | --- |
+| Denali results | 28 bounded reads | Raw exports and unreviewed future API paths |
+| Denali records/jobs | 3 audited record writes and typed Denali-local validation/collection job starts | Connection lifecycle, provider setup/callbacks, import, Platform shared-AWS validation, invitations and admin |
+| Customer AWS/GitHub resources | No mutation | All resource-changing actions and remediation |
 
 ## Release gate
 
