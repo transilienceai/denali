@@ -1,5 +1,27 @@
 # Denali capability contract v1
 
+## Durable connection job polling (additive follow-up)
+
+`connection-validation-job` and `connection-collection-job` each require
+`id` (the canonical job UUID) and `connection_id` (the canonical connection UUID).
+They share the browser's authenticated tenant-scoped GET handlers at
+`/v1/connections/{connection_id}/validation-jobs/{job_id}` and
+`/v1/connections/{connection_id}/collection-jobs/{job_id}`. Members may read;
+missing jobs, wrong kinds/connections and foreign tenants all return 404.
+No query may select a tenant or table.
+
+The bounded response contains only `job_id`, `connection_id`, `job_type`,
+`collection_kind` (null for validation), `state` (`queued`, `running`,
+`succeeded`, `failed`), `attempt_count`, `created_at`, `started_at`,
+`completed_at`, and `error_code` (null or `job_failed`). Raw errors, Modal
+call IDs, leases, result objects, and provider payloads are never selected.
+Poll the exact job receipt, not a potentially stale connection health badge.
+Successful validation proves access checking completed; successful collection
+proves that collection job completed, not necessarily that inventory exists.
+This brings the named read catalog from 35 to 37 with unchanged permissions,
+migrations, and 16 writes. It is available only after both receiver and adapter
+releases are reviewed, deployed and accepted.
+
 Denali owns the read operation names, parameter allowlist, and mapping to its
 existing API handlers in `src/denali/api/capabilities.py`. The browser still
 uses its same-origin `/api/v1/*` client. The shared Platform REST/CLI/MCP

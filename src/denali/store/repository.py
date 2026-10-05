@@ -3155,6 +3155,33 @@ class PostgresInventoryRepository:
                 (summary[:500], job_id),
             )
 
+    def connection_job_status(
+        self, tenant_id: str, connection_id: str, job_id: str, *, job_type: str
+    ) -> dict[str, Any] | None:
+        """Read one durable job's identity/state; never its call ID, errors or result."""
+        if job_type == "validation":
+            query = """
+                SELECT id AS job_id, connection_id, 'validation' AS job_type,
+                       NULL::text AS collection_kind, state, attempt_count,
+                       created_at, started_at, completed_at,
+                       CASE WHEN state = 'failed' THEN 'job_failed' END AS error_code
+                FROM connection_validation_job
+                WHERE tenant_id = %s::uuid AND connection_id = %s::uuid AND id = %s::uuid
+                """
+        elif job_type == "collection":
+            query = """
+                SELECT id AS job_id, connection_id, 'collection' AS job_type,
+                       collection_kind, state, attempt_count,
+                       created_at, started_at, completed_at,
+                       CASE WHEN state = 'failed' THEN 'job_failed' END AS error_code
+                FROM connection_collection_job
+                WHERE tenant_id = %s::uuid AND connection_id = %s::uuid AND id = %s::uuid
+                """
+        else:
+            raise ValueError("unsupported connection job type")
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            return connection.execute(query, (tenant_id, connection_id, job_id)).fetchone()
+
     def connection_validation_job_state(self, tenant_id: str, connection_id: str) -> str:
         return str(self.connection_validation_status(tenant_id, connection_id)["state"])
 

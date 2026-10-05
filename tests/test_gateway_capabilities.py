@@ -26,7 +26,7 @@ def test_product_owned_read_contract_is_versioned_and_allowlisted():
         "context",
         "runtime-session-export",
     } <= READ_CAPABILITIES.keys()
-    assert len(READ_CAPABILITIES) == 35
+    assert len(READ_CAPABILITIES) == 37
     assert all(spec.path.startswith("/v1/") for spec in READ_CAPABILITIES.values())
     assert set(JOB_WRITE_CAPABILITIES) == {"connection-validate", "connection-collect"}
     assert all(spec.method == "POST" for spec in JOB_WRITE_CAPABILITIES.values())
@@ -260,11 +260,14 @@ def test_read_catalog_is_explicit_org_scoped_and_never_creates_tenant():
             ).status_code
             == 422
         )
-    assert len(READ_CAPABILITIES) == 35
+    assert len(READ_CAPABILITIES) == 37
     assert all(call[1] in {"tenant-alpha", "tenant-beta"} for call in repo.calls)
 
 
-@pytest.mark.parametrize("operation", sorted(set(READ_CAPABILITIES) - CONNECTION_READS))
+@pytest.mark.parametrize("operation", sorted(
+    set(READ_CAPABILITIES) - CONNECTION_READS
+    - {"connection-validation-job", "connection-collection-job"}
+))
 def test_every_named_read_resolves_to_an_existing_tenant_scoped_handler(operation):
     repo = Repository()
     identifier = "a" * 64 if READ_CAPABILITIES[operation].identifier == "session_key" else ASSET

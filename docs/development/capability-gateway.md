@@ -27,6 +27,7 @@ routes retain the unbounded default when those parameters are omitted.
 | --- | --- |
 | Context | `context` |
 | Connections | `connections`, `connection-detail` (Denali-local status, not Platform connector configuration) |
+| Durable connection jobs | `connection-validation-job`, `connection-collection-job` (both require job `id` and canonical `connection_id`) |
 | Inventory | `inventory-summary`, `assets`, `asset-detail`, `sources-coverage` |
 | Findings | `findings-summary`, `findings`, `finding-detail` |
 | Vulnerabilities | `vulnerabilities-summary`, `vulnerabilities`, `vulnerability-detail`, `vulnerability-import-status` |
@@ -35,10 +36,11 @@ routes retain the unbounded default when those parameters are omitted.
 | Activity | `activity-summary`, `activity`, `activity-detail`, `runtime-sessions`, `runtime-session-detail`, `runtime-session-export` |
 | Detections | `detections-summary`, `detections`, `detection-detail`, `detection-evaluations` |
 
-The read catalog contains 35 named operations. The exhaustive
-[machine-readable public surface map](capability-surface.json) records the 77
+The read catalog contains 37 named operations. The exhaustive
+[machine-readable public surface map](capability-surface.json) records the 84
 explicit public route/method operations, four generated documentation routes,
-and all 67 browser client methods at its pinned baseline. It classifies each
+and all 69 browser client methods in this release. It retains the pinned baseline,
+classifies each
 operation and records existing or planned capability ownership; it is not a
 claim of literal public API parity.
 
@@ -179,7 +181,7 @@ shared-GitHub connector. This is not full Denali API parity.
 
 | Surface | In this release | Still outside MCP/CLI |
 | --- | --- | --- |
-| Denali results | 35 named reads, including bounded metadata-only runtime export and safe setup reads | Unreviewed future API paths |
+| Denali results | 37 named reads, including durable connection job status, bounded metadata-only runtime export and safe setup reads | Unreviewed future API paths |
 | Denali records/jobs | Governance, response proposal/review, evidence import, validation/collection, connector lifecycle/setup | Provider callbacks, invitations and user administration |
 | Customer AWS/GitHub resources | No mutation | All resource-changing actions and remediation |
 
