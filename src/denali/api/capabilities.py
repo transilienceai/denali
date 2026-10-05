@@ -11,8 +11,9 @@ from fastapi import HTTPException
 from starlette.datastructures import QueryParams
 
 # This product-owned v1 contract is pinned by the shared Platform adapter.
-# Changing an operation name, parameter, or result meaning requires a new
-# contract version and coordinated gateway/CLI/MCP rollout.
+# Breaking an operation name, parameter, or result change requires a new
+# contract version. Additive optional parameters remain v1-compatible when
+# coordinated with the gateway/CLI/MCP rollout.
 CAPABILITY_CONTRACT_VERSION = 1
 
 GATEWAY_COLLECTION_KINDS = frozenset(
@@ -76,8 +77,12 @@ READ_CAPABILITIES: dict[str, ReadCapability] = {
     "issues": ReadCapability("/v1/issues", frozenset({"state", "severity", "limit", "offset"})),
     "issue-detail": ReadCapability("/v1/issues/{id}", identifier="uuid"),
     "issue-evaluations": ReadCapability("/v1/issues/evaluations"),
-    "code-to-cloud-deployments": ReadCapability("/v1/code-to-cloud/deployments"),
-    "code-to-cloud-observations": ReadCapability("/v1/code-to-cloud/observations"),
+    "code-to-cloud-deployments": ReadCapability(
+        "/v1/code-to-cloud/deployments", frozenset({"limit", "offset"})
+    ),
+    "code-to-cloud-observations": ReadCapability(
+        "/v1/code-to-cloud/observations", frozenset({"limit", "offset"})
+    ),
     "activity-summary": ReadCapability("/v1/activity/summary", frozenset({"include_fixtures"})),
     "activity": ReadCapability(
         "/v1/activity",
@@ -150,4 +155,8 @@ def read_route(operation: str, query: QueryParams) -> tuple[str, bytes]:
         raise HTTPException(status_code=422, detail="asset kind is too long")
     if "include_fixtures" in values and values["include_fixtures"] not in {"true", "false"}:
         raise HTTPException(status_code=422, detail="invalid include_fixtures")
+    if operation in {"code-to-cloud-deployments", "code-to-cloud-observations"}:
+        # Browser reads retain their legacy behavior, but gateway responses
+        # must never return an unbounded collection by default.
+        values.setdefault("limit", "100")
     return path, urlencode(values).encode()

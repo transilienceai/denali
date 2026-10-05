@@ -257,6 +257,31 @@ def test_every_named_read_resolves_to_an_existing_tenant_scoped_handler(operatio
     assert repo.calls and all(call[1] == "tenant-alpha" for call in repo.calls)
 
 
+@pytest.mark.parametrize(
+    ("operation", "method"),
+    [
+        ("code-to-cloud-deployments", "code_to_cloud_deployments"),
+        ("code-to-cloud-observations", "code_to_cloud_observations"),
+    ],
+)
+def test_code_to_cloud_gateway_reads_are_bounded_and_pageable(operation, method):
+    repo = Repository()
+    url = f"/internal/v1/capabilities/{operation}"
+    headers = {"Authorization": "Bearer admin-read"}
+    with TestClient(app(repo)) as client:
+        default = client.get(url, headers=headers)
+        page = client.get(url, params={"limit": "25", "offset": "50"}, headers=headers)
+        excessive = client.get(url, params={"limit": "101"}, headers=headers)
+        invalid_offset = client.get(url, params={"offset": "-1"}, headers=headers)
+        duplicate = client.get(url, params=[("limit", "1"), ("limit", "2")], headers=headers)
+    assert default.status_code == page.status_code == 200
+    assert repo.calls == [
+        (method, "tenant-alpha", (), {"limit": 100, "offset": 0}),
+        (method, "tenant-alpha", (), {"limit": 25, "offset": 50}),
+    ]
+    assert excessive.status_code == invalid_offset.status_code == duplicate.status_code == 422
+
+
 class JobRepository(Repository):
     def __init__(self):
         super().__init__()
@@ -390,8 +415,6 @@ def test_gateway_connection_jobs_fail_closed_without_durable_dispatcher():
         )
     assert response.status_code == 503
     assert not repo.job_actions
-
-
 def test_gateway_write_requires_distinct_purpose_current_admin_and_idempotency():
     repo = Repository()
     url = f"/internal/v1/capabilities/assets/{ASSET}/governance"

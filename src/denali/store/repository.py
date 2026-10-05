@@ -2220,7 +2220,9 @@ class PostgresInventoryRepository:
             )
         return targets
 
-    def code_to_cloud_deployments(self, tenant_id: str) -> list[dict[str, Any]]:
+    def code_to_cloud_deployments(
+        self, tenant_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]:
         """Return proven repository-to-workload links and their runtime context."""
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
@@ -2684,13 +2686,17 @@ class PostgresInventoryRepository:
                   AND workload.kind = 'ai_workload' AND repository.kind = 'code_repository'
                   AND workload.lifecycle_state = 'active'
                   AND repository.lifecycle_state = 'active'
-                ORDER BY repository_view.display_name, workload_view.display_name
+                ORDER BY repository_view.display_name, workload_view.display_name,
+                         deployment.id
+                LIMIT %s OFFSET %s
                 """,
-                (tenant_id,),
+                (tenant_id, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def code_to_cloud_observations(self, tenant_id: str) -> list[dict[str, Any]]:
+    def code_to_cloud_observations(
+        self, tenant_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]:
         """Return latest source-collection and correlation disposition per repository."""
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
@@ -2754,9 +2760,10 @@ class PostgresInventoryRepository:
                            combined.source_collected_at,
                            combined.analysis_collected_at
                          ) DESC NULLS LAST,
-                         repository_natural_key
+                         repository_natural_key, combined.connection_id, combined.scope
+                LIMIT %s OFFSET %s
                 """,
-                (tenant_id, tenant_id, tenant_id),
+                (tenant_id, tenant_id, tenant_id, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
 

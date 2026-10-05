@@ -1943,6 +1943,8 @@ metadata:
     repo.ingest(tenant, correlated)
 
     [deployment] = repo.code_to_cloud_deployments(tenant)
+    assert repo.code_to_cloud_deployments(tenant, limit=1) == [deployment]
+    assert repo.code_to_cloud_deployments(tenant, limit=1, offset=1) == []
     assert deployment["repository_natural_key"] == "github.com/example/denali-gcp"
     assert deployment["workload_natural_key"] == workload.natural_key
     assert deployment["workload_attributes"]["provider"] == "gcp"
@@ -2074,6 +2076,8 @@ new nodejs.NodejsFunction(this, 'AgentFn', {
 
     observations = repo.code_to_cloud_observations(tenant)
     assert len(observations) == 1
+    assert repo.code_to_cloud_observations(tenant, limit=1) == observations
+    assert repo.code_to_cloud_observations(tenant, limit=1, offset=1) == []
     assert observations[0]["repository_natural_key"] == "github.com/example/anna"
     assert observations[0]["source_state"] is None
     assert observations[0]["analysis_state"] == "complete"

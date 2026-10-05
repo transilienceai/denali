@@ -14,6 +14,9 @@ Detail operations require `?id=<UUID>`; `runtime-session-detail` instead require
 filters, `limit` (1–100), and `offset` (0–100000). Invalid/duplicate/unknown query
 parameters return 422. The receiver forwards to the existing tenant-scoped Denali
 handler; it never accepts a URL, tenant ID, or arbitrary route from the gateway.
+Code-to-cloud deployments and observations default to a 100-item gateway page;
+both accept `limit` and `offset` for subsequent pages. Their existing browser
+routes retain the unbounded default when those parameters are omitted.
 
 | Area | Read operations |
 | --- | --- |
