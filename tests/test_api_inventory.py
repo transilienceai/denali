@@ -175,10 +175,14 @@ class RepositoryStub:
     def latest_issue_evaluations(self, tenant_id: str) -> list[dict[str, Any]]:
         return [{"rule_uid": "rule-1", "state": "complete", "confirmed_issues": 1}]
 
-    def code_to_cloud_deployments(self, tenant_id: str) -> list[dict[str, Any]]:
+    def code_to_cloud_deployments(
+        self, tenant_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]:
         return [{"id": "deployment-1", "repository_name": "anna", "workload_name": "api"}]
 
-    def code_to_cloud_observations(self, tenant_id: str) -> list[dict[str, Any]]:
+    def code_to_cloud_observations(
+        self, tenant_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "connection_id": "github-fixture",
@@ -550,9 +554,16 @@ def test_code_to_cloud_surface() -> None:
         response = test_client.get("/v1/code-to-cloud/deployments")
         assert response.status_code == 200
         assert response.json()["items"][0]["repository_name"] == "anna"
+        assert response.json()["limit"] is None
+        assert response.json()["offset"] == 0
         observations = test_client.get("/v1/code-to-cloud/observations")
         assert observations.status_code == 200
         assert observations.json()["items"][0]["correlation_summary"]["unmatched"] == 1
+        paged = test_client.get("/v1/code-to-cloud/deployments?limit=2&offset=1")
+        assert paged.status_code == 200
+        assert paged.json()["limit"] == 2
+        assert paged.json()["offset"] == 1
+        assert test_client.get("/v1/code-to-cloud/observations?limit=501").status_code == 422
 
 
 def test_vulnerability_surface_and_filters() -> None:

@@ -454,9 +454,13 @@ class InventoryReader(Protocol):
 
     def latest_issue_evaluations(self, tenant_id: str) -> list[dict[str, Any]]: ...
 
-    def code_to_cloud_deployments(self, tenant_id: str) -> list[dict[str, Any]]: ...
+    def code_to_cloud_deployments(
+        self, tenant_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]: ...
 
-    def code_to_cloud_observations(self, tenant_id: str) -> list[dict[str, Any]]: ...
+    def code_to_cloud_observations(
+        self, tenant_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]: ...
 
     def deployment_targets(self, tenant_id: str) -> list[dict[str, Any]]: ...
 
@@ -4165,14 +4169,30 @@ def create_app(
         return row
 
     @app.get("/v1/code-to-cloud/deployments")
-    def code_to_cloud_deployments(request: Request) -> dict[str, Any]:
+    def code_to_cloud_deployments(
+        request: Request,
+        limit: int | None = Query(default=None, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
         repo, current_tenant = _context(request)
-        return {"items": repo.code_to_cloud_deployments(current_tenant)}
+        return {
+            "items": repo.code_to_cloud_deployments(current_tenant, limit=limit, offset=offset),
+            "limit": limit,
+            "offset": offset,
+        }
 
     @app.get("/v1/code-to-cloud/observations")
-    def code_to_cloud_observations(request: Request) -> dict[str, Any]:
+    def code_to_cloud_observations(
+        request: Request,
+        limit: int | None = Query(default=None, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
         repo, current_tenant = _context(request)
-        return {"items": repo.code_to_cloud_observations(current_tenant)}
+        return {
+            "items": repo.code_to_cloud_observations(current_tenant, limit=limit, offset=offset),
+            "limit": limit,
+            "offset": offset,
+        }
 
     @app.get("/v1/activity/summary")
     def activity_summary(
