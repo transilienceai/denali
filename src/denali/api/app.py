@@ -583,12 +583,16 @@ class GatewayValidateJob(BaseModel):
 
     confirm: Literal[True]
 
+    @field_validator("confirm", mode="before")
+    @classmethod
+    def require_explicit_confirmation(cls, value: Any) -> Any:
+        if value is not True:
+            raise ValueError("confirm must be true")
+        return value
 
-class GatewayCollectJob(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
+class GatewayCollectJob(GatewayValidateJob):
     collection_kind: GatewayCollectionKind
-    confirm: Literal[True]
 
 
 class RuntimeResponseCreate(BaseModel):
@@ -1161,11 +1165,15 @@ def create_app(
     )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error_without_setup_material(
+    async def validation_error_without_capability_material(
         request: Request, error: RequestValidationError
     ):
         if request.url.path == "/internal/v1/capabilities/connections/actions":
             return JSONResponse(status_code=422, content={"detail": "invalid connection action"})
+        if request.url.path == "/internal/v1/capabilities/vulnerabilities/imports":
+            # FastAPI's default errors include the rejected input. Reports and
+            # accidental credentials must never be reflected into tool results.
+            return JSONResponse(status_code=422, content={"detail": "invalid evidence import"})
         return await request_validation_exception_handler(request, error)
 
     @app.middleware("http")
@@ -1393,12 +1401,17 @@ def create_app(
 
         create_job = getattr(repo, "create_connection_validation_job", None)
         if create_job is not None:
-            job, created = create_job(
-                current_tenant,
-                connection_id,
-                wait_for_credentials=wait_for_credentials,
-                wait_for_healthy=wait_for_healthy,
-            )
+            try:
+                job, created = create_job(
+                    current_tenant,
+                    connection_id,
+                    wait_for_credentials=wait_for_credentials,
+                    wait_for_healthy=wait_for_healthy,
+                )
+            except ValueError:
+                raise HTTPException(
+                    status_code=409, detail="connection is no longer active"
+                ) from None
             if not created:
                 return {"status": "already_running", "connection_id": connection_id}
             job_id = str(job["id"])
@@ -1474,11 +1487,14 @@ def create_app(
         create_job = getattr(repo, "create_connection_collection_job", None)
         if create_job is None:
             return None
-        job, created = create_job(
-            current_tenant,
-            connection_id,
-            collection_kind=collection_kind,
-        )
+        try:
+            job, created = create_job(
+                current_tenant,
+                connection_id,
+                collection_kind=collection_kind,
+            )
+        except ValueError:
+            raise HTTPException(status_code=409, detail="connection is no longer active") from None
         if not created:
             return {"status": "already_running", "connection_id": connection_id}
         job_id = str(job["id"])

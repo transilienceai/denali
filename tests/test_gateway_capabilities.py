@@ -418,6 +418,7 @@ def test_gateway_connection_job_writes_require_admin_purpose_confirmation_and_ke
             url, json={"confirm": True}, headers={"Authorization": "Bearer admin-write"}
         ).status_code == 422
         assert client.post(url, json={"confirm": False}, headers=good).status_code == 422
+        assert client.post(url, json={"confirm": 1}, headers=good).status_code == 422
         assert client.post(
             url, json={"confirm": True, "extra": "x"}, headers=good
         ).status_code == 422

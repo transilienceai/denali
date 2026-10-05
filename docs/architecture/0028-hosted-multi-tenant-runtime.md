@@ -105,6 +105,14 @@ All new hosted work that can outlive a request must follow this pattern: durable
 claim, explicit lease/timeout, Modal worker receiving durable identifiers, database-backed status,
 sanitized terminal result, and safe retry/deduplication behavior.
 
+The hard Modal timeouts and default database leases share named constants in
+`denali.worker_limits`. Validation and collection use a 2400-second hard timeout with a
+2700-second lease; evidence imports use a 1200-second hard timeout with a 1500-second lease.
+The 300-second grace prevents stale-job replacement while the original container can still
+execute. A validation loop's shorter soft deadline cannot bound blocking provider calls and
+must not shorten its lease. Longer native/local validation deadlines retain a correspondingly
+longer lease.
+
 Microsoft Entra evidence, GitHub source, and AWS/Azure/GCP deployment collection all use
 `connection_collection_job` records and the dedicated Modal `collection_worker`. The API returns
 after the durable job is recorded and dispatched; polling reads PostgreSQL, so completion does not

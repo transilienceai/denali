@@ -237,6 +237,49 @@ def test_import_guard_and_native_evidence_validation_before_staging(changes, sta
     assert repo.import_actions == {} and store.staged == []
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "syft_report",
+        "grype_report",
+        "target_asset_id",
+        "expected_org_id",
+        "confirmed",
+        "authoritative",
+        "unrecognized_credential",
+    ],
+)
+def test_import_schema_errors_never_echo_rejected_input(field):
+    private = "private-report-or-credential-marker"
+    repo, store, spawned = ImportRepository(), Store(), []
+    rejected = [{"source": private}] if field in {"syft_report", "grype_report"} else private
+    with TestClient(app(repo, store, lambda job: spawned.append(job) or "call-1")) as client:
+        result = client.post(IMPORT, json=body(**{field: rejected}), headers=HEADERS)
+    assert result.status_code == 422
+    assert result.json() == {"detail": "invalid evidence import"}
+    assert private not in result.text
+    assert repo.import_actions == {} and store.staged == [] and spawned == []
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_import_non_object_and_malformed_json_never_echo_reports(malformed):
+    private = "private-nested-report-marker"
+    repo, store, spawned = ImportRepository(), Store(), []
+    payload = json.dumps([{"syft_report": {"source": private}}])
+    if malformed:
+        payload = '{"syft_report":{"source":"' + private + '"},"grype_report":'
+    with TestClient(app(repo, store, lambda job: spawned.append(job) or "call-1")) as client:
+        result = client.post(
+            IMPORT,
+            content=payload,
+            headers={**HEADERS, "Content-Type": "application/json"},
+        )
+    assert result.status_code == 422
+    assert result.json() == {"detail": "invalid evidence import"}
+    assert private not in result.text
+    assert repo.import_actions == {} and store.staged == [] and spawned == []
+
+
 def test_import_replay_conflict_and_api_container_replacement():
     repo, store, spawned = ImportRepository(), Store(), []
     def dispatcher(job):

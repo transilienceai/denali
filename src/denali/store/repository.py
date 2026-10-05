@@ -1005,13 +1005,9 @@ class PostgresInventoryRepository:
                 if snapshot.truncated:
                     sign_in_coverage = self._partial_if_complete(sign_in_coverage)
                     consent_coverage = self._partial_if_complete(consent_coverage)
-                    model_activity_coverage = self._partial_if_complete(
-                        model_activity_coverage
-                    )
+                    model_activity_coverage = self._partial_if_complete(model_activity_coverage)
                     aws_runtime_coverage = self._partial_if_complete(aws_runtime_coverage)
-                    aws_model_drift_coverage = self._partial_if_complete(
-                        aws_model_drift_coverage
-                    )
+                    aws_model_drift_coverage = self._partial_if_complete(aws_model_drift_coverage)
                     aws_tool_coverage = self._partial_if_complete(aws_tool_coverage)
                 evaluations = (
                     evaluate_repeated_failed_ai_signins(snapshot, coverage_state=sign_in_coverage),
@@ -1499,7 +1495,6 @@ class PostgresInventoryRepository:
             request_fields=[decision, review_note],
             apply=apply,
         )
-
 
     @staticmethod
     def _runtime_response_result(connection, row: dict[str, Any]) -> dict[str, Any]:
@@ -2849,6 +2844,15 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                target = connection.execute(
+                    """
+                    SELECT lifecycle_state FROM provider_connection
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
+                    """,
+                    (tenant_id, connection_id),
+                ).fetchone()
+                if target is None or target["lifecycle_state"] != "active":
+                    raise ValueError("connection is no longer active")
                 connection.execute(
                     """
                     UPDATE connection_validation_job
@@ -2920,9 +2924,7 @@ class PostgresInventoryRepository:
         ):
             raise ValueError("unsupported connection job action")
         table = (
-            "connection_validation_job"
-            if job_type == "validation"
-            else "connection_collection_job"
+            "connection_validation_job" if job_type == "validation" else "connection_collection_job"
         )
         request_hash = hashlib.sha256(
             json.dumps(
@@ -3216,6 +3218,15 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                target = connection.execute(
+                    """
+                    SELECT lifecycle_state FROM provider_connection
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
+                    """,
+                    (tenant_id, connection_id),
+                ).fetchone()
+                if target is None or target["lifecycle_state"] != "active":
+                    raise ValueError("connection is no longer active")
                 connection.execute(
                     """
                     UPDATE connection_collection_job
@@ -4979,17 +4990,46 @@ class PostgresInventoryRepository:
         return None if row is None else self.get_connection(tenant_id, connection_id)
 
     def disable_connection(self, tenant_id: str, connection_id: str) -> dict[str, Any] | None:
+        """Serialize disable with every durable queue using the connection row lock."""
+
         with psycopg.connect(self._dsn) as connection:
-            row = connection.execute(
-                """
-                UPDATE provider_connection
-                SET lifecycle_state = 'disabled', health_state = 'disabled', updated_at = now()
-                WHERE tenant_id = %s::uuid AND id = %s::uuid
-                RETURNING id
-                """,
-                (tenant_id, connection_id),
-            ).fetchone()
-        return None if row is None else self.get_connection(tenant_id, connection_id)
+            with connection.transaction():
+                target = connection.execute(
+                    """
+                    SELECT id FROM provider_connection
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
+                    """,
+                    (tenant_id, connection_id),
+                ).fetchone()
+                if target is None:
+                    return None
+                # A separate statement after acquiring the lock sees a queue
+                # transaction that committed while disable waited for its lock.
+                busy = connection.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM connection_validation_job
+                        WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                          AND state IN ('queued', 'running')
+                    ) OR EXISTS (
+                        SELECT 1 FROM connection_collection_job
+                        WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                          AND state IN ('queued', 'running')
+                    )
+                    """,
+                    (tenant_id, connection_id, tenant_id, connection_id),
+                ).fetchone()
+                if busy is not None and busy[0]:
+                    return None
+                connection.execute(
+                    """
+                    UPDATE provider_connection
+                    SET lifecycle_state = 'disabled', health_state = 'disabled', updated_at = now()
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid
+                    """,
+                    (tenant_id, connection_id),
+                )
+        return self.get_connection(tenant_id, connection_id)
 
     def delete_connection(self, tenant_id: str, connection_id: str) -> str:
         """Delete only disabled configuration; collected evidence remains untouched."""
@@ -5318,7 +5358,6 @@ class PostgresInventoryRepository:
                     ),
                 )
                 return result
-
 
     @staticmethod
     def _detection_coverage_state(

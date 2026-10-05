@@ -644,7 +644,7 @@ def test_clerk_tenants_cannot_cross_read_or_mutate_evidence_and_jobs(repository)
         repo.list_active_connection_refs(limit=0)
     assert repo.get_connection(beta, connection_id) is None
     assert repo.connection_validation_job_state(beta, connection_id) == "idle"
-    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+    with pytest.raises(ValueError, match="no longer active"):
         repo.create_connection_validation_job(
             beta,
             connection_id,
@@ -886,7 +886,7 @@ def test_entra_consent_state_and_collection_jobs_are_tenant_bound_and_durable(
     assert created is True
     assert duplicate_created is False
     assert duplicate["id"] == job["id"]
-    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+    with pytest.raises(ValueError, match="no longer active"):
         repo.create_connection_collection_job(
             other_tenant, connection_id, collection_kind="entra_ai"
         )

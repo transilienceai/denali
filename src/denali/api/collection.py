@@ -6,6 +6,8 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
+from denali.worker_limits import COLLECTION_WORKER_LEASE_SECONDS
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,7 +116,7 @@ def run_durable_collection_job(
     collectors: Mapping[str, Collector | None],
     job_id: str,
     *,
-    lease_seconds: int = 2700,
+    lease_seconds: int = COLLECTION_WORKER_LEASE_SECONDS,
     max_attempts: int = 3,
     on_succeeded: Callable[[str, str, str, dict[str, Any]], None] | None = None,
 ) -> None:
