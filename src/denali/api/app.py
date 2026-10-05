@@ -35,13 +35,13 @@ from denali.api.auth import (
     ClerkAuthenticator,
     RequestAuthenticator,
 )
-from denali.api.capabilities import read_route
+from denali.api.capabilities import GATEWAY_COLLECTION_KINDS, read_route
 from denali.api.clerk_admin import (
     ClerkAdminError,
     ClerkBackendOrganizationAdmin,
     ClerkOrganizationAdmin,
 )
-from denali.api.collection import run_durable_collection_job
+from denali.api.collection import COLLECTION_KINDS_BY_PROVIDER, run_durable_collection_job
 from denali.api.evidence_import import (
     MAX_REPORT_BYTES,
     EvidenceReportStore,
@@ -69,11 +69,13 @@ from denali.connections import (
     AWS_SCOPE_BEDROCK_AGENTS,
     AWS_SCOPES,
     AZURE_CLOUD_PUBLIC,
+    AZURE_REPOS_SCOPE_CONTENTS,
     AZURE_REPOS_SCOPES,
     AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY,
     AZURE_SCOPES,
     ENTRA_SCOPES,
     GCP_SCOPES,
+    GITHUB_SCOPE_REPOSITORY_CONTENTS,
     GITHUB_SCOPES,
     GOOGLE_WORKSPACE_SCOPES,
     AwsCloudFormationLauncher,
@@ -127,7 +129,7 @@ from denali.integrations.shared_github import (
     normalize_shared_repositories,
 )
 from denali.store.db import migrate
-from denali.store.repository import PostgresInventoryRepository
+from denali.store.repository import GatewayConnectionJobCooldown, PostgresInventoryRepository
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +182,17 @@ class InventoryReader(Protocol):
         *,
         wait_for_credentials: bool,
         wait_for_healthy: bool,
+    ) -> tuple[dict[str, Any], bool]: ...
+
+    def create_gateway_connection_job_idempotent(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        *,
+        job_type: str,
+        collection_kind: str | None,
+        actor: str,
+        idempotency_key: str,
     ) -> tuple[dict[str, Any], bool]: ...
 
     def connection_validation_job_state(self, tenant_id: str, connection_id: str) -> str: ...
@@ -538,6 +551,32 @@ class GovernanceUpdate(BaseModel):
     status: str = Field(pattern="^(approved|unreviewed|unwanted)$")
     owner: str | None = Field(default=None, max_length=256)
     notes: str | None = Field(default=None, max_length=4000)
+
+
+GatewayCollectionKind = Literal[
+    "aws_deployments",
+    "aws_agent_runtime",
+    "azure_deployments",
+    "azure_agent_runtime",
+    "gcp_deployments",
+    "entra_ai",
+    "github_source",
+    "azure_repos_source",
+    "google_workspace_ai",
+]
+
+
+class GatewayValidateJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: Literal[True]
+
+
+class GatewayCollectJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collection_kind: GatewayCollectionKind
+    confirm: Literal[True]
 
 
 class RuntimeResponseCreate(BaseModel):
@@ -1058,6 +1097,14 @@ def create_app(
                 request.method == "PATCH"
                 and re.fullmatch(
                     r"/internal/v1/capabilities/detections/[^/]{1,128}/responses/[^/]{1,128}",
+                    original_path,
+                )
+                is not None
+            )
+            or (
+                request.method == "POST"
+                and re.fullmatch(
+                    r"/internal/v1/capabilities/connections/[^/]{1,128}/(?:validate|collect)",
                     original_path,
                 )
                 is not None
@@ -3856,6 +3903,93 @@ def create_app(
             )
         return row
 
+    def queue_gateway_connection_job(
+        request: Request,
+        connection_id: UUID,
+        *,
+        job_type: str,
+        collection_kind: str | None = None,
+    ) -> dict[str, Any]:
+        repo, current_tenant = _context(request)
+        key = _gateway_idempotency_key(request)
+        target = repo.get_connection_validation_target(current_tenant, str(connection_id))
+        if target is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        _require_gateway_connection_job_ready(target, collection_kind=collection_kind)
+        if job_type == "validation":
+            validator = _gateway_validators(request).get(str(target["provider"]))
+            dispatcher = request.app.state.validation_dispatcher
+            unavailable = "connection validation is not configured"
+        else:
+            validator = _gateway_collectors(request).get(str(collection_kind))
+            dispatcher = request.app.state.collection_dispatcher
+            unavailable = "connection collection is not configured"
+        if validator is None or dispatcher is None:
+            raise HTTPException(status_code=503, detail=unavailable)
+        reserve = getattr(repo, "create_gateway_connection_job_idempotent", None)
+        if reserve is None:
+            raise HTTPException(status_code=503, detail="durable connection jobs unavailable")
+        try:
+            result, created = reserve(
+                current_tenant,
+                str(connection_id),
+                job_type=job_type,
+                collection_kind=collection_kind,
+                actor=request.state.denali_auth.user_id,
+                idempotency_key=key,
+            )
+        except GatewayConnectionJobCooldown as error:
+            raise HTTPException(
+                status_code=429,
+                detail="connection job recently requested; retry after five minutes",
+                headers={"Retry-After": "300"},
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if created:
+            job_id = result["job_id"]
+            try:
+                call_id = dispatcher(job_id)
+                if call_id:
+                    if job_type == "validation":
+                        repo.set_connection_validation_call_id(job_id, call_id)
+                    else:
+                        repo.set_connection_collection_call_id(job_id, call_id)
+            except Exception as error:
+                if job_type == "validation":
+                    repo.fail_connection_validation_job(
+                        job_id, "Unable to dispatch validation worker."
+                    )
+                else:
+                    repo.fail_connection_collection_job(
+                        job_id, "Unable to dispatch collection worker."
+                    )
+                raise HTTPException(
+                    status_code=503, detail="Unable to dispatch connection job"
+                ) from error
+        return result
+
+    @app.post("/internal/v1/capabilities/connections/{connection_id}/validate", status_code=202)
+    def gateway_validate_connection(
+        request: Request,
+        connection_id: UUID,
+        confirmation: GatewayValidateJob,
+    ) -> dict[str, Any]:
+        return queue_gateway_connection_job(request, connection_id, job_type="validation")
+
+    @app.post("/internal/v1/capabilities/connections/{connection_id}/collect", status_code=202)
+    def gateway_collect_connection(
+        request: Request,
+        connection_id: UUID,
+        confirmation: GatewayCollectJob,
+    ) -> dict[str, Any]:
+        return queue_gateway_connection_job(
+            request,
+            connection_id,
+            job_type="collection",
+            collection_kind=confirmation.collection_kind,
+        )
+
     @app.get("/v1/sources/coverage")
     def source_coverage(request: Request) -> dict[str, Any]:
         repo, current_tenant = _context(request)
@@ -4554,6 +4688,80 @@ def _gateway_idempotency_key(request: Request) -> str:
     if re.fullmatch(r"[A-Za-z0-9_-]{8,128}", key) is None:
         raise HTTPException(status_code=422, detail="valid Idempotency-Key is required")
     return key
+
+
+def _gateway_validators(request: Request) -> dict[str, Any]:
+    state = request.app.state
+    return {
+        "aws": state.connection_validator,
+        "azure": state.azure_connection_validator,
+        "entra": state.entra_connection_validator,
+        "gcp": state.gcp_connection_validator,
+        "github": state.github_connection_validator,
+        "azure_repos": state.azure_repos_connection_validator,
+        "google_workspace": state.google_workspace_connection_validator,
+    }
+
+
+def _gateway_collectors(request: Request) -> dict[str, Any]:
+    state = request.app.state
+    return {
+        "aws_deployments": state.aws_deployment_collector,
+        "aws_agent_runtime": state.aws_agent_runtime_collector,
+        "azure_deployments": state.azure_deployment_collector,
+        "azure_agent_runtime": state.azure_agent_runtime_collector,
+        "gcp_deployments": state.gcp_deployment_collector,
+        "entra_ai": state.entra_connection_collector,
+        "github_source": state.github_repository_collector,
+        "azure_repos_source": state.azure_repos_repository_collector,
+        "google_workspace_ai": state.google_workspace_connection_collector,
+    }
+
+
+def _require_gateway_connection_job_ready(
+    target: dict[str, Any], *, collection_kind: str | None
+) -> None:
+    """Apply the browser's setup checks and narrow a collection to one declared plane."""
+
+    provider = str(target["provider"])
+    configuration = target.get("configuration") or {}
+    scopes = set(target.get("declared_scopes") or [])
+    if target["lifecycle_state"] != "active":
+        raise HTTPException(status_code=409, detail="disabled connections cannot start jobs")
+    if provider not in COLLECTION_KINDS_BY_PROVIDER:
+        raise HTTPException(status_code=422, detail="connection provider is not supported")
+    if collection_kind is not None and collection_kind not in GATEWAY_COLLECTION_KINDS:
+        raise HTTPException(status_code=422, detail="collection kind is not supported")
+    if (
+        collection_kind is not None
+        and collection_kind not in COLLECTION_KINDS_BY_PROVIDER[provider]
+    ):
+        raise HTTPException(status_code=422, detail="collection kind does not match provider")
+    if provider == "azure" and not configuration.get("subscriptions"):
+        raise HTTPException(status_code=409, detail="complete Azure subscription selection first")
+    if provider == "gcp" and not configuration.get("projects"):
+        raise HTTPException(status_code=409, detail="complete Google Cloud project selection first")
+    if provider in {"github", "azure_repos"} and not configuration.get("repositories"):
+        raise HTTPException(status_code=409, detail="complete repository selection first")
+    if provider in {"entra", "google_workspace"} and not configuration.get(
+        "onboarding", {}
+    ).get("completed_at"):
+        raise HTTPException(status_code=409, detail="complete provider authorization first")
+    if collection_kind is None:
+        return
+    eligible_scopes = {
+        "aws_deployments": set(AWS_SCOPES) - {AWS_SCOPE_AGENT_RUNTIME_ACTIVITY},
+        "aws_agent_runtime": {AWS_SCOPE_AGENT_RUNTIME_ACTIVITY},
+        "azure_deployments": set(AZURE_SCOPES) - {AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY},
+        "azure_agent_runtime": {AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY},
+        "gcp_deployments": set(GCP_SCOPES),
+        "entra_ai": set(ENTRA_SCOPES),
+        "github_source": {GITHUB_SCOPE_REPOSITORY_CONTENTS},
+        "azure_repos_source": {AZURE_REPOS_SCOPE_CONTENTS},
+        "google_workspace_ai": set(GOOGLE_WORKSPACE_SCOPES),
+    }[collection_kind]
+    if not scopes & eligible_scopes:
+        raise HTTPException(status_code=409, detail="connection has no selected collection scope")
 
 
 def _clerk_admin_context(
