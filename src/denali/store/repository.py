@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -215,6 +216,16 @@ class PostgresInventoryRepository:
             ).fetchone()
         assert row is not None
         return str(row[0])
+
+    def lookup_tenant(self, clerk_organization_id: str) -> str | None:
+        """Read an existing mapping without creating a tenant for machine traffic."""
+
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                "SELECT id FROM denali_tenant WHERE clerk_organization_id = %s",
+                (clerk_organization_id,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
 
     def ingest(self, tenant_id: str, batch: InventoryBatch) -> dict[str, int]:
         """Persist a batch atomically and reconcile only completely covered planes."""
@@ -1231,6 +1242,187 @@ class PostgresInventoryRepository:
             ).fetchone()
             return None if row is None else self._runtime_response_result(connection, row)
 
+    def _gateway_runtime_response_once(
+        self,
+        tenant_id: str,
+        detection_id: str,
+        *,
+        actor: str,
+        idempotency_key: str,
+        action_kind: str,
+        response_id: str | None,
+        request_fields: list[Any],
+        apply: Callable[[psycopg.Connection[Any]], dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
+        request_hash = hashlib.sha256(
+            json.dumps(
+                [actor, action_kind, detection_id, response_id, *request_fields],
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"denali-gateway-response:{tenant_id}:{idempotency_key}",),
+                )
+                previous = connection.execute(
+                    """
+                    SELECT request_hash, result FROM gateway_runtime_response_action
+                    WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                    """,
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if previous is not None:
+                    if previous["request_hash"] != request_hash:
+                        raise ValueError("idempotency key was already used for another action")
+                    return dict(previous["result"])
+                result = apply(connection)
+                if result is None:
+                    return None
+                encoded = json.loads(json.dumps(result, default=str))
+                connection.execute(
+                    """
+                    INSERT INTO gateway_runtime_response_action
+                        (tenant_id, idempotency_key, request_hash, actor_user_id,
+                         action_kind, detection_id, response_id, result)
+                    VALUES (%s::uuid, %s, %s, %s, %s, %s::uuid, %s::uuid, %s::jsonb)
+                    """,
+                    (
+                        tenant_id,
+                        idempotency_key,
+                        request_hash,
+                        actor,
+                        action_kind,
+                        detection_id,
+                        response_id or encoded["id"],
+                        json.dumps(encoded),
+                    ),
+                )
+                return encoded
+
+    def create_runtime_response_request_idempotent(
+        self,
+        tenant_id: str,
+        detection_id: str,
+        *,
+        action_type: str,
+        target_asset_id: str | None,
+        justification: str,
+        requested_by: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Atomically record one manual proposal, with no provider execution."""
+
+        def apply(connection: psycopg.Connection[Any]) -> dict[str, Any] | None:
+            detection = connection.execute(
+                "SELECT 1 FROM runtime_detection WHERE tenant_id = %s::uuid AND id = %s::uuid",
+                (tenant_id, detection_id),
+            ).fetchone()
+            if detection is None:
+                return None
+            expected_kind = _RUNTIME_RESPONSE_TARGET_KINDS.get(action_type)
+            if action_type != "preserve_and_investigate" and expected_kind is None:
+                return None
+            if expected_kind is not None and target_asset_id is None:
+                return None
+            if target_asset_id is not None:
+                target = connection.execute(
+                    """
+                    SELECT target.kind
+                    FROM runtime_detection_asset linked
+                    JOIN asset target ON target.tenant_id = linked.tenant_id
+                                     AND target.id = linked.asset_id
+                    WHERE linked.tenant_id = %s::uuid
+                      AND linked.detection_id = %s::uuid
+                      AND linked.asset_id = %s::uuid
+                    LIMIT 1
+                    """,
+                    (tenant_id, detection_id, target_asset_id),
+                ).fetchone()
+                if target is None or (expected_kind and target["kind"] != expected_kind):
+                    return None
+            try:
+                row = connection.execute(
+                    """
+                    INSERT INTO runtime_response_request
+                      (tenant_id, detection_id, target_asset_id, action_type,
+                       justification, requested_by)
+                    VALUES (%s::uuid, %s::uuid, %s::uuid, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (
+                        tenant_id,
+                        detection_id,
+                        target_asset_id,
+                        action_type,
+                        justification,
+                        requested_by,
+                    ),
+                ).fetchone()
+            except psycopg.errors.UniqueViolation as error:
+                raise ValueError("an equivalent response is already awaiting approval") from error
+            return None if row is None else self._runtime_response_result(connection, row)
+
+        return self._gateway_runtime_response_once(
+            tenant_id,
+            detection_id,
+            actor=requested_by,
+            idempotency_key=idempotency_key,
+            action_kind="request",
+            response_id=None,
+            request_fields=[action_type, target_asset_id, justification],
+            apply=apply,
+        )
+
+    def review_runtime_response_request_idempotent(
+        self,
+        tenant_id: str,
+        detection_id: str,
+        response_id: str,
+        *,
+        decision: str,
+        review_note: str | None,
+        reviewed_by: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Atomically record an independent decision, without provider mutation."""
+
+        def apply(connection: psycopg.Connection[Any]) -> dict[str, Any] | None:
+            row = connection.execute(
+                """
+                UPDATE runtime_response_request
+                SET state = %s, reviewed_by = %s, review_note = %s, reviewed_at = now()
+                WHERE tenant_id = %s::uuid AND detection_id = %s::uuid
+                  AND id = %s::uuid AND state = 'awaiting_approval'
+                  AND requested_by <> %s
+                RETURNING *
+                """,
+                (
+                    decision,
+                    reviewed_by,
+                    review_note,
+                    tenant_id,
+                    detection_id,
+                    response_id,
+                    reviewed_by,
+                ),
+            ).fetchone()
+            return None if row is None else self._runtime_response_result(connection, row)
+
+        return self._gateway_runtime_response_once(
+            tenant_id,
+            detection_id,
+            actor=reviewed_by,
+            idempotency_key=idempotency_key,
+            action_kind="review",
+            response_id=response_id,
+            request_fields=[decision, review_note],
+            apply=apply,
+        )
+
+
     @staticmethod
     def _runtime_response_result(connection, row: dict[str, Any]) -> dict[str, Any]:
         """Return one response without tenant internals and with a consistent target view."""
@@ -2020,7 +2212,9 @@ class PostgresInventoryRepository:
             )
         return targets
 
-    def code_to_cloud_deployments(self, tenant_id: str) -> list[dict[str, Any]]:
+    def code_to_cloud_deployments(
+        self, tenant_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]:
         """Return proven repository-to-workload links and their runtime context."""
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
@@ -2484,13 +2678,17 @@ class PostgresInventoryRepository:
                   AND workload.kind = 'ai_workload' AND repository.kind = 'code_repository'
                   AND workload.lifecycle_state = 'active'
                   AND repository.lifecycle_state = 'active'
-                ORDER BY repository_view.display_name, workload_view.display_name
+                ORDER BY repository_view.display_name, workload_view.display_name,
+                         deployment.id
+                LIMIT %s OFFSET %s
                 """,
-                (tenant_id,),
+                (tenant_id, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def code_to_cloud_observations(self, tenant_id: str) -> list[dict[str, Any]]:
+    def code_to_cloud_observations(
+        self, tenant_id: str, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]:
         """Return latest source-collection and correlation disposition per repository."""
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
@@ -2554,9 +2752,10 @@ class PostgresInventoryRepository:
                            combined.source_collected_at,
                            combined.analysis_collected_at
                          ) DESC NULLS LAST,
-                         repository_natural_key
+                         repository_natural_key, combined.connection_id, combined.scope
+                LIMIT %s OFFSET %s
                 """,
-                (tenant_id, tenant_id, tenant_id),
+                (tenant_id, tenant_id, tenant_id, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -4627,6 +4826,74 @@ class PostgresInventoryRepository:
                 (status, owner, notes, tenant_id, asset_id),
             ).fetchone()
         return None if row is None else dict(row)
+
+    def set_governance_idempotent(
+        self,
+        tenant_id: str,
+        asset_id: str,
+        *,
+        status: str,
+        owner: str | None,
+        notes: str | None,
+        actor: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        """Apply one tenant-scoped gateway action and record its immutable audit result."""
+
+        if status not in {"approved", "unreviewed", "unwanted"}:
+            raise ValueError("unsupported governance status")
+        request_hash = hashlib.sha256(
+            json.dumps(
+                [actor, asset_id, status, owner, notes],
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest()
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"denali-gateway-governance:{tenant_id}:{idempotency_key}",),
+                )
+                previous = connection.execute(
+                    """
+                    SELECT request_hash, result FROM gateway_governance_action
+                    WHERE tenant_id = %s::uuid AND idempotency_key = %s
+                    """,
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if previous is not None:
+                    if previous["request_hash"] != request_hash:
+                        raise ValueError("idempotency key was already used for another action")
+                    return dict(previous["result"])
+                row = connection.execute(
+                    """
+                    UPDATE asset SET governance_status = %s, owner = %s, notes = %s
+                    WHERE tenant_id = %s::uuid AND id = %s::uuid
+                    RETURNING id, governance_status, owner, notes
+                    """,
+                    (status, owner, notes, tenant_id, asset_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                result = json.loads(json.dumps(dict(row), default=str))
+                connection.execute(
+                    """
+                    INSERT INTO gateway_governance_action
+                        (tenant_id, idempotency_key, request_hash, actor_user_id, asset_id, result)
+                    VALUES (%s::uuid, %s, %s, %s, %s::uuid, %s::jsonb)
+                    """,
+                    (
+                        tenant_id,
+                        idempotency_key,
+                        request_hash,
+                        actor,
+                        asset_id,
+                        json.dumps(result),
+                    ),
+                )
+                return result
+
 
     @staticmethod
     def _detection_coverage_state(

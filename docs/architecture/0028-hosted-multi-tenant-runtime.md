@@ -72,6 +72,14 @@ Every tenant-owned repository method accepts the server-resolved Denali tenant U
 from request bodies, query parameters, routes, arbitrary headers, or the browser's selected state
 are untrusted and cannot select a tenant.
 
+The optional Platform results/MCP receiver is a separate internal API boundary, not
+a second database reader or browser API. It accepts only named, versioned Denali
+capabilities and short-lived Clerk M2M tokens from an exact gateway machine,
+bound to a verified user and Organization. Denali checks live Organization
+membership, resolves an existing tenant mapping without creating one, and
+requires an Organization admin plus an idempotency key for Denali-record writes.
+See [the capability gateway contract](../development/capability-gateway.md).
+
 `/healthz`, API documentation, and the Entra and GitHub provider callbacks are public at
 the HTTP middleware layer. Callback authorization instead uses verified, expiring, one-time setup
 state. The stored state resolves both tenant and connection, so changing the browser's active
