@@ -34,7 +34,8 @@ routes retain the unbounded default when those parameters are omitted.
 | Activity | `activity-summary`, `activity`, `activity-detail`, `runtime-sessions`, `runtime-session-detail` |
 | Detections | `detections-summary`, `detections`, `detection-detail`, `detection-evaluations` |
 
-This is **28 named reads across eight Denali areas**, not the whole Denali
+This is **33 named reads across eight Denali areas**, including five bounded
+connection setup/shared reads described below, not the whole Denali
 API. For scale, the current production OpenAPI has 68 public paths before
 this receiver. The browser retains all of those app-specific routes; MCP/CLI
 receives only this reviewed catalog.
@@ -45,8 +46,9 @@ requires `?id=<UUID>`. Both read only the Denali-local connection's ID,
 provider, display name, lifecycle/health states, declared scopes, and
 created/updated/last-validated timestamps. They never query or return
 credential references, provider configuration, validation results, or setup
-state. This view does not grant connector creation, validation, collection,
-disable, or deletion through MCP/CLI.
+state. These reads do not authorize a lifecycle action by themselves. Separate
+guarded lifecycle operations are described in
+[connection lifecycle capabilities](connection-capability-lifecycle.md).
 
 The asset-governance write operation is:
 
@@ -80,8 +82,9 @@ request hashes, actors, and outcomes atomically with the app-owned mutation.
 
 Every request requires a short-lived Clerk M2M token from the configured gateway
 machine, scoped to the Denali receiver machine and bound to `org_id` and `user_id`.
-GET requires token purpose `results:read`; mutations (POST/PATCH) require
-`denali:write`. Denali independently checks **current** Clerk membership,
+GET requires token purpose `results:read`; ordinary mutations require
+`denali:write`; connection disable/delete and shared disable require the distinct
+`denali:connections:destructive` purpose. Denali independently checks **current** Clerk membership,
 requires `org:admin` for every mutation, looks up the pre-existing Clerk-org →
 Denali-tenant mapping, and scopes all repository operations by that tenant UUID.
 A removed member is denied even if their gateway token has not expired. Responses
@@ -91,11 +94,22 @@ Unknown routes and unconfigured receivers return 404; invalid tokens 401;
 non-members and non-admin writers 403; malformed input 422; unmapped organizations
 and missing assets 404. Clerk membership lookup failure returns 503, never access.
 
+## Connection lifecycle extension
+
+The named lifecycle action receiver and five additional bounded setup/shared reads
+are documented in [connection lifecycle capabilities](connection-capability-lifecycle.md).
+They preserve all seven native providers and the shared AWS app-entitlement and
+organization-allowlist boundary. Destructive disable/delete require a distinct
+downstream purpose and optional OAuth consent, current administrator membership,
+exact target confirmation, organization guard and durable idempotency. Setup state,
+links and codes retain their existing one-time protocols and are never stored in
+the action ledger. Migration 024 adds its identifier-only audit records.
+
 ## Deliberate exclusions
 
 The receiver does not expose health, account administration, invitations, provider
-callbacks, CloudFormation/setup artifacts, raw connection configuration, credential
-leases, runtime-session export, connection disable/delete, customer-cloud mutation,
+callbacks, raw connection configuration, credential
+leases, runtime-session export, customer-cloud mutation,
 or arbitrary API forwarding. Existing Denali write APIs for vulnerability imports
 and validation/collection are **not yet** gateway capabilities; each needs its own
 authorization, audit, idempotency, and durable-work review. This change does not
@@ -104,8 +118,8 @@ shared-GitHub connector. This is not full Denali API parity.
 
 | Surface | In this release | Still outside MCP/CLI |
 | --- | --- | --- |
-| Denali results | 28 bounded reads | Raw exports and unreviewed future API paths |
-| Denali records | 3 audited writes: asset governance, response proposal, independent response review | Connection lifecycle, provider setup/callbacks, import, scan/collection controls, invitations and admin |
+| Denali results | 33 bounded reads | Raw exports and unreviewed future API paths |
+| Denali records | Governance, response proposal/review, guarded connection lifecycle/setup | Provider callbacks, import, scan/collection controls, invitations and admin |
 | Customer AWS/GitHub resources | No mutation | All resource-changing actions and remediation |
 
 Expand in that order: first review additional existing Denali-record mutations
@@ -117,7 +131,7 @@ Denali URLs or provider SDK calls through the gateway.
 ## Production enablement and release gate
 
 Review and merge this PR to `main`; never deploy its feature branch. The protected
-production workflow applies migrations 021 and 022 before deploying the receiver.
+production workflow applies migrations 021, 022 and 024 before deploying the receiver.
 It must pass Ruff, the full Python and PostgreSQL integration suites, Modal
 compilation, and the frontend build. The new internal routes remain disabled
 until the production Modal core Secret has these names configured:

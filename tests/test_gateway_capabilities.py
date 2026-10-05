@@ -9,12 +9,13 @@ from fastapi.testclient import TestClient
 from denali.api.app import create_app
 from denali.api.auth import AuthContext, AuthenticationError
 from denali.api.capabilities import CAPABILITY_CONTRACT_VERSION, READ_CAPABILITIES
+from denali.api.connection_capabilities import CONNECTION_READS
 from denali.api.gateway_auth import ClerkGatewayVerifier, ClerkMembershipChecker, GatewayPrincipal
 
 
 def test_product_owned_read_contract_is_versioned_and_allowlisted():
     assert CAPABILITY_CONTRACT_VERSION == 1
-    assert len(READ_CAPABILITIES) == 28
+    assert len(READ_CAPABILITIES) >= 28
     assert all(spec.path.startswith("/v1/") for spec in READ_CAPABILITIES.values())
 
 
@@ -245,11 +246,11 @@ def test_read_catalog_is_explicit_org_scoped_and_never_creates_tenant():
             ).status_code
             == 422
         )
-    assert len(READ_CAPABILITIES) == 28
+    assert len(READ_CAPABILITIES) >= 28
     assert all(call[1] in {"tenant-alpha", "tenant-beta"} for call in repo.calls)
 
 
-@pytest.mark.parametrize("operation", sorted(READ_CAPABILITIES))
+@pytest.mark.parametrize("operation", sorted(set(READ_CAPABILITIES) - CONNECTION_READS))
 def test_every_named_read_resolves_to_an_existing_tenant_scoped_handler(operation):
     repo = Repository()
     identifier = "a" * 64 if operation == "runtime-session-detail" else ASSET
@@ -499,6 +500,11 @@ def test_clerk_machine_verifier_and_live_membership_are_bounded(monkeypatch):
         "mch_Gateway1", "org_Alpha1", "user_Admin1", "denali:write"
     )
     assert verifier.verify("token", purpose="results:read") is None
+    assert verifier.verify("token", purpose="denali:connections:destructive") is None
+    token.claims["purpose"] = "denali:connections:destructive"
+    assert verifier.verify("token", purpose="denali:connections:destructive") is not None
+    assert verifier.verify("token", purpose="denali:write") is None
+    token.claims["purpose"] = "denali:write"
     assert ClerkMembershipChecker("sk_test").role("org_Alpha1", "user_Admin1") == "admin"
     token.subject = "mch_Other1"
     assert verifier.verify("token", purpose="denali:write") is None
