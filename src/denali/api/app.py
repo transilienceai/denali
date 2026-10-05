@@ -1233,9 +1233,14 @@ def create_app(
             if original_path == "/internal/v1/capabilities/connections/actions":
                 # The action discriminant selects a required purpose, not authority.
                 # The machine verifier still authenticates that exact purpose below.
-                body = await request.body()
-                if len(body) > 65536:
-                    return JSONResponse(status_code=413, content={"detail": "action is too large"})
+                body = bytearray()
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > 65536:
+                        return JSONResponse(
+                            status_code=413, content={"detail": "action is too large"}
+                        )
+                    body.extend(chunk)
+                request._body = bytes(body)
                 try:
                     action_fields = json.loads(body)
                 except (ValueError, UnicodeDecodeError):

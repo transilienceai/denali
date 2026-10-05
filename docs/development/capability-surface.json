@@ -1,10 +1,12 @@
 {
   "schema_version": 1,
   "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
-  "public_operation_count": 81,
-  "explicit_public_operation_count": 77,
+  "public_operation_count": 86,
+  "explicit_public_operation_count": 82,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
+  "release_named_read_count": 35,
+  "release_named_write_count": 16,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
   "browser_operation_count": 67,
   "exceptions": {
@@ -16,6 +18,51 @@
     "raw_connection_reads": "Raw credential references and configuration are replaced by reviewed tenant-scoped safe connection projections."
   },
   "operations": [
+    {
+      "method": "GET",
+      "path": "/v1/connection-setup-summaries/{connection_id}",
+      "handler": "connection_setup_summary",
+      "browser_methods": [],
+      "class": "connector_product",
+      "disposition": "additive_sanitized_projection",
+      "capability": "connection-setup-status"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connection-setup-templates/aws/{connection_id}",
+      "handler": "connection_aws_template_summary",
+      "browser_methods": [],
+      "class": "connector_product",
+      "disposition": "additive_sanitized_projection",
+      "capability": "connection-aws-template"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connection-summaries",
+      "handler": "shared_connection_summaries",
+      "browser_methods": [],
+      "class": "shared_pilot",
+      "disposition": "additive_sanitized_projection",
+      "capability": "shared-connections"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connection-summaries/aws/{connection_id}",
+      "handler": "shared_aws_summary",
+      "browser_methods": [],
+      "class": "shared_pilot",
+      "disposition": "additive_sanitized_projection",
+      "capability": "shared-aws-status"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connection-setup-templates/aws/{connection_id}",
+      "handler": "shared_aws_template_summary",
+      "browser_methods": [],
+      "class": "shared_pilot",
+      "disposition": "additive_sanitized_projection",
+      "capability": "shared-aws-template"
+    },
     {
       "method": "GET",
       "path": "/",
