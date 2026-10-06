@@ -282,8 +282,10 @@ def test_import_non_object_and_malformed_json_never_echo_reports(malformed):
 
 def test_import_replay_conflict_and_api_container_replacement():
     repo, store, spawned = ImportRepository(), Store(), []
+
     def dispatcher(job):
         return spawned.append(job) or "call-1"
+
     with TestClient(app(repo, store, dispatcher)) as client:
         first = client.post(IMPORT, json=body(), headers=HEADERS)
         assert first.status_code == 202
@@ -388,7 +390,12 @@ def test_exhaustive_public_surface_map_covers_every_explicit_route_and_browser_m
     root = Path(__file__).resolve().parents[1]
     mapped = json.loads((root / "docs/development/capability-surface.json").read_text())
     actual = set()
-    for node in ast.walk(ast.parse((root / "src/denali/api/app.py").read_text())):
+    product_sources = ["src/denali/api/app.py", "src/denali/resource_writes/api.py"]
+    for node in (
+        node
+        for source in product_sources
+        for node in ast.walk(ast.parse((root / source).read_text()))
+    ):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for decorator in node.decorator_list:
@@ -400,6 +407,9 @@ def test_exhaustive_public_surface_map_covers_every_explicit_route_and_browser_m
                 and decorator.func.attr in {"get", "post", "patch", "delete", "put"}
                 and decorator.args
             ):
+                if isinstance(decorator.args[0], ast.Name):
+                    assert decorator.args[0].id == "INTERNAL_PATH"
+                    continue  # Versioned product-owned receiver, checked by its contract tests.
                 route = ast.literal_eval(decorator.args[0])
                 if not route.startswith("/internal/"):
                     actual.add((decorator.func.attr.upper(), route, node.name))

@@ -1,14 +1,15 @@
 {
   "schema_version": 1,
   "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
-  "public_operation_count": 101,
-  "explicit_public_operation_count": 97,
+  "public_operation_count": 106,
+  "explicit_public_operation_count": 102,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
-  "release_named_read_count": 37,
+  "release_named_read_count": 38,
   "release_named_write_count": 16,
+  "release_named_resource_write_count": 4,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
-  "browser_operation_count": 82,
+  "browser_operation_count": 87,
   "exceptions": {
     "shared_github_pilot": "Default-off shared GitHub installation consent and attachment are authenticated browser workflows. Existing named connection validation, collection, job polling and results capabilities reuse attached shared references; no new MCP lifecycle tools or customer repository writes are advertised.",
     "security_admin_user_creation": "Password-based Clerk user creation remains a secure browser workflow; passwords must never enter model/chat context.",
@@ -20,6 +21,51 @@
     "shared_gcp_pilot": "Default-off shared GCP setup/attachment are authenticated browser pilot workflows. Existing named connection validation, collection, job polling and result capabilities work on attached shared references; this pilot does not advertise additional MCP lifecycle tools."
   },
   "operations": [
+    {
+      "method": "POST",
+      "path": "/v1/resource-writes/previews",
+      "handler": "preview",
+      "browser_methods": ["previewResourceWrite"],
+      "class": "resource_remediation",
+      "disposition": "dedicated_opt_in_two_admin_resource_write",
+      "capability": "resource-write-preview"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/resource-writes/requests",
+      "handler": "submit",
+      "browser_methods": ["requestResourceWrite"],
+      "class": "resource_remediation",
+      "disposition": "dedicated_opt_in_two_admin_resource_write",
+      "capability": "resource-write-request"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/resource-writes/requests/{request_id}/review",
+      "handler": "review",
+      "browser_methods": ["reviewResourceWrite"],
+      "class": "resource_remediation",
+      "disposition": "dedicated_opt_in_two_admin_resource_write",
+      "capability": "resource-write-review"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/resource-writes/requests/{request_id}",
+      "handler": "status",
+      "browser_methods": ["resourceWriteStatus"],
+      "class": "resource_remediation",
+      "disposition": "admin_only_sanitized_projection",
+      "capability": "resource-write-status"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/resource-writes/requests/{request_id}/reconcile",
+      "handler": "reconcile",
+      "browser_methods": ["reconcileResourceWrite"],
+      "class": "resource_remediation",
+      "disposition": "dedicated_opt_in_read_only_provider_reconciliation",
+      "capability": "resource-write-reconcile"
+    },
     {
       "method": "GET",
       "path": "/v1/shared/connections/github",

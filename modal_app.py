@@ -397,6 +397,25 @@ def _dispatch_vulnerability_import(job_id: str) -> str:
     return call.object_id
 
 
+@app.function(image=image, secrets=runtime_secrets, timeout=900, **_region_options())
+def resource_write_worker(request_id: str) -> None:
+    """Execute one approved durable ID; default-off, no API-container state."""
+    from denali.api.gateway_auth import ClerkMembershipChecker
+    from denali.resource_writes.service import RemediationService
+    from denali.store.repository import PostgresInventoryRepository
+
+    service = RemediationService.from_environment(
+        PostgresInventoryRepository(os.environ.get("DENALI_DSN", "")),
+        ClerkMembershipChecker(os.environ.get("CLERK_SECRET_KEY", "")),
+    )
+    if service is not None:
+        service.execute(request_id)
+
+
+def _dispatch_resource_write(request_id: str) -> str:
+    return resource_write_worker.spawn(request_id).object_id
+
+
 @app.function(
     image=image,
     secrets=shared_connections_secrets,
@@ -416,6 +435,7 @@ def api():
         validation_dispatcher=_dispatch_validation,
         collection_dispatcher=_dispatch_collection,
         vulnerability_import_dispatcher=_dispatch_vulnerability_import,
+        resource_write_dispatcher=_dispatch_resource_write,
         migrate_on_start=False,
     )
 
