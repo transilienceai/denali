@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from test_shared_connections_api import FakeAuthenticator, FakeRepository
@@ -481,9 +482,18 @@ def test_broker_token_expiry_repository_boundary_and_http_read_allowlist(monkeyp
     app = SharedGitHubAppClient(Platform(), target())
     token = app.create_installation_token(installation_id=99, repository_id=42)
     requests = []
+
+    def read(*args, **kwargs):
+        requests.append((args, kwargs))
+        return httpx.Response(
+            200,
+            json={**REPOSITORY, "owner": {"id": 7, "login": "transilienceai"}},
+            request=httpx.Request(*args),
+        )
+
     monkeypatch.setattr(
         "denali.integrations.shared_github.httpx.request",
-        lambda *args, **kwargs: requests.append((args, kwargs)),
+        read,
     )
     app.installation_request("GET", "/repos/transilienceai/demo", token=token)
     assert requests[0][1]["follow_redirects"] is False

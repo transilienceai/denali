@@ -608,6 +608,8 @@ body { font-size: 14px; }
 .shared-aws-pilot-form input, .shared-aws-pilot-detail select { min-height: 38px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); }
 .shared-aws-pilot-actions button, .shared-aws-pilot-heading button { min-height: 36px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); cursor: pointer; }
 .shared-aws-pilot-detail { display: grid; gap: 12px; }
+.shared-aws-pilot-detail .shared-github-repository-choice { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.shared-github-repository-choice input { flex: 0 0 auto; margin: 0; }
 .shared-aws-pilot-message { color: var(--green); margin: 0; }
 .shared-aws-pilot-error { color: var(--color-role-status-high-foreground); margin: 0; }
 .connection-intro { align-items: center; }

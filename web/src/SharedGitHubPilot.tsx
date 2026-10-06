@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type SharedGitHubConnection, type SharedGitHubRepository } from "./api";
-import { sharedGithubNotEnabled, verifiedInstallUrl } from "./sharedGithubOnboarding";
+import { selectedGithubRepositoryIds, sharedGithubNotEnabled, verifiedInstallUrl } from "./sharedGithubOnboarding";
 
 export function SharedGitHubPilot({ canWrite, onChanged }: { canWrite: boolean; onChanged: () => Promise<void> }) {
   const [available, setAvailable] = useState(false);
   const [items, setItems] = useState<SharedGitHubConnection[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [repositories, setRepositories] = useState<SharedGitHubRepository[]>([]);
+  const [repositoryIds, setRepositoryIds] = useState<number[]>([]);
   const [installUrl, setInstallUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -29,6 +30,7 @@ export function SharedGitHubPilot({ canWrite, onChanged }: { canWrite: boolean; 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
     setRepositories([]);
+    setRepositoryIds([]);
     if (!selected || selected.availability !== "ready") return;
     let current = true;
     void api.sharedGithubRepositories(selected.id).then((result) => {
@@ -57,16 +59,17 @@ export function SharedGitHubPilot({ canWrite, onChanged }: { canWrite: boolean; 
     void perform(async () => {
       const result = await api.startSharedGithubSetup();
       setInstallUrl(verifiedInstallUrl(result.install_url));
-      setMessage("Open GitHub setup, select only the required repositories and complete user authorization. When Platform confirms success, return here and refresh; then choose Use in Denali.");
+      setMessage("Open GitHub setup, grant only required repositories and complete authorization. When Platform confirms success, refresh here and explicitly select the repositories for this Denali connection.");
     });
   }
 
   function useInDenali() {
     if (!selected) return;
     void perform(async () => {
-      await api.useSharedGithubInDenali(selected.id);
+      const selection = selectedGithubRepositoryIds(repositoryIds, repositories.map((repo) => repo.id));
+      await api.useSharedGithubInDenali(selected.id, selection);
       await onChanged();
-      setMessage("Shared GitHub is now in Denali. Validate it and collect source below.");
+      setMessage("The selected repositories have their own Denali connection. Existing connections were not changed. Validate it and collect source below.");
     });
   }
 
@@ -82,7 +85,7 @@ export function SharedGitHubPilot({ canWrite, onChanged }: { canWrite: boolean; 
   if (!available) return null;
   return <section className="panel shared-aws-pilot" aria-label="Shared GitHub connection">
     <div className="shared-aws-pilot-heading">
-      <div><span className="eyebrow">REUSABLE GITHUB CONNECTION</span><h3>Connect repositories once</h3><p>Platform owns this separate read-only GitHub App. Authorized apps reuse the exact repository selection; existing Denali-managed GitHub connections stay unchanged. Tokens remain temporary and server-side.</p></div>
+      <div><span className="eyebrow">REUSABLE GITHUB CONNECTION</span><h3>Connect repositories once</h3><p>Platform owns this separate read-only GitHub App. Select a pinned subset for each Denali connection. Adding repositories to the installation never widens existing Denali connections. Tokens remain temporary and server-side.</p></div>
       <button type="button" onClick={() => void refresh()}>Refresh</button>
     </div>
     {canWrite && <div className="shared-aws-pilot-actions">
@@ -94,9 +97,11 @@ export function SharedGitHubPilot({ canWrite, onChanged }: { canWrite: boolean; 
         {items.map((item) => <option key={item.id} value={item.id}>{item.account_login} · {item.repository_count} repositories · {item.availability}</option>)}
       </select></label>
       {selected && <><p>GitHub account {selected.account_login} · installation {selected.installation_id} · {selected.repository_count} exact repositories · {selected.availability}</p>
-        {repositories.length > 0 && <details><summary>Review {repositories.length} exact repositories</summary><ul>{repositories.map((repo) => <li key={repo.id}>{repo.full_name} · repository ID {repo.id}{repo.archived ? " · archived" : ""}</li>)}</ul></details>}
+        {repositories.length > 0 && <details open><summary>Select from {repositories.length} available repositories</summary><ul>{repositories.map((repo) => <li key={repo.id}>
+          <label className="shared-github-repository-choice"><input type="checkbox" disabled={!canWrite || busy} checked={repositoryIds.includes(repo.id)} onChange={(event) => setRepositoryIds((previous) => event.target.checked ? [...previous, repo.id] : previous.filter((id) => id !== repo.id))} /> {repo.full_name} · repository ID {repo.id}{repo.archived ? " · archived" : ""}</label>
+        </li>)}</ul><p>Selections reset on refresh. Each saved connection keeps its exact repository identities; a changed selection creates a separate local connection.</p></details>}
         {canWrite && <div className="shared-aws-pilot-actions">
-          <button type="button" disabled={busy || selected.availability !== "ready"} onClick={useInDenali}>Use in Denali</button>
+          <button type="button" disabled={busy || selected.availability !== "ready" || repositoryIds.length === 0} onClick={useInDenali}>Use selected repositories in Denali</button>
           <button type="button" disabled={busy || selected.availability === "disabled"} onClick={disable}>Disable for organization</button>
         </div>}
       </>}

@@ -6,10 +6,10 @@ export function githubConnectionPresentation(credentialType: string) {
       planDetail: "Denali records a reference to the Platform-owned GitHub installation, its declared read planes and exact repository IDs. No App private key or provider token is stored in this reference.",
       setupTitle: "2. Platform installation verified",
       setupDetail: "Platform owns the GitHub App and verifies installation consent and the exact selected repositories. Denali reuses this organization’s verified shared connection.",
-      setupHint: "Manage consent in the reusable GitHub section above. Selection changes never update this reference automatically; an admin must review an explicit local detach and re-attach.",
+      setupHint: "Manage consent in the reusable GitHub section above. Selection changes never update this reference automatically; an admin can attach an explicit new subset while keeping this pinned connection.",
       validationDetail: "Denali requests a fresh, short-lived installation token from Platform for one recorded repository at a time, rechecks its immutable identity and tests each declared read plane independently.",
       notValidatedDetail: "Validate this shared connection to check every recorded repository and its declared read planes.",
-      allRepositoriesDetail: "Platform’s installation is set to all repositories, but this Denali reference covers only the exact recorded list. Newly added repositories require a reviewed detach and re-attach; they are not included automatically.",
+      allRepositoriesDetail: "Platform’s installation is set to all repositories, but this Denali reference covers only the exact recorded list. Newly added repositories need an explicitly selected separate attachment; this pinned connection stays unchanged.",
       lifecycleDetail: "Local Disable stops Denali validation and collection only. Local Delete removes this Denali reference and its validation/job history, while preserving the Platform installation and collected evidence. Disable for organization in the reusable GitHub section stops new shared leases for every consuming app.",
     };
   }

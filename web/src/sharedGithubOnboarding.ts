@@ -10,3 +10,11 @@ export function verifiedInstallUrl(value: string): string {
   }
   return url.toString();
 }
+
+export function selectedGithubRepositoryIds(selected: readonly number[], available: readonly number[]): number[] {
+  if (selected.length < 1 || selected.length > 500 || new Set(selected).size !== selected.length ||
+      selected.some((id) => !Number.isSafeInteger(id) || id <= 0 || !available.includes(id))) {
+    throw new Error("Select available GitHub repositories");
+  }
+  return [...selected].sort((left, right) => left - right);
+}

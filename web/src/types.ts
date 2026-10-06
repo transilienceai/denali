@@ -262,7 +262,7 @@ export type Connection = {
     account_id?: string;
     partition?: "aws" | "aws-us-gov" | "aws-cn";
     deployment_region?: string;
-    coverage_mode?: "automatic" | "selected" | "selected-resource" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "exact-azure-repositories" | "tenant-wide-admin-consent" | "domain-wide-delegation";
+    coverage_mode?: "automatic" | "selected" | "selected-resource" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "exact-selected-repositories" | "exact-azure-repositories" | "tenant-wide-admin-consent" | "domain-wide-delegation";
     selected_resource?: AwsSelectedResource;
     regions?: string[];
     role_name?: string;

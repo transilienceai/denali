@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlsplit
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 
@@ -77,6 +78,45 @@ def normalize_shared_repositories(payload: Any, *, expected_count: int) -> list[
     return sorted(repositories, key=lambda item: item["full_name"].lower())
 
 
+def shared_github_binding_id(
+    organization_id: str,
+    platform_connection_id: str,
+    repository_ids: list[int],
+    scopes: list[str],
+) -> str:
+    """Derive a local binding from trusted org and a pinned, public boundary.
+
+    The request cannot supply a local ID. Reordered selections are idempotent,
+    while another selection/org/scope boundary receives an independent row.
+    """
+
+    if (
+        not isinstance(organization_id, str)
+        or not re.fullmatch(r"org_[A-Za-z0-9]+", organization_id)
+        or not isinstance(repository_ids, list)
+        or not 1 <= len(repository_ids) <= 500
+        or any(type(value) is not int or value <= 0 for value in repository_ids)
+        or len(set(repository_ids)) != len(repository_ids)
+        or not isinstance(scopes, list)
+        or not scopes
+        or any(not isinstance(scope, str) for scope in scopes)
+        or len(set(scopes)) != len(scopes)
+        or not set(scopes) <= set(GITHUB_SCOPES)
+    ):
+        raise ValueError("shared GitHub binding boundary is invalid")
+    try:
+        platform_id = str(UUID(platform_connection_id))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise ValueError("shared GitHub reference is invalid") from error
+    boundary = json.dumps(
+        [organization_id, platform_id, sorted(repository_ids), sorted(scopes)],
+        separators=(",", ":"),
+    )
+    return str(
+        uuid5(NAMESPACE_URL, f"https://denali.transilience.cloud/shared-github-bindings/v1/{boundary}")
+    )
+
+
 class SharedGitHubAppClient:
     """Supply the existing read-only GitHub flow with brokered installation tokens."""
 
@@ -87,7 +127,8 @@ class SharedGitHubAppClient:
         organization_id = connection.get("clerk_organization_id")
         try:
             connection_id = str(UUID(str(connection.get("id"))))
-        except ValueError as error:
+            platform_connection_id = str(UUID(str(reference.get("platform_connection_id"))))
+        except (TypeError, ValueError, AttributeError) as error:
             raise ValueError("shared GitHub reference is invalid") from error
         scopes = connection.get("declared_scopes")
         if (
@@ -96,7 +137,7 @@ class SharedGitHubAppClient:
             or connection.get("lifecycle_state") != "active"
             or not isinstance(organization_id, str)
             or not re.fullmatch(r"org_[A-Za-z0-9]+", organization_id)
-            or reference.get("platform_connection_id") != connection_id
+            or reference.get("platform_connection_id") != platform_connection_id
             or type(reference.get("installation_id")) is not int
             or reference["installation_id"] <= 0
             or not isinstance(scopes, list)
@@ -120,14 +161,28 @@ class SharedGitHubAppClient:
                 or repo["owner_login"].lower() != str(configuration.get("account_login")).lower()
                 for repo in self._repositories
             )
-            or configuration.get("coverage_mode") != "exact-installation-repositories"
         ):
             raise ValueError("shared GitHub account boundary is invalid")
+        mode = configuration.get("coverage_mode")
+        if mode == "exact-installation-repositories":
+            expected_local_id = platform_connection_id
+        elif mode == "exact-selected-repositories":
+            expected_local_id = shared_github_binding_id(
+                organization_id,
+                platform_connection_id,
+                [repo["id"] for repo in self._repositories],
+                scopes,
+            )
+        else:
+            raise ValueError("shared GitHub coverage boundary is invalid")
+        if connection_id != expected_local_id:
+            raise ValueError("shared GitHub local binding is invalid")
         self._platform = platform
         self._connection = connection
         self._organization_id = organization_id
-        self._connection_id = connection_id
-        self._token_repositories: dict[str, str] = {}
+        self._connection_id = platform_connection_id
+        self._token_repositories: dict[str, dict[str, Any]] = {}
+        self._verified_token_repositories: set[str] = set()
 
     def get_installation(self, installation_id: int) -> dict[str, Any]:
         reference = self._connection["credential_reference"]
@@ -172,21 +227,21 @@ class SharedGitHubAppClient:
             return (
                 repo["id"],
                 repo["node_id"],
-                repo["full_name"].lower(),
+                repo["full_name"],
                 repo["owner_id"],
-                repo["owner_login"].lower(),
+                repo["owner_login"],
             )
 
-        # Re-consent may replace Platform's selection. Never silently expand or
-        # rebind this Denali reference; a reviewed rebinding procedure is required.
-        if {identity(repo) for repo in repositories} != {
-            identity(repo) for repo in self._repositories
+        # Installation consent may add repositories, but an existing Denali row
+        # never inherits them. All pinned identities must still exist unchanged.
+        if not {identity(repo) for repo in self._repositories} <= {
+            identity(repo) for repo in repositories
         }:
             raise RuntimeError("shared GitHub repository selection changed")
         # The broker rechecks GitHub's *current* installation before every token.
         # A listed but uninstalled/suspended App must fail credential validation.
         self.create_installation_token(
-            installation_id=installation_id, repository_id=repositories[0]["id"]
+            installation_id=installation_id, repository_id=self._repositories[0]["id"]
         )
         return {
             "id": installation_id,
@@ -227,16 +282,20 @@ class SharedGitHubAppClient:
                 raise ValueError("invalid expiry")
         except (KeyError, AttributeError, TypeError, ValueError) as error:
             raise RuntimeError("shared GitHub broker returned an invalid expiry") from error
-        self._token_repositories[hashlib.sha256(leased["token"].encode()).hexdigest()] = next(
-            repo["full_name"] for repo in self._repositories if repo["id"] == repository_id
+        token_hash = hashlib.sha256(leased["token"].encode()).hexdigest()
+        self._token_repositories[token_hash] = next(
+            repo for repo in self._repositories if repo["id"] == repository_id
         )
+        # Even a provider-reused token must reverify live metadata for this lease.
+        self._verified_token_repositories.discard(token_hash)
         return leased["token"]
 
     def installation_request(
         self, method: str, path: str, *, token: str, **kwargs: Any
     ) -> httpx.Response:
-        repo = self._token_repositories.get(hashlib.sha256(token.encode()).hexdigest())
-        prefix = f"/repos/{repo}" if repo else ""
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        repo = self._token_repositories.get(token_hash)
+        prefix = f"/repos/{repo['full_name']}" if repo else ""
         suffix = path[len(prefix) :] if prefix and path.startswith(prefix) else None
         decoded = unquote(path)
         allowed_suffix = suffix is not None and (
@@ -253,10 +312,15 @@ class SharedGitHubAppClient:
             or set(kwargs) - {"params", "timeout"}
         ):
             raise ValueError("unexpected GitHub read")
+        if suffix != "" and token_hash not in self._verified_token_repositories:
+            raise ValueError("shared GitHub live repository verification is required")
         timeout = kwargs.pop("timeout", 10.0)
         if not isinstance(timeout, (int, float)) or not 0 < timeout <= 30:
             raise ValueError("unexpected GitHub timeout")
-        return httpx.request(
+        if suffix == "":
+            # A transport failure on recheck must not leave earlier proof usable.
+            self._verified_token_repositories.discard(token_hash)
+        response = httpx.request(
             method,
             f"{GITHUB_API_BASE}{path}",
             headers={
@@ -268,6 +332,31 @@ class SharedGitHubAppClient:
             follow_redirects=False,
             **kwargs,
         )
+        if suffix == "":
+            # Registry metadata can be stale after provider rename/transfer.
+            # A fresh exact-ID lease is not itself proof of the saved live name.
+            try:
+                response.raise_for_status()
+                observed = response.json()
+                owner = observed.get("owner") if isinstance(observed, dict) else None
+                if (
+                    not isinstance(observed, dict)
+                    or type(observed.get("id")) is not int
+                    or observed["id"] != repo["id"]
+                    or observed.get("node_id") != repo["node_id"]
+                    or observed.get("full_name") != repo["full_name"]
+                    or not isinstance(owner, dict)
+                    or type(owner.get("id")) is not int
+                    or owner["id"] != repo["owner_id"]
+                    or owner.get("login") != repo["owner_login"]
+                ):
+                    raise ValueError("identity changed")
+            except Exception:
+                raise ValueError(
+                    "shared GitHub live repository identity is unavailable or changed"
+                ) from None
+            self._verified_token_repositories.add(token_hash)
+        return response
 
 
 class GitHubValidatorRouter:
