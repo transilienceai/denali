@@ -19,7 +19,7 @@ exit contract. This checklist remains the operator control for completing its ho
 - [x] Azure Repos hosted lifecycle and code-to-cloud acceptance passed on 10 September 2026.
 - [x] Azure Foundry AIDR production acceptance passed on 14 September 2026 with one Anna session,
   six metadata-only activities, complete coverage, and zero prohibited content fields.
-- [ ] Deploy the fail-closed configuration gate that requires core plus AWS, Azure, GCP, Entra,
+- [x] Deploy the fail-closed configuration gate that requires core plus AWS, Azure, GCP, Entra,
   Google Workspace, GitHub, and Azure Repos configuration before a production release.
 - [ ] Complete and retain create, setup/callback, validate, collect, disable, and delete evidence
   for every enabled provider that does not yet have a full dated record.
@@ -28,6 +28,9 @@ exit contract. This checklist remains the operator control for completing its ho
   inventory resources, and pass hosted UI read isolation in both directions. Direct API mutation
   and `org:member` checks remain under the broader isolation gate. See the
   [2026-09-15 record](../product/two-organization-isolation-2026-09-15.md).
+- [x] Reconcile the currently signed-in Clerk user with both evidence Organizations, repeat
+  non-empty switching, exercise the hosted `org:member` read-only UI, restore `org:admin`, and
+  retain the authorized-party limitation on backend-minted direct-API probe tokens.
 - [ ] Split the Neon runtime and migration roles, enable production alerts/backups, and complete a
   restore drill.
 - [x] Create and verify distinct least-privilege Neon runtime and migration roles and rotate the
@@ -48,8 +51,11 @@ Control-plane access blockers verified on 17 September 2026:
   exercised;
 - Vercel GitHub login returns `github_account_not_linked`; the existing Vercel account must first
   be opened with its current email/passkey method and then linked to GitHub; and
-- neither real Clerk Organization contains an `org:member`, so the hosted member-role matrix needs
-  an explicitly authorized temporary role change or a bounded test member.
+- the member read-only UI was exercised and the admin role restored; the remaining direct-API
+  matrix needs a browser-issued Clerk token because production backend-minted tokens omit `azp`.
+
+See the [split operator/administrator handoff](../handoffs/2026-09-17-p0-operator-admin-actions.md)
+for the exact remaining sequence.
 
 Production runtime:
 
