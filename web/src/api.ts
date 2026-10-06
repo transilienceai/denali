@@ -148,6 +148,20 @@ export type SharedGcpStatus = {
   retry_available: boolean;
 };
 
+export type ResourceWriteAction = "github.guardrail_draft_pr" | "aws.tighten_bedrock_inline_policy";
+export type ResourceWriteStatus = {
+  id: string;
+  preview_id: string;
+  grant_id: string;
+  action: ResourceWriteAction;
+  state: "pending_review" | "approved" | "rejected" | "running" | "succeeded" | "failed" | "needs_manual_resolution";
+  phase: "not_started" | "provider_attempted" | "finished";
+  actor_user_id: string;
+  reviewer_user_id: string | null;
+  result: Record<string, unknown> | null;
+  error_code: string | null;
+};
+
 type TokenProvider = () => Promise<string | null>;
 let tokenProvider: TokenProvider = async () => null;
 
@@ -194,6 +208,30 @@ async function requestBlob(path: string): Promise<Blob> {
 }
 
 export const api = {
+  // Same product-owned service as MCP/CLI; no gateway/provider credentials in the browser.
+  previewResourceWrite: (input: {
+    finding_id: string; grant_id: string; expected_organization_id: string;
+  } & ({ resource_action: "github.guardrail_draft_pr"; parameters: { guardrail_id: string; guardrail_version: string } }
+     | { resource_action: "aws.tighten_bedrock_inline_policy"; parameters: { model_arns: string[] } })) =>
+    request<{ preview_id: string; preview_sha256: string; plan: Record<string, unknown>; diff: string; expires_at: string; provider_mutated: false }>(
+      "/v1/resource-writes/previews", { method: "POST", body: JSON.stringify(input) }),
+  requestResourceWrite: (input: {
+    preview_id: string; preview_sha256: string; justification: string;
+    expected_organization_id: string; confirm: true;
+  }, idempotencyKey: string) => request<ResourceWriteStatus>("/v1/resource-writes/requests", {
+    method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(input),
+  }),
+  reviewResourceWrite: (id: string, input: {
+    decision: "approved" | "rejected"; review_note: string; expected_organization_id: string; confirm: true;
+  }) => request<ResourceWriteStatus>(`/v1/resource-writes/requests/${encodeURIComponent(id)}/review`, {
+    method: "POST", body: JSON.stringify(input),
+  }),
+  resourceWriteStatus: (id: string) =>
+    request<ResourceWriteStatus>(`/v1/resource-writes/requests/${encodeURIComponent(id)}`),
+  reconcileResourceWrite: (id: string, expectedOrganizationId: string) =>
+    request<ResourceWriteStatus>(`/v1/resource-writes/requests/${encodeURIComponent(id)}/reconcile`, {
+      method: "POST", body: JSON.stringify({ expected_organization_id: expectedOrganizationId }),
+    }),
   sharedGithubConnections: () => request<{ items: SharedGitHubConnection[] }>("/v1/shared/connections/github"),
   sharedGithubRepositories: (id: string) => request<{ items: SharedGitHubRepository[] }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/repositories`),
   startSharedGithubSetup: () => request<{ install_url: string }>("/v1/shared/connections/github/setup", { method: "POST" }),

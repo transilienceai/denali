@@ -136,6 +136,10 @@ from denali.integrations.shared_github import (
     safe_install_url,
     shared_github_enabled,
 )
+from denali.resource_writes.api import INTERNAL_PATH as RESOURCE_ACTION_PATH
+from denali.resource_writes.api import register_remediation_routes
+from denali.resource_writes.service import RemediationService
+from denali.resource_writes.templates import PURPOSES as RESOURCE_PURPOSES
 from denali.store.db import migrate
 from denali.store.repository import GatewayConnectionJobCooldown, PostgresInventoryRepository
 
@@ -1040,6 +1044,8 @@ def create_app(
     evidence_report_store: EvidenceReportStore | None = None,
     github_actions_token_verifier: GitHubActionsTokenVerifier | None = None,
     shared_connections_client: SharedConnectionsClient | None = None,
+    resource_write_service: RemediationService | None = None,
+    resource_write_dispatcher: Callable[[str], str | None] | None = None,
     migrate_on_start: bool = True,
 ) -> FastAPI:
     configured_dsn = os.environ.get("DENALI_DSN")
@@ -1132,6 +1138,12 @@ def create_app(
         app.state.authenticator = configured_authenticator
         app.state.results_gateway_verifier = configured_results_gateway_verifier
         app.state.gateway_membership_checker = configured_gateway_membership_checker
+        app.state.resource_write_service = resource_write_service or (
+            RemediationService.from_environment(
+                app.state.repository, configured_gateway_membership_checker
+            )
+        )
+        app.state.resource_write_dispatcher = resource_write_dispatcher
         app.state.clerk_organization_admin = configured_clerk_organization_admin
         app.state.validation_dispatcher = validation_dispatcher
         app.state.collection_dispatcher = collection_dispatcher
@@ -1268,6 +1280,10 @@ def create_app(
             # FastAPI's default errors include the rejected input. Reports and
             # accidental credentials must never be reflected into tool results.
             return JSONResponse(status_code=422, content={"detail": "invalid evidence import"})
+        if request.url.path == RESOURCE_ACTION_PATH or request.url.path.startswith(
+            "/v1/resource-writes/"
+        ):
+            return JSONResponse(status_code=422, content={"detail": "invalid resource action"})
         return await request_validation_exception_handler(request, error)
 
     @app.middleware("http")
@@ -1287,6 +1303,7 @@ def create_app(
                 and original_path in {
                     "/internal/v1/capabilities/vulnerabilities/imports",
                     "/internal/v1/capabilities/connections/actions",
+                    RESOURCE_ACTION_PATH,
                 }
             )
             or (
@@ -1333,6 +1350,23 @@ def create_app(
             authorization = request.headers.get("authorization", "")
             token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
             purpose = "denali:write" if capability_write else "results:read"
+            if original_path == RESOURCE_ACTION_PATH:
+                body = bytearray()
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > 65536:
+                        return JSONResponse(
+                            status_code=413, content={"detail": "resource action too large"}
+                        )
+                    body.extend(chunk)
+                request._body = bytes(body)
+                try:
+                    fields = json.loads(body)
+                    purpose = RESOURCE_PURPOSES[fields["resource_action"]]
+                except (ValueError, UnicodeDecodeError, KeyError, TypeError):
+                    return JSONResponse(
+                        status_code=422, content={"detail": "invalid resource action"}
+                    )
+                request.state.resource_write_purpose = purpose
             if original_path == "/internal/v1/capabilities/connections/actions":
                 # The action discriminant selects a required purpose, not authority.
                 # The machine verifier still authenticates that exact purpose below.
@@ -5716,6 +5750,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="runtime detection not found")
         return row
 
+    register_remediation_routes(app)
     return app
 
 

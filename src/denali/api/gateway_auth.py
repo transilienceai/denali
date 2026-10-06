@@ -43,6 +43,8 @@ class ClerkGatewayVerifier:
             "results:read",
             "denali:write",
             "denali:connections:destructive",
+            "denali:github-remediation:write",
+            "denali:aws-remediation:write",
         }:
             return None
         try:
