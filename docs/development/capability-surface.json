@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
-  "public_operation_count": 96,
-  "explicit_public_operation_count": 92,
+  "public_operation_count": 101,
+  "explicit_public_operation_count": 97,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
   "release_named_read_count": 37,
   "release_named_write_count": 16,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
-  "browser_operation_count": 77,
+  "browser_operation_count": 82,
   "exceptions": {
+    "shared_github_pilot": "Default-off shared GitHub installation consent and attachment are authenticated browser workflows. Existing named connection validation, collection, job polling and results capabilities reuse attached shared references; no new MCP lifecycle tools or customer repository writes are advertised.",
     "security_admin_user_creation": "Password-based Clerk user creation remains a secure browser workflow; passwords must never enter model/chat context.",
     "security_admin_invitations": "Bulk invitations affect shared Clerk Organization membership across applications. A future capability requires separate per-action, recipient-role, confirmation, and audit design; not included in this rollout.",
     "ci_oidc": "GitHub Actions ingestion binds a verified CI workflow/run/repository to the workload. Human MCP identities cannot impersonate or bypass that separate trust boundary.",
@@ -19,6 +20,51 @@
     "shared_gcp_pilot": "Default-off shared GCP setup/attachment are authenticated browser pilot workflows. Existing named connection validation, collection, job polling and result capabilities work on attached shared references; this pilot does not advertise additional MCP lifecycle tools."
   },
   "operations": [
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/github",
+      "handler": "list_shared_github",
+      "browser_methods": ["sharedGithubConnections"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/github/{connection_id}/repositories",
+      "handler": "shared_github_repositories",
+      "browser_methods": ["sharedGithubRepositories"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/github/setup",
+      "handler": "start_shared_github_setup",
+      "browser_methods": ["startSharedGithubSetup"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/github/{connection_id}/use-in-denali",
+      "handler": "use_shared_github_in_denali",
+      "browser_methods": ["useSharedGithubInDenali"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/github/{connection_id}/disable",
+      "handler": "disable_shared_github_connection",
+      "browser_methods": ["disableSharedGithub"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
     {
       "method": "DELETE",
       "path": "/v1/shared/connections/gcp/{connection_id}",

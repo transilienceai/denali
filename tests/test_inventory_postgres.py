@@ -333,6 +333,72 @@ def test_shared_aws_worker_target_uses_server_resolved_org(repository) -> None:
     assert repo.get_connection_validation_target(other_tenant, connection_id) is None
 
 
+def test_shared_github_reference_jobs_are_durable_without_provider_secrets(repository):
+    _, repo = repository
+    marker = uuid.uuid4().hex
+    org = f"org_SharedGitHub{marker}"
+    tenant, other = repo.resolve_tenant(org), repo.resolve_tenant(f"org_OtherGitHub{marker}")
+    connection_id = str(uuid.uuid4())
+    created = repo.create_connection(
+        tenant,
+        connection_id=connection_id,
+        provider="github",
+        display_name="Shared GitHub QA",
+        credential_type="platform_shared_github",
+        credential_reference={
+            "platform_connection_id": connection_id,
+            "installation_id": 99,
+            "token": "synthetic-private-value",
+        },
+        declared_scopes=["github.repository_metadata", "github.repository_contents"],
+        coverage_plan=[],
+        configuration={
+            "coverage_mode": "exact-installation-repositories",
+            "account_id": 7,
+            "repositories": [],
+        },
+    )
+    assert created["credential_reference"] == {
+        "type": "platform_shared_github",
+        "platform_connection_id": connection_id,
+        "installation_id": 99,
+    }
+    assert "synthetic-private-value" not in str(created)
+    target = repo.get_connection_validation_target(tenant, connection_id)
+    assert (
+        target["clerk_organization_id"] == org
+        and target["credential_type"] == "platform_shared_github"
+    )
+    assert repo.get_connection(other, connection_id) is None
+    assert repo.get_connection_validation_target(other, connection_id) is None
+    job, new = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind="github_source"
+    )
+    duplicate, repeated = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind="github_source"
+    )
+    assert new and not repeated and job["id"] == duplicate["id"]
+    with pytest.raises(ValueError, match="no longer active"):
+        repo.create_connection_collection_job(other, connection_id, collection_kind="github_source")
+    restarted = PostgresInventoryRepository(DSN)
+    claimed = restarted.claim_connection_collection_job(str(job["id"]), lease_seconds=60)
+    assert (
+        claimed["tenant_id"] == uuid.UUID(tenant) and claimed["collection_kind"] == "github_source"
+    )
+    result = {
+        "state": "complete",
+        "completed_at": datetime.now(UTC).isoformat(),
+        "repositories": [],
+    }
+    restarted.complete_connection_collection_job(str(job["id"]), result)
+    assert (
+        repo.connection_collection_status(tenant, connection_id, collection_kind="github_source")[
+            "last_result"
+        ]
+        == result
+    )
+
+
 def test_shared_gcp_reference_jobs_and_worker_target_are_durable_and_tenant_bound(repository):
     _, repo = repository
     marker = uuid.uuid4().hex

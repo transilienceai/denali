@@ -110,6 +110,26 @@ export type SharedAwsProbe = {
   sample_count: number;
 };
 
+export type SharedGitHubConnection = {
+  id: string;
+  connection_kind: "shared_github";
+  provider: "github";
+  account_id: number;
+  account_login: string;
+  installation_id: number;
+  repository_selection: "all" | "selected";
+  repository_count: number;
+  availability: "ready" | "disabled" | "needs_scope_grant";
+  validated_scopes: string[];
+  last_validated_at?: string | null;
+};
+
+export type SharedGitHubRepository = {
+  id: number; node_id: string; name: string; full_name: string;
+  owner_id: number; owner_login: string; private: boolean; archived: boolean;
+  default_branch: string | null;
+};
+
 export type SharedGcpConnection = {
   id: string;
   provider: "gcp";
@@ -174,6 +194,11 @@ async function requestBlob(path: string): Promise<Blob> {
 }
 
 export const api = {
+  sharedGithubConnections: () => request<{ items: SharedGitHubConnection[] }>("/v1/shared/connections/github"),
+  sharedGithubRepositories: (id: string) => request<{ items: SharedGitHubRepository[] }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/repositories`),
+  startSharedGithubSetup: () => request<{ install_url: string }>("/v1/shared/connections/github/setup", { method: "POST" }),
+  useSharedGithubInDenali: (id: string) => request<Connection>(`/v1/shared/connections/github/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({}) }),
+  disableSharedGithub: (id: string) => request<{ status: string }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/disable`, { method: "POST" }),
   sharedGcpConnections: () => request<{ items: SharedGcpConnection[] }>("/v1/shared/connections/gcp"),
   createSharedGcp: (input: { request_id: string; display_name: string; projects: Array<{ id: string; number: string }>; declared_scopes: string[] }) =>
     request<{ id: string; job_id: string; state: string }>("/v1/shared/connections/gcp", { method: "POST", body: JSON.stringify(input) }),
