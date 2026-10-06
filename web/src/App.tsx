@@ -52,6 +52,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { SharedAwsPilot } from "./SharedAwsPilot";
+import { SharedGcpPilot } from "./SharedGcpPilot";
 import { showNativeConnectionForm, type SharedAwsAvailability } from "./connectionOnboarding";
 import {
   completedRunningConnectionIds,
@@ -3399,6 +3400,7 @@ function ConnectionsPage({
     {!canWrite && <section className="read-only-banner"><ShieldCheck /><div><strong>Read-only organization role</strong><span>An organization admin must create, validate, disable, or delete connections.</span></div></section>}
     <section className="connection-boundary"><ShieldCheck /><div><strong>Connection health is not a risk verdict.</strong><span>A healthy connection means the configured role and declared validation calls worked. It does not mean collection is complete, findings are absent, or the connected environment is safe.</span></div></section>
     <SharedAwsPilot canWrite={canWrite} onChanged={onChanged} onAvailabilityChange={setSharedAwsAvailability} />
+    <SharedGcpPilot canWrite={canWrite} onChanged={onChanged} />
     {entraSetupReturn && <div className={`connection-consent-return ${entraSetupReturn.state}`}>
       {entraSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{entraSetupReturn.state === "succeeded" ? "Microsoft Entra admin consent recorded" : "Microsoft Entra admin consent was not completed"}</strong><small>{entraSetupReturn.state === "succeeded" ? "Denali verified the one-time callback, bound the exact customer tenant, discarded the setup state, and started read-only Microsoft Graph validation." : entraSetupReturn.detail ?? "Return to this connection and launch consent again. No tenant access was recorded."}</small></span>
@@ -3569,6 +3571,14 @@ function CopyableSetupValue({ value, ariaLabel, copyLabel, copiedMessage, placeh
 }
 
 function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareAzureRepos, onCompleteAzureRepos, onCollectAzureRepos, onPrepareEntra, onCollectEntra, onCompleteGoogleWorkspace, onCollectGoogleWorkspace, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareAzureRepos: () => void; onCompleteAzureRepos: (repositoryIds: string[]) => void; onCollectAzureRepos: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; onCompleteGoogleWorkspace: () => void; onCollectGoogleWorkspace: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+  if (connection.credential_reference.type === "platform_shared_gcp") return <section className="panel connection-detail" aria-label="Platform shared Google Cloud connection">
+    <div className="connection-detail-head"><div><span>SHARED GOOGLE CLOUD</span><h3>{connection.display_name}</h3><code>Platform connection {connection.credential_reference.platform_connection_id}</code></div><ConnectionHealth connection={connection} /></div>
+    <p>Platform holds the keyless principal and selected project grants. Denali receives only bounded metadata reads; no Google token or service-account key. Existing Denali-managed Google Cloud connections are separate.</p>
+    <p>{connection.configuration.projects?.map((project) => `${project.id} (${project.number})`).join(" · ")}</p>
+    {connection.lifecycle_state === "active" && <div className="connection-launch-actions"><button disabled={busy !== null} onClick={onValidate}>Validate metadata access</button><button disabled={busy !== null || connection.health_state !== "healthy"} onClick={onCollectGcp}>Collect Google Cloud evidence</button><button disabled={busy !== null} onClick={onDisable}>Disable Denali use</button></div>}
+    {connection.lifecycle_state === "disabled" && <button disabled={busy !== null} onClick={onDelete}>Delete Denali configuration</button>}
+    <p>Validation and collection use existing durable jobs. Global disconnect is managed separately in Platform; deleting configuration does not remove customer IAM bindings or collected evidence.</p>
+  </section>;
   if (connection.provider === "azure") return <AzureConnectionDetail connection={connection} busy={busy} launch={azureLaunch} completionCode={azureCompletionCode} onCompletionCode={onAzureCompletionCode} onPrepare={onPrepareAzure} onComplete={onCompleteAzure} onCollect={onCollectAzure} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "entra") return <EntraConnectionDetail connection={connection} busy={busy} onPrepare={onPrepareEntra} onCollect={onCollectEntra} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.provider === "google_workspace") return <GoogleWorkspaceConnectionDetail connection={connection} busy={busy} onComplete={onCompleteGoogleWorkspace} onCollect={onCollectGoogleWorkspace} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;

@@ -142,11 +142,15 @@ class GcpConnectionValidator:
         self,
         credential_factory: CredentialFactory | None = None,
         request: GcpRequest | None = None,
+        shared_reader_factory: Callable[[dict[str, Any]], Any] | None = None,
     ):
         self._credential_factory = credential_factory or _default_credential
         self._request = request
+        self._shared_reader_factory = shared_reader_factory
 
     def validate(self, connection: dict[str, Any]) -> dict[str, Any]:
+        if connection.get("credential_type") == "platform_shared_gcp":
+            return self._validate_shared(connection)
         started_at = datetime.now(UTC)
         configuration = connection["configuration"]
         projects = configuration.get("projects", [])
@@ -220,6 +224,59 @@ class GcpConnectionValidator:
             "account_id_observed": ",".join(sorted(observed_projects)) or None,
             "results": results,
             "summary": summary,
+        }
+
+    def _validate_shared(self, connection: dict[str, Any]) -> dict[str, Any]:
+        from denali.integrations.shared_gcp import OPERATIONS, SharedGcpReader
+
+        started_at = datetime.now(UTC)
+        try:
+            reader = (self._shared_reader_factory or SharedGcpReader)(connection)
+        except Exception as error:
+            return _credential_failure(connection, started_at, _gcp_error_code(error))
+        results: list[dict[str, Any]] = []
+        for project in reader.projects:
+            for scope in connection["declared_scopes"]:
+                try:
+                    # Platform rechecks current app entitlement, org, active connection,
+                    # immutable project binding, and this scope on every fixed read.
+                    reader.read(project["id"], OPERATIONS[scope], page_size=1)
+                    state = "passed"
+                except Exception:
+                    state = "failed"
+                for plane in gcp_coverage_plan([scope], [project]):
+                    results.append(
+                        {
+                            **{
+                                key: plane[key]
+                                for key in (
+                                    "scope",
+                                    "plane",
+                                    "label",
+                                    "region",
+                                    "project_id",
+                                    "project_number",
+                                )
+                            },
+                            "state": state,
+                            "detail": "Platform project-bound metadata read succeeded."
+                            if state == "passed"
+                            else "Platform project-bound metadata read failed.",
+                        }
+                    )
+        failed = sum(row["state"] == "failed" for row in results)
+        passed = len(results) - failed
+        return {
+            "started_at": started_at,
+            "completed_at": datetime.now(UTC),
+            "health_state": "healthy" if not failed else "partial" if passed else "unhealthy",
+            "credential_state": "passed" if passed else "failed",
+            "account_id_observed": ",".join(p["id"] for p in reader.projects) if passed else None,
+            "results": results,
+            "summary": (
+                f"Platform metadata reads: {passed} passed, {failed} failed; "
+                "collection is separate."
+            ),
         }
 
     def _validate_plane(

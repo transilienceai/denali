@@ -219,7 +219,7 @@ export type Connection = {
         role_arn: string;
       }
     | {
-        type: "platform_shared_aws";
+        type: "platform_shared_aws" | "platform_shared_gcp";
         platform_connection_id: string;
       }
     | {

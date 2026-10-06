@@ -110,6 +110,24 @@ export type SharedAwsProbe = {
   sample_count: number;
 };
 
+export type SharedGcpConnection = {
+  id: string;
+  provider: "gcp";
+  connection_kind: "shared_gcp";
+  display_name: string;
+  projects: Array<{ id: string; number: string }>;
+  availability: string;
+  validated_scopes: string[];
+};
+
+export type SharedGcpStatus = {
+  job_state: string | null;
+  setup_state: string;
+  health_state: string;
+  error_code: string | null;
+  retry_available: boolean;
+};
+
 type TokenProvider = () => Promise<string | null>;
 let tokenProvider: TokenProvider = async () => null;
 
@@ -156,6 +174,15 @@ async function requestBlob(path: string): Promise<Blob> {
 }
 
 export const api = {
+  sharedGcpConnections: () => request<{ items: SharedGcpConnection[] }>("/v1/shared/connections/gcp"),
+  createSharedGcp: (input: { request_id: string; display_name: string; projects: Array<{ id: string; number: string }>; declared_scopes: string[] }) =>
+    request<{ id: string; job_id: string; state: string }>("/v1/shared/connections/gcp", { method: "POST", body: JSON.stringify(input) }),
+  sharedGcpStatus: (id: string) => request<SharedGcpStatus>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/validation`),
+  sharedGcpScript: (id: string) => requestBlob(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/setup.sh`),
+  validateSharedGcp: (id: string) => request<{ job_id: string; state: string }>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/validate`, { method: "POST" }),
+  useSharedGcp: (id: string, declaredScopes: string[]) => request<Connection>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ declared_scopes: declaredScopes }) }),
+  disableSharedGcp: (id: string) => request<{ status: string }>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/disable`, { method: "POST" }),
+  deleteSharedGcp: (id: string, confirmationName: string) => request<{ status: string }>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirmation_name: confirmationName }) }),
   context: () => request<DenaliContext>("/v1/context"),
   inviteOrganizationMembers: (emails: string[], role: OrganizationRole) =>
     request<BulkInviteResult>("/v1/profile/organization/invitations/bulk", {

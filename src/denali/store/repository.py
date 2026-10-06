@@ -112,7 +112,7 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
     credential_reference: dict[str, Any] = {"type": credential_type}
     if credential_type == "aws_assume_role":
         credential_reference["role_arn"] = internal_reference["role_arn"]
-    elif credential_type == "platform_shared_aws":
+    elif credential_type in {"platform_shared_aws", "platform_shared_gcp"}:
         credential_reference["platform_connection_id"] = internal_reference[
             "platform_connection_id"
         ]
