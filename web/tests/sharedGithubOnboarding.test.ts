@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { sharedGithubNotEnabled, verifiedInstallUrl } from "../src/sharedGithubOnboarding.ts";
+import { selectedGithubRepositoryIds, sharedGithubNotEnabled, verifiedInstallUrl } from "../src/sharedGithubOnboarding.ts";
 
 test("refresh re-reads exact repositories even if installation ID/count stay unchanged", () => {
   const component = readFileSync(new URL("../src/SharedGitHubPilot.tsx", import.meta.url), "utf8");
   assert.match(component, /api\.sharedGithubRepositories\(selected\.id\)/);
   assert.match(component, /\}, \[selected\]\);/);
   assert.doesNotMatch(component, /\[selected\?\.id, selected\?\.availability\]/);
+  assert.match(component, /setRepositoryIds\(\[\]\);/);
+  assert.match(component, /api\.useSharedGithubInDenali\(selected\.id, selection\)/);
+  assert.doesNotMatch(component, /setRepositoryIds\(result\.items/);
+});
+
+test("explicit repository selection is canonical, nonempty and never inherits additions", () => {
+  assert.deepEqual(selectedGithubRepositoryIds([43, 42], [42, 43, 44]), [42, 43]);
+  assert.deepEqual(selectedGithubRepositoryIds([42], [41, 42, 43]), [42]);
+  for (const selected of [[], [42, 42], [0], [-1], [42.5], [Number.MAX_SAFE_INTEGER + 1], [99], Array.from({ length: 501 }, (_, id) => id + 1)]) {
+    assert.throws(() => selectedGithubRepositoryIds(selected, [42, 43]));
+  }
 });
 
 test("shared GitHub installs use the exact GitHub origin and installation path", () => {

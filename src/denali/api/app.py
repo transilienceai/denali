@@ -134,6 +134,7 @@ from denali.integrations.shared_github import (
     SharedGitHubAppClient,
     normalize_shared_repositories,
     safe_install_url,
+    shared_github_binding_id,
     shared_github_enabled,
 )
 from denali.resource_writes.api import INTERNAL_PATH as RESOURCE_ACTION_PATH
@@ -736,6 +737,9 @@ class SharedGitHubUseInput(BaseModel):
     declared_scopes: list[str] = Field(
         default_factory=lambda: list(GITHUB_SCOPES), min_length=1, max_length=len(GITHUB_SCOPES)
     )
+    repository_ids: list[Annotated[int, Field(strict=True, gt=0)]] | None = Field(
+        default=None, min_length=1, max_length=500
+    )
 
     @model_validator(mode="after")
     def valid_scopes(self) -> SharedGitHubUseInput:
@@ -745,6 +749,10 @@ class SharedGitHubUseInput(BaseModel):
             or "github.repository_metadata" not in self.declared_scopes
         ):
             raise ValueError("invalid shared GitHub scopes")
+        if self.repository_ids is not None and len(set(self.repository_ids)) != len(
+            self.repository_ids
+        ):
+            raise ValueError("shared GitHub repository IDs are duplicated")
         return self
 
 
@@ -2447,8 +2455,21 @@ def create_app(
         scopes = payload.declared_scopes
         if not set(scopes) <= set(shared["validated_scopes"]):
             raise HTTPException(status_code=403, detail="shared GitHub scopes are not entitled")
+        local_connection_id = str(connection_id)
+        coverage_mode = "exact-installation-repositories"
+        if payload.repository_ids is not None:
+            selected_ids = set(payload.repository_ids)
+            if not selected_ids <= {item["id"] for item in repositories}:
+                raise HTTPException(
+                    status_code=409, detail="selected GitHub repositories are unavailable"
+                )
+            repositories = [item for item in repositories if item["id"] in selected_ids]
+            coverage_mode = "exact-selected-repositories"
+            local_connection_id = shared_github_binding_id(
+                org, str(connection_id), payload.repository_ids, scopes
+            )
         configuration = {
-            "coverage_mode": "exact-installation-repositories",
+            "coverage_mode": coverage_mode,
             "account_id": shared["account_id"],
             "account_login": shared["account_login"],
             "installation_repository_selection": shared["repository_selection"],
@@ -2472,13 +2493,13 @@ def create_app(
                 and row.get("configuration") == configuration
             )
 
-        existing = repo.get_connection(tenant, str(connection_id))
+        existing = repo.get_connection(tenant, local_connection_id)
         if existing is not None:
             if not matches(existing):
                 raise HTTPException(status_code=409, detail="existing Denali connection differs")
             return _with_validation_state(request, tenant, existing)
         target = {
-            "id": str(connection_id),
+            "id": local_connection_id,
             "provider": "github",
             "lifecycle_state": "active",
             "credential_type": "platform_shared_github",
@@ -2498,17 +2519,20 @@ def create_app(
         try:
             created = repo.create_connection(
                 tenant,
-                connection_id=str(connection_id),
+                connection_id=local_connection_id,
                 provider="github",
-                display_name=f"Shared GitHub {shared['account_login']} {str(connection_id)[:8]}",
+                display_name=f"Shared GitHub {shared['account_login']} {local_connection_id[:8]}",
                 credential_type="platform_shared_github",
                 credential_reference=reference,
                 declared_scopes=scopes,
-                coverage_plan=github_coverage_plan(scopes, repositories),
+                coverage_plan=[
+                    {**plane, "coverage_mode": coverage_mode}
+                    for plane in github_coverage_plan(scopes, repositories)
+                ],
                 configuration=configuration,
             )
         except ValueError as error:
-            existing = repo.get_connection(tenant, str(connection_id))
+            existing = repo.get_connection(tenant, local_connection_id)
             if existing is None or not matches(existing):
                 raise HTTPException(
                     status_code=409, detail="shared GitHub attachment conflicted"

@@ -235,7 +235,7 @@ export const api = {
   sharedGithubConnections: () => request<{ items: SharedGitHubConnection[] }>("/v1/shared/connections/github"),
   sharedGithubRepositories: (id: string) => request<{ items: SharedGitHubRepository[] }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/repositories`),
   startSharedGithubSetup: () => request<{ install_url: string }>("/v1/shared/connections/github/setup", { method: "POST" }),
-  useSharedGithubInDenali: (id: string) => request<Connection>(`/v1/shared/connections/github/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({}) }),
+  useSharedGithubInDenali: (id: string, repositoryIds?: number[]) => request<Connection>(`/v1/shared/connections/github/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify(repositoryIds === undefined ? {} : { repository_ids: repositoryIds }) }),
   disableSharedGithub: (id: string) => request<{ status: string }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/disable`, { method: "POST" }),
   sharedGcpConnections: () => request<{ items: SharedGcpConnection[] }>("/v1/shared/connections/gcp"),
   createSharedGcp: (input: { request_id: string; display_name: string; projects: Array<{ id: string; number: string }>; declared_scopes: string[] }) =>

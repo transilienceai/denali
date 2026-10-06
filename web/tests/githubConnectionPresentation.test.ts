@@ -43,7 +43,9 @@ test("shared copy assigns App ownership and token issuance to Platform", () => {
   assert.match(shared.planDetail, /Platform-owned GitHub installation/);
   assert.match(shared.validationDetail, /token from Platform for one recorded repository/);
   assert.match(shared.notValidatedDetail, /^Validate this shared connection/);
-  assert.match(shared.setupHint, /detach and re-attach/);
+  assert.match(shared.setupHint, /explicit new subset while keeping this pinned connection/);
+  assert.match(shared.allRepositoriesDetail, /explicitly selected separate attachment/);
+  assert.doesNotMatch(shared.setupHint + shared.allRepositoriesDetail, /detach|delete/);
   assert.match(shared.lifecycleDetail, /validation\/job history/);
   assert.match(shared.lifecycleDetail, /preserving the Platform installation and collected evidence/);
   assert.doesNotMatch(JSON.stringify(shared), /Denali mints|Denali’s configured GitHub App/);

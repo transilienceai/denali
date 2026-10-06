@@ -78,6 +78,7 @@ from denali.domain import (
     VulnerabilityMatchMethod,
     VulnerabilityScanSubject,
 )
+from denali.integrations.shared_github import shared_github_binding_id
 from denali.store.db import migrate
 from denali.store.repository import PostgresInventoryRepository
 
@@ -397,6 +398,90 @@ def test_shared_github_reference_jobs_are_durable_without_provider_secrets(repos
         ]
         == result
     )
+
+
+def test_shared_github_subset_binding_jobs_and_local_lifecycle_are_independent(repository):
+    _, repo = repository
+    marker = uuid.uuid4().hex
+    org = f"org_GithubSubset{marker}"
+    tenant = repo.resolve_tenant(org)
+    other = repo.resolve_tenant(f"org_GithubSubsetOther{marker}")
+    platform_id = str(uuid.uuid4())
+    scopes = ["github.repository_metadata", "github.repository_contents"]
+    local_id = shared_github_binding_id(org, platform_id, [43], scopes)
+    assert local_id != platform_id
+    reference = {"platform_connection_id": platform_id, "installation_id": 99}
+    configurations = {
+        platform_id: {
+            "coverage_mode": "exact-installation-repositories",
+            "account_id": 7,
+            "account_login": "transilienceai",
+            "repositories": [{"id": 42, "full_name": "transilienceai/existing"}],
+        },
+        local_id: {
+            "coverage_mode": "exact-selected-repositories",
+            "account_id": 7,
+            "account_login": "transilienceai",
+            "repositories": [{"id": 43, "full_name": "transilienceai/isolated-qa"}],
+        },
+    }
+    for connection_id, configuration in configurations.items():
+        repo.create_connection(
+            tenant,
+            connection_id=connection_id,
+            provider="github",
+            display_name=f"Shared GitHub {connection_id[:8]}",
+            credential_type="platform_shared_github",
+            credential_reference=reference,
+            declared_scopes=scopes,
+            coverage_plan=[],
+            configuration=configuration,
+        )
+    legacy_snapshot = repo.get_connection(tenant, platform_id)
+    restarted = PostgresInventoryRepository(DSN)
+    target = restarted.get_connection_validation_target(tenant, local_id)
+    assert target["clerk_organization_id"] == org
+    assert str(target["id"]) == local_id
+    assert target["credential_reference"] == reference
+    assert target["configuration"] == configurations[local_id]
+    assert restarted.get_connection_validation_target(other, local_id) is None
+    legacy_job, legacy_new = repo.create_connection_collection_job(
+        tenant, platform_id, collection_kind="github_source"
+    )
+    subset_job, subset_new = repo.create_connection_collection_job(
+        tenant, local_id, collection_kind="github_source"
+    )
+    assert legacy_new and subset_new and subset_job["id"] != legacy_job["id"]
+    duplicate, repeated = restarted.create_connection_collection_job(
+        tenant, local_id, collection_kind="github_source"
+    )
+    assert not repeated and duplicate["id"] == subset_job["id"]
+    with pytest.raises(ValueError, match="no longer active"):
+        restarted.create_connection_collection_job(other, local_id, collection_kind="github_source")
+    assert repo.disable_connection(tenant, local_id) is None  # queued job fences local disable
+    claimed = restarted.claim_connection_collection_job(str(subset_job["id"]), lease_seconds=60)
+    assert claimed["connection_id"] == uuid.UUID(local_id)
+    result = {
+        "state": "complete",
+        "repositories": [],
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    restarted.complete_connection_collection_job(str(subset_job["id"]), result)
+    assert repo.connection_collection_status(tenant, local_id, collection_kind="github_source")[
+        "last_result"
+    ] == result
+    assert repo.disable_connection(other, local_id) is None
+    assert repo.delete_connection(other, local_id) == "not_found"
+    assert repo.delete_connection(tenant, local_id) == "active"
+    assert repo.disable_connection(tenant, local_id)["lifecycle_state"] == "disabled"
+    assert repo.delete_connection(tenant, local_id) == "deleted"
+    assert repo.get_connection(tenant, local_id) is None
+    assert repo.get_connection(tenant, platform_id) == legacy_snapshot
+    assert repo.connection_collection_status(tenant, platform_id, collection_kind="github_source")[
+        "state"
+    ] == "running"
+    surviving = restarted.claim_connection_collection_job(str(legacy_job["id"]), lease_seconds=60)
+    assert surviving["connection_id"] == uuid.UUID(platform_id)
 
 
 def test_shared_gcp_reference_jobs_and_worker_target_are_durable_and_tenant_bound(repository):
