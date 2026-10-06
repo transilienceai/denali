@@ -74,10 +74,13 @@ Platform provisioning, Google trust, APIs and customer grant approval are ready.
    existing plan and durable queue, not a new connection.
 3. When provisioning is ready, download and inspect the fixed project setup script.
    An administrator of those exact projects runs it in Google Cloud Shell. It
+   enables Cloud Asset/Resource Manager APIs (and Logging for AI activity), then
    grants Cloud Asset Viewer, Browser and Service Usage Consumer on those projects.
    AI activity additionally needs Private Logs Viewer for Data Access audit events.
-   Calls consume the selected projects' API quota and may incur API charges; they
-   do not enable APIs or grant resource writes. No JSON key is created or uploaded.
+   Subsequent broker reads consume those projects' API quota and may incur API
+   charges; the broker cannot enable APIs or grant resource writes. The script
+   does not enable Data Access audit logging; review its configuration separately.
+   No JSON key is created or uploaded.
 4. Click Validate project access and poll its durable status. Platform checks the
    selected IDs/numbers and scope permissions. Healthy access is not collection.
 5. Click Use in Denali. Attachment creates an idempotent, tenant-scoped reference
