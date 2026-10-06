@@ -204,6 +204,18 @@ runtime collection settings. There is no standalone runtime-settings update API.
 
 ## Production enablement and release gate
 
+The existing native AWS `connections/actions` create operation also accepts the optional
+exact-read `selected_resource` contract from [ADR 0026](../architecture/0026-aws-deployment-code-to-cloud.md).
+It is not a new generic AWS tool. The nested fields are `kind: "lambda_zip"`, exact
+`function_arn`, exact `execution_role_arn`, and `expected_model_id`; use
+`coverage_mode: "selected-resource"`, only `aws.code_to_cloud`, and one matching Region.
+The receiver validates this through the same `AwsConnectionCreate` model as the browser.
+Setup/status returns a bounded explicit projection, and the usual guarded admin-create,
+durable validate/collect, idempotency, read scopes and live org checks remain in force.
+Platform's gateway model must include the same optional type before MCP create is enabled
+for this mode. Legacy omission is unchanged. Partial account coverage is intentional;
+no resource-write grant or remediation follows from creating this read plan.
+
 Review and merge this PR to `main`; never deploy its feature branch. The protected
 production workflow applies migrations 021–025 before deploying these receivers.
 It must pass Ruff, the full Python and PostgreSQL integration suites, Modal

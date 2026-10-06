@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -15,6 +16,15 @@ from denali.connections.aws import (
     AWS_SCOPE_BEDROCK_AGENTS,
     AWS_SCOPE_BEDROCK_LOGGING,
     AWS_SCOPE_CODE_TO_CLOUD,
+)
+from denali.connections.aws_selected_resource import (
+    AWS_COVERAGE_RESOURCE,
+    SELECTED_LAMBDA_PLANE,
+    LambdaSelection,
+    SelectedRoleIamReader,
+    connection_selection,
+    read_lambda,
+    verify_identity,
 )
 from denali.connectors.aws_agentcore import (
     ENDPOINT_INVENTORY_PLANE as AGENTCORE_ENDPOINT_PLANE,
@@ -60,6 +70,7 @@ from denali.domain import (
     Coverage,
     CoverageState,
     Evidence,
+    FindingBatch,
     InventoryBatch,
     RelationshipAssertion,
     RelationshipKind,
@@ -134,6 +145,19 @@ class AwsConnectionDeploymentCollector:
         if not scopes & supported_scopes:
             raise ValueError("AWS connection has no supported collection scope")
         configuration = connection.get("configuration", {})
+        selection = connection_selection(connection)
+        if selection is not None:
+            # The job's server-resolved tenant reloads its immutable product plan.
+            # A caller-supplied target object cannot authorize another tenant's read.
+            lookup = getattr(repository, "get_connection_validation_target", None)
+            stored = lookup(tenant_id, str(connection["id"])) if callable(lookup) else None
+            if (
+                stored is None
+                or stored.get("lifecycle_state") != "active"
+                or (connection_selection(stored) != selection)
+                or stored.get("credential_reference") != connection.get("credential_reference")
+            ):
+                raise ValueError("selected AWS connection does not belong to this tenant boundary")
         account_id = configuration.get("account_id")
         credential = connection.get("credential_reference", {})
         if not isinstance(account_id, str) or not re.fullmatch(r"[0-9]{12}", account_id):
@@ -152,47 +176,95 @@ class AwsConnectionDeploymentCollector:
                 session_factory=self._session_factory,
             )
         else:
-            base_session = self._session_factory()
-            assumed = base_session.client("sts").assume_role(
-                RoleArn=credential["role_arn"],
-                RoleSessionName=f"denali-deployments-{str(connection['id'])[:8]}",
-                ExternalId=credential["external_id"],
-                DurationSeconds=900,
-            )
-            temporary = assumed["Credentials"]
-            session = self._session_factory(
-                aws_access_key_id=temporary["AccessKeyId"],
-                aws_secret_access_key=temporary["SecretAccessKey"],
-                aws_session_token=temporary["SessionToken"],
-            )
-        observed_account = str(session.client("sts").get_caller_identity().get("Account", ""))
+            try:
+                base_session = self._session_factory()
+                assumed = base_session.client("sts").assume_role(
+                    RoleArn=credential["role_arn"],
+                    RoleSessionName=f"denali-deployments-{str(connection['id'])[:8]}",
+                    ExternalId=credential["external_id"],
+                    DurationSeconds=900,
+                )
+                temporary = assumed["Credentials"]
+                session = self._session_factory(
+                    aws_access_key_id=temporary["AccessKeyId"],
+                    aws_secret_access_key=temporary["SecretAccessKey"],
+                    aws_session_token=temporary["SessionToken"],
+                )
+            except Exception:
+                if selection:
+                    raise ValueError("Selected AWS role credentials were unavailable.") from None
+                raise
+        try:
+            identity = session.client("sts").get_caller_identity()
+        except Exception:
+            if selection:
+                raise ValueError("Selected AWS STS identity could not be verified.") from None
+            raise
+        observed_account = str(identity.get("Account", ""))
         if observed_account != account_id:
             raise ValueError("AWS assumed role account did not match the connection boundary")
+        if selection is not None:
+            verify_identity(identity, selection, credential["role_arn"])
 
-        regions = _connection_regions(session, configuration)
+        regions = [selection.region] if selection else _connection_regions(session, configuration)
         results: list[dict[str, Any]] = []
         failed = partial = 0
         for region in regions:
             inventory_batches: list[InventoryBatch] = []
             posture_batches: list[Any] = []
             if AWS_SCOPE_CODE_TO_CLOUD in scopes:
-                deployment_batch = AwsDeploymentConnector(
+                deployment_type = (
+                    AwsSelectedLambdaConnector if selection else AwsDeploymentConnector
+                )
+                deployment_batch = deployment_type(
                     account_id=account_id,
                     region=region,
                     partition=str(configuration.get("partition", "aws")),
                     session=session,
+                    **({"selection": selection} if selection else {}),
                 ).collect(connection_id=str(connection["id"]))
                 inventory_batches.append(deployment_batch)
-                posture_batches.append(
-                    AwsDeploymentIamPostureConnector(
+                if selection and not deployment_batch.assets:
+                    posture_batch = FindingBatch(
+                        connector_id="denali.aws_deployment_iam_posture",
+                        connection_id=str(connection["id"]),
+                        run_id=deployment_batch.run_id,
+                        scope_key=selection.execution_role_arn,
+                        collected_at=deployment_batch.collected_at,
+                        coverage=(
+                            Coverage(
+                                "aws_ai_workload_iam_posture",
+                                CoverageState.UNKNOWN,
+                                selection.execution_role_arn,
+                                "Not attempted because selected Lambda identity proof failed.",
+                            ),
+                        ),
+                    )
+                else:
+                    if selection:
+                        from denali.connections.aws import _regional_client
+
+                        iam = _regional_client(session, "iam", selection.region)
+                    else:
+                        iam = session.client("iam")
+                    posture_batch = AwsDeploymentIamPostureConnector(
                         account_id=account_id,
                         region=region,
-                        iam_client=session.client("iam"),
+                        iam_client=SelectedRoleIamReader(iam, selection) if selection else iam,
                     ).collect(
                         deployment_batch,
                         connection_id=str(connection["id"]),
                     )
-                )
+                    if selection:
+                        posture_batch = replace(
+                            posture_batch,
+                            scope_key=selection.execution_role_arn,
+                            coverage=tuple(
+                                replace(item, scope=selection.execution_role_arn)
+                                for item in posture_batch.coverage
+                            ),
+                        )
+                posture_batches.append(posture_batch)
             if AWS_SCOPE_BEDROCK_AGENTS in scopes:
                 inventory_batches.append(
                     AwsBedrockRegionConnector(
@@ -251,7 +323,7 @@ class AwsConnectionDeploymentCollector:
             if CoverageState.FAILED in states:
                 state = "failed"
                 failed += 1
-            elif CoverageState.PARTIAL in states:
+            elif CoverageState.PARTIAL in states or (selection and CoverageState.UNKNOWN in states):
                 state = "partial"
                 partial += 1
             else:
@@ -274,6 +346,16 @@ class AwsConnectionDeploymentCollector:
         state = (
             "failed" if failed == len(regions) else "partial" if failed or partial else "complete"
         )
+        resource_state = state
+        if selection and state == "complete":
+            state = "partial"
+            partial = len(regions)
+            for result in results:
+                result.update(
+                    resource_coverage_state=result["state"],
+                    state="partial",
+                    account_coverage="not_assessed",
+                )
         return {
             "connection_id": str(connection["id"]),
             "state": state,
@@ -282,6 +364,16 @@ class AwsConnectionDeploymentCollector:
             "failed_count": failed,
             "partial_count": partial,
             "regions": results,
+            **(
+                {
+                    "coverage_mode": AWS_COVERAGE_RESOURCE,
+                    "resource_coverage_state": resource_state,
+                    "resource_count": 1,
+                    "account_coverage": "not_assessed",
+                }
+                if selection
+                else {}
+            ),
         }
 
 
@@ -660,6 +752,123 @@ class AwsDeploymentConnector:
 
     def _parsed(self, **values: Any) -> dict[str, Any]:
         return {"provider": "aws", "account_id": self.account_id, "region": self.region, **values}
+
+
+class AwsSelectedLambdaConnector(AwsDeploymentConnector):
+    """Reuse observed deployment assertions without discovery or executable reads."""
+
+    def __init__(self, *, selection: LambdaSelection, **kwargs: Any):
+        super().__init__(**kwargs)
+        if (self.account_id, self.region, self.partition) != (
+            selection.account_id,
+            selection.region,
+            selection.partition,
+        ):
+            raise ValueError("selected Lambda collector boundary differs")
+        self.selection = selection
+
+    def collect(self, *, connection_id: str | None = None) -> InventoryBatch:
+        from denali.connections.aws import _regional_client
+
+        observed_at = datetime.now(UTC)
+        inventory_plane = SELECTED_LAMBDA_PLANE
+        relationships_plane = "aws_selected_lambda_relationships"
+        scope = self.selection.function_arn
+        try:
+            metadata = read_lambda(
+                _regional_client(self.session, "lambda", self.region), self.selection
+            )
+        except Exception:
+            return InventoryBatch(
+                connector_id=self.connector_id,
+                connection_id=connection_id or scope,
+                run_id=f"aws-selected-lambda-{observed_at.isoformat()}",
+                scope_key=scope,
+                collected_at=observed_at,
+                coverage=tuple(
+                    Coverage(
+                        plane,
+                        CoverageState.FAILED,
+                        scope,
+                        "Selected Lambda metadata read or exact identity proof failed.",
+                    )
+                    for plane in (inventory_plane, relationships_plane)
+                ),
+            )
+        logical = metadata["logical_id"]
+        parsed = self._parsed(
+            service="lambda",
+            runtime_kind="serverless_function",
+            name=self.selection.function_name,
+            arn=scope,
+            identifier=("function_name", self.selection.function_name),
+            correlation_identifiers={"cloudformation_logical_id": [logical] if logical else []},
+            ai_classification=True,
+            model_keys=metadata["model_keys"],
+            models=metadata["models"],
+            role_arns=[self.selection.execution_role_arn],
+            extra={
+                "runtime": metadata["runtime"],
+                "state": metadata["state"],
+                "images": [],
+                "image_digests": [],
+            },
+        )
+        cloud, workload, identities = _assertions(parsed, observed_at, inventory_plane)
+        assert workload is not None
+        assets = [cloud, workload, *identities]
+        relationships: dict[Any, RelationshipAssertion] = {}
+        _relationship(
+            relationships,
+            workload.asset,
+            cloud.asset,
+            RelationshipKind.HOSTED_ON,
+            relationships_plane,
+            workload.evidence,
+        )
+        for identity in identities:
+            _relationship(
+                relationships,
+                workload.asset,
+                identity.asset,
+                RelationshipKind.RUNS_AS,
+                relationships_plane,
+                workload.evidence,
+            )
+        observed_models: set[AssetRef] = set()
+        for model in _model_assertions(parsed, observed_at, inventory_plane):
+            if model.asset not in observed_models:
+                assets.append(model)
+                observed_models.add(model.asset)
+            _relationship(
+                relationships,
+                workload.asset,
+                model.asset,
+                RelationshipKind.USES,
+                relationships_plane,
+                model.evidence,
+            )
+        return InventoryBatch(
+            connector_id=self.connector_id,
+            connection_id=connection_id or scope,
+            run_id=f"aws-selected-lambda-{observed_at.isoformat()}",
+            scope_key=scope,
+            collected_at=observed_at,
+            assets=tuple(assets),
+            relationships=tuple(relationships.values()),
+            coverage=tuple(
+                Coverage(
+                    plane,
+                    CoverageState.COMPLETE,
+                    scope,
+                    (
+                        "Only the exact selected Zip Lambda was read; "
+                        "account inventory was not assessed."
+                    ),
+                )
+                for plane in (inventory_plane, relationships_plane)
+            ),
+        )
 
 
 def _assertions(
