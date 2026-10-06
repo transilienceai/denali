@@ -180,6 +180,35 @@ def test_aws_narrows_only_existing_bedrock_allow_and_preserves_other_structure()
     assert '-      "Resource"' in diff
 
 
+@pytest.mark.parametrize("fragment", ["[a]nthropic*", "[!b]nthropic*", "[a-z]nthropic*"])
+def test_iam_literal_brackets_never_become_shell_character_class_authority(fragment):
+    finding, document, parameters, resource = aws_inputs()
+    document["Statement"][0]["Resource"] = "arn:aws:bedrock:us-east-1::foundation-model/" + fragment
+    with pytest.raises(RemediationError, match="model_resource_not_subset"):
+        tighten_inline_policy(finding, document, parameters, resource)
+
+
+def test_iam_star_question_semantics_and_policy_variables_fail_closed():
+    finding, document, parameters, resource = aws_inputs()
+    document["Statement"][0]["Resource"] = (
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.exampl?-v1"
+    )
+    proposed, _ = tighten_inline_policy(finding, document, parameters, resource)
+    assert proposed["Statement"][0]["Resource"] == parameters["model_arns"]
+    document["Statement"][0]["Resource"] = (
+        "arn:aws:bedrock:us-east-1::foundation-model/${aws:PrincipalTag/model}*"
+    )
+    with pytest.raises(RemediationError, match="policy_variables_not_supported"):
+        tighten_inline_policy(finding, document, parameters, resource)
+
+
+def test_iam_many_stars_use_bounded_nonrecursive_matching():
+    from denali.resource_writes.templates import _iam_resource_matches
+
+    assert not _iam_resource_matches("a" * 128, "*a" * 100 + "z")
+    assert _iam_resource_matches("anthropic.example-v1", "***anthropic.*?-v1**")
+
+
 @pytest.mark.parametrize(
     "change",
     [

@@ -397,7 +397,7 @@ def _dispatch_vulnerability_import(job_id: str) -> str:
     return call.object_id
 
 
-@app.function(image=image, secrets=runtime_secrets, timeout=900, **_region_options())
+@app.function(image=image, secrets=runtime_secrets, timeout=900, retries=0, **_region_options())
 def resource_write_worker(request_id: str) -> None:
     """Execute one approved durable ID; default-off, no API-container state."""
     from denali.api.gateway_auth import ClerkMembershipChecker

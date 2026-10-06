@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import difflib
-import fnmatch
 import hashlib
 import json
 import re
@@ -56,6 +55,34 @@ def sha256(value: Any) -> str:
 
 def git_blob_sha(content: bytes) -> str:
     return hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+
+
+def _iam_resource_matches(value: str, pattern: str) -> bool:
+    """Only IAM */? wildcard semantics; all other characters are literal.
+
+    Keep the last star's position rather than recursive/regex branching, so a
+    bounded policy with many stars cannot cause exponential match backtracking.
+    """
+    item = token = 0
+    star = -1
+    star_item = 0
+    while item < len(value):
+        if token < len(pattern) and (
+            pattern[token] == "?" or pattern[token] != "*" and pattern[token] == value[item]
+        ):
+            item += 1
+            token += 1
+        elif token < len(pattern) and pattern[token] == "*":
+            star = token
+            star_item = item
+            token += 1
+        elif star >= 0:
+            star_item += 1
+            item = star_item
+            token = star + 1
+        else:
+            return False
+    return all(character == "*" for character in pattern[token:])
 
 
 def open_finding(finding: dict[str, Any], action: str) -> None:
@@ -348,10 +375,16 @@ def tighten_inline_policy(
             "NotAction" in statement or "NotResource" in statement
         ):
             raise RemediationError("mixed_action_policy_not_supported")
-        wildcard = [item for item in resources if isinstance(item, str) and "*" in item]
+        # IAM interprets only * and ? as resource wildcards, not shell bracket
+        # classes. Policy variables cannot be proven to be a static subset.
+        if any("${" in item for item in resources):
+            raise RemediationError("policy_variables_not_supported")
+        wildcard = [item for item in resources if "*" in item or "?" in item]
         if not wildcard:
             continue
-        if not all(any(fnmatch.fnmatchcase(arn, pattern) for pattern in wildcard) for arn in arns):
+        if not all(
+            any(_iam_resource_matches(arn, pattern) for pattern in wildcard) for arn in arns
+        ):
             raise RemediationError("model_resource_not_subset")
         statement["Resource"] = sorted(
             set([item for item in resources if item not in wildcard] + arns)
