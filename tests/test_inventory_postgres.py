@@ -1532,6 +1532,88 @@ def test_azure_repos_setup_consumes_oauth_state_and_binds_exact_repositories(
     assert len(completed["coverage_plan"]) == len(AZURE_REPOS_SCOPES)
 
 
+def test_inventory_resolves_prior_exact_activity_reference_within_tenant(repository) -> None:
+    tenant, repo = repository
+    other_tenant = repo.resolve_tenant(f"org_DeferredIdentityOther{uuid.uuid4().hex}")
+    now = datetime.now(UTC)
+    agent = AssetRef(
+        AssetKind.AI_AGENT,
+        f"arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/{uuid.uuid4().hex}",
+    )
+    activity = ActivityRecord(
+        source_uid=f"deferred-link-{uuid.uuid4().hex}",
+        category=ActivityCategory.AGENT_INVOCATION,
+        activity_name="aws.agentcore.invoke_agent",
+        title="Invoke agent before inventory",
+        occurred_at=now,
+        observed_at=now,
+        outcome=ActivityOutcome.SUCCESS,
+        provider="aws_agentcore",
+        entities=(
+            ActivityEntity(
+                role=ActivityEntityRole.AGENT,
+                external_uid=agent.natural_key,
+                display_name="Deferred agent",
+                asset=agent,
+                correlation=ActivityCorrelation.EXACT_IDENTIFIER,
+                confidence=1.0,
+            ),
+        ),
+        evidence=Evidence("fixture", "fixture://deferred-link", now),
+    )
+    repo.ingest_activity(
+        tenant,
+        ActivityBatch(
+            connector_id="fixture.runtime",
+            connection_id="fixture-runtime",
+            run_id="activity-before-inventory",
+            scope_key="fixture-runtime-scope",
+            collected_at=now,
+            coverage=(
+                Coverage("runtime", CoverageState.COMPLETE, "fixture-runtime-scope"),
+            ),
+            activities=(activity,),
+        ),
+    )
+    [before] = repo.list_activity(tenant)
+    assert before["correlated_entity_count"] == 0
+
+    observed = AssetAssertion(
+        asset=agent,
+        coverage_plane="agents",
+        display_name="Deferred agent",
+        assertion_type=AssertionType.OBSERVED,
+        confidence=1.0,
+        evidence=Evidence("fixture", "fixture://inventory", now + timedelta(seconds=1)),
+    )
+    repo.ingest(
+        other_tenant,
+        inventory_batch(
+            run_id="other-tenant-inventory",
+            state=CoverageState.COMPLETE,
+            assets=(observed,),
+            at=now + timedelta(seconds=1),
+        ),
+    )
+    [after_other_tenant] = repo.list_activity(tenant)
+    assert after_other_tenant["correlated_entity_count"] == 0
+
+    repo.ingest(
+        tenant,
+        inventory_batch(
+            run_id="same-tenant-inventory",
+            state=CoverageState.COMPLETE,
+            assets=(observed,),
+            at=now + timedelta(seconds=2),
+        ),
+    )
+    [after_same_tenant] = repo.list_activity(tenant)
+    assert after_same_tenant["correlated_entity_count"] == 1
+    [asset] = repo.list_assets(tenant)
+    [linked_activity] = repo.list_activity(tenant, asset_id=str(asset["id"]))
+    assert linked_activity["source_uid"] == activity.source_uid
+
+
 def test_activity_can_be_filtered_by_correlated_asset(repository) -> None:
     tenant, repo = repository
     now = datetime.now(UTC)
