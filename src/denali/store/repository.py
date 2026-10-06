@@ -112,10 +112,16 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
     credential_reference: dict[str, Any] = {"type": credential_type}
     if credential_type == "aws_assume_role":
         credential_reference["role_arn"] = internal_reference["role_arn"]
-    elif credential_type in {"platform_shared_aws", "platform_shared_gcp"}:
+    elif credential_type in {
+        "platform_shared_aws",
+        "platform_shared_gcp",
+        "platform_shared_github",
+    }:
         credential_reference["platform_connection_id"] = internal_reference[
             "platform_connection_id"
         ]
+        if credential_type == "platform_shared_github":
+            credential_reference["installation_id"] = internal_reference["installation_id"]
     elif credential_type == "azure_multitenant_app":
         credential_reference["client_id"] = internal_reference["client_id"]
         if internal_reference.get("service_principal_id"):

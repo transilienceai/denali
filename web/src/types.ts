@@ -237,6 +237,11 @@ export type Connection = {
         principal_unique_id?: string;
       }
     | {
+        type: "platform_shared_github";
+        platform_connection_id: string;
+        installation_id: number;
+      }
+    | {
         type: "github_app_installation";
         app_id: number;
         app_slug: string;
@@ -275,7 +280,7 @@ export type Connection = {
     organization?: string;
     installer?: { id: number; login: string };
     onboarding?: {
-      method: "cloudformation_quick_create" | "azure_cloud_shell" | "azure_repos_entra_oauth" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation" | "google_workspace_domain_wide_delegation";
+      method: "cloudformation_quick_create" | "azure_cloud_shell" | "azure_repos_entra_oauth" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation" | "platform_shared_github" | "google_workspace_domain_wide_delegation";
       template_version?: string;
       template_sha256?: string;
       principal_arn?: string;

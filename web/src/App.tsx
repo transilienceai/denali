@@ -53,6 +53,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { api } from "./api";
 import { SharedAwsPilot } from "./SharedAwsPilot";
 import { SharedGcpPilot } from "./SharedGcpPilot";
+import { SharedGitHubPilot } from "./SharedGitHubPilot";
 import { showNativeConnectionForm, type SharedAwsAvailability } from "./connectionOnboarding";
 import {
   completedRunningConnectionIds,
@@ -3401,6 +3402,7 @@ function ConnectionsPage({
     <section className="connection-boundary"><ShieldCheck /><div><strong>Connection health is not a risk verdict.</strong><span>A healthy connection means the configured role and declared validation calls worked. It does not mean collection is complete, findings are absent, or the connected environment is safe.</span></div></section>
     <SharedAwsPilot canWrite={canWrite} onChanged={onChanged} onAvailabilityChange={setSharedAwsAvailability} />
     <SharedGcpPilot canWrite={canWrite} onChanged={onChanged} />
+    <SharedGitHubPilot canWrite={canWrite} onChanged={onChanged} />
     {entraSetupReturn && <div className={`connection-consent-return ${entraSetupReturn.state}`}>
       {entraSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
       <span><strong>{entraSetupReturn.state === "succeeded" ? "Microsoft Entra admin consent recorded" : "Microsoft Entra admin consent was not completed"}</strong><small>{entraSetupReturn.state === "succeeded" ? "Denali verified the one-time callback, bound the exact customer tenant, discarded the setup state, and started read-only Microsoft Graph validation." : entraSetupReturn.detail ?? "Return to this connection and launch consent again. No tenant access was recorded."}</small></span>
@@ -3835,7 +3837,7 @@ function GitHubConnectionDetail({ connection, busy, navigation, onPrepare, onCol
   const setupComplete = repositories.length > 0;
   const preparing = busy === `launch:${connection.id}`;
   const validating = connection.validation_state === "running" || busy === `validate:${connection.id}`;
-  const credential = connection.credential_reference.type === "github_app_installation" ? connection.credential_reference : null;
+  const credential = ["github_app_installation", "platform_shared_github"].includes(connection.credential_reference.type) ? connection.credential_reference as { installation_id?: number; app_slug?: string } : null;
   const permissions = [...new Set(connection.coverage_plan.flatMap((item) => item.permissions))].sort();
   const validationFilter = (["attention", "all", "passed"] as const).includes(navigation.values.validation as "attention" | "all" | "passed")
     ? navigation.values.validation as "attention" | "all" | "passed"

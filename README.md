@@ -206,6 +206,8 @@ Start with the product and evidence boundaries, then follow only the slice being
   [OCSF boundary](docs/architecture/0002-ocsf-boundary.md)
 - [Hosted multi-tenant runtime](docs/architecture/0028-hosted-multi-tenant-runtime.md) for the
   Vercel, Clerk, Modal, and Neon deployment, tenant authorization, secrets, and durable jobs
+- [Shared GitHub pilot](docs/development/shared-github-connections-pilot.md) for reusing a
+  Platform installation with exact repository boundaries and unchanged native connections.
 - [Shared Google Cloud pilot](docs/development/shared-gcp-connections-pilot.md) for keyless
   Platform onboarding, Denali reuse, compatibility and hosted release acceptance
 - [Evidence-bearing issues](docs/architecture/0005-evidence-bearing-issues.md)
