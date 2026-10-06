@@ -126,6 +126,7 @@ from denali.integrations.shared_connections_client import (
     SharedConnectionsClient,
     SharedConnectionsError,
 )
+from denali.integrations.shared_gcp import selected_projects, shared_gcp_enabled
 from denali.store.db import migrate
 from denali.store.repository import GatewayConnectionJobCooldown, PostgresInventoryRepository
 
@@ -716,6 +717,49 @@ class SharedAwsUseInput(BaseModel):
     )
 
 
+class SharedGcpProject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+    number: str = Field(pattern=r"^[0-9]{6,20}$")
+
+
+class SharedGcpUseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    declared_scopes: list[str] = Field(min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def check_scopes(self):
+        if len(set(self.declared_scopes)) != len(self.declared_scopes) or not set(
+            self.declared_scopes
+        ) <= set(GCP_SCOPES):
+            raise ValueError("invalid shared Google Cloud scopes")
+        return self
+
+
+class SharedGcpCreate(SharedGcpUseInput):
+    request_id: UUID
+    display_name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9 _.()-]+$")
+    projects: list[SharedGcpProject] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def check_projects(self):
+        selected_projects([project.model_dump() for project in self.projects])
+        if not self.display_name.strip():
+            raise ValueError("display_name must not be blank")
+        self.display_name = self.display_name.strip()
+        self.projects.sort(key=lambda project: project.id)
+        self.declared_scopes.sort()
+        return self
+
+
+class SharedGcpDelete(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation_name: str = Field(min_length=1, max_length=100)
+
+
 class AzureConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1172,6 +1216,14 @@ def create_app(
     async def validation_error_without_capability_material(
         request: Request, error: RequestValidationError
     ):
+        if request.url.path == "/v1/shared/connections/gcp" or request.url.path.startswith(
+            "/v1/shared/connections/gcp/"
+        ):
+            # Rejected JSON/URL values can contain accidental customer credentials.
+            # Keyless onboarding never accepts or reflects that material.
+            return JSONResponse(
+                status_code=422, content={"detail": "invalid shared Google Cloud request"}
+            )
         if request.url.path == "/internal/v1/capabilities/connections/actions":
             return JSONResponse(status_code=422, content={"detail": "invalid connection action"})
         if request.url.path == "/internal/v1/capabilities/vulnerabilities/imports":
@@ -2017,7 +2069,7 @@ def create_app(
             status_code = error.status_code
             # A missing upstream list route is a broken configured bridge, not an
             # invitation to silently fall back to Denali-managed AWS onboarding.
-            if path == "/v1/connections" and status_code == 404:
+            if path in {"/v1/connections", "/internal/v1/connections/gcp"} and status_code == 404:
                 status_code = 502
             raise HTTPException(
                 status_code=status_code,
@@ -2195,6 +2247,215 @@ def create_app(
         return _shared_request(
             request, "POST", f"/internal/v1/connections/aws/{connection_id}/disable"
         )  # type: ignore[return-value]
+
+    def _shared_gcp_context(request: Request) -> None:
+        if not shared_gcp_enabled():
+            raise HTTPException(status_code=404, detail="shared Google Cloud is not enabled")
+        _shared_connections_context(request)
+
+    def _gcp_projection(result: Any, fields: set[str]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise HTTPException(status_code=502, detail="shared Google Cloud response is invalid")
+        # Browser adapters expose status/reference metadata, never credential internals.
+        return {key: value for key, value in result.items() if key in fields}
+
+    @app.get("/v1/shared/connections/gcp")
+    def list_shared_gcp(request: Request, response: Response) -> dict[str, Any]:
+        _shared_gcp_context(request)
+        listing = _shared_request(request, "GET", "/v1/connections")
+        if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
+            raise HTTPException(status_code=502, detail="shared Google Cloud list is invalid")
+        response.headers["Cache-Control"] = "no-store"
+        fields = {
+            "id",
+            "provider",
+            "connection_kind",
+            "display_name",
+            "projects",
+            "setup_state",
+            "health_state",
+            "availability",
+            "validated_scopes",
+            "last_validated_at",
+        }
+        items = []
+        for item in listing["items"]:
+            if (
+                not isinstance(item, dict)
+                or item.get("connection_kind") != "shared_gcp"
+                or item.get("provider") != "gcp"
+            ):
+                continue
+            projected = _gcp_projection(item, fields)
+            try:
+                projected["projects"] = [
+                    {"id": project["id"], "number": project["number"]}
+                    for project in selected_projects(item.get("projects"))
+                ]
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=502, detail="shared Google Cloud boundary is invalid"
+                ) from error
+            items.append(projected)
+        return {"items": items}
+
+    @app.post("/v1/shared/connections/gcp", status_code=202)
+    def create_shared_gcp(request: Request, payload: SharedGcpCreate) -> dict[str, Any]:
+        _shared_gcp_context(request)
+        result = _shared_request(
+            request,
+            "POST",
+            "/internal/v1/connections/gcp",
+            payload=payload.model_dump(mode="json"),
+        )
+        return _gcp_projection(result, {"id", "job_id", "state"})
+
+    @app.get("/v1/shared/connections/gcp/{connection_id}/validation")
+    def shared_gcp_status(
+        request: Request, response: Response, connection_id: UUID
+    ) -> dict[str, Any]:
+        _shared_gcp_context(request)
+        response.headers["Cache-Control"] = "no-store"
+        result = _shared_request(
+            request, "GET", f"/internal/v1/connections/gcp/{connection_id}/validation"
+        )
+        return _gcp_projection(
+            result,
+            {
+                "setup_state",
+                "health_state",
+                "credential_state",
+                "last_validated_at",
+                "job_id",
+                "job_kind",
+                "job_state",
+                "error_code",
+                "retry_available",
+            },
+        )
+
+    @app.get("/v1/shared/connections/gcp/{connection_id}/setup.sh")
+    def shared_gcp_script(request: Request, connection_id: UUID) -> PlainTextResponse:
+        _shared_gcp_context(request)
+        script = _shared_request(
+            request,
+            "GET",
+            f"/internal/v1/connections/gcp/{connection_id}/setup.sh",
+            expect_text=True,
+        )
+        if not isinstance(script, str) or len(script) > 128_000:
+            raise HTTPException(status_code=502, detail="shared Google Cloud script is invalid")
+        return PlainTextResponse(script, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/shared/connections/gcp/{connection_id}/validate", status_code=202)
+    def validate_shared_gcp(request: Request, connection_id: UUID) -> dict[str, Any]:
+        _shared_gcp_context(request)
+        result = _shared_request(
+            request, "POST", f"/internal/v1/connections/gcp/{connection_id}/validate"
+        )
+        return _gcp_projection(result, {"id", "job_id", "state"})
+
+    @app.post("/v1/shared/connections/gcp/{connection_id}/use-in-denali", status_code=201)
+    def use_shared_gcp(
+        request: Request, connection_id: UUID, payload: SharedGcpUseInput
+    ) -> dict[str, Any]:
+        _shared_gcp_context(request)
+        repo, tenant_id = _context(request)
+        shared = next(
+            (
+                item
+                for item in list_shared_gcp(request, Response())["items"]
+                if item.get("id") == str(connection_id)
+            ),
+            None,
+        )
+        if shared is None:
+            raise HTTPException(status_code=404, detail="shared Google Cloud connection not found")
+        if shared.get("availability") != "ready":
+            raise HTTPException(
+                status_code=409, detail="shared Google Cloud connection is not ready"
+            )
+        if not set(payload.declared_scopes) <= set(shared.get("validated_scopes") or []):
+            raise HTTPException(
+                status_code=403, detail="shared Google Cloud scopes are not entitled"
+            )
+        try:
+            projects = selected_projects(shared.get("projects"))
+        except ValueError as error:
+            raise HTTPException(
+                status_code=502, detail="shared Google Cloud boundary is invalid"
+            ) from error
+        reference = {"platform_connection_id": str(connection_id)}
+        configuration = {"coverage_mode": "selected-projects", "projects": projects}
+        existing = repo.get_connection(tenant_id, str(connection_id))
+
+        def matches(row: dict[str, Any] | None) -> bool:
+            return bool(
+                row
+                and row.get("provider") == "gcp"
+                and row.get("credential_reference", {}).get("type") == "platform_shared_gcp"
+                and row.get("lifecycle_state") == "active"
+                and row.get("configuration") == configuration
+                and set(row.get("declared_scopes") or []) == set(payload.declared_scopes)
+            )
+
+        if existing is not None:
+            if not matches(existing):
+                raise HTTPException(
+                    status_code=409, detail="connection ID or settings are already in use"
+                )
+            return _with_validation_state(request, tenant_id, existing)
+        try:
+            row = repo.create_connection(
+                tenant_id,
+                connection_id=str(connection_id),
+                provider="gcp",
+                display_name=f"Shared GCP {str(connection_id)[:8]}",
+                credential_type="platform_shared_gcp",
+                credential_reference=reference,
+                declared_scopes=payload.declared_scopes,
+                coverage_plan=gcp_coverage_plan(payload.declared_scopes, projects),
+                configuration=configuration,
+            )
+        except ValueError as error:
+            row = repo.get_connection(tenant_id, str(connection_id))
+            if not matches(row):
+                raise HTTPException(
+                    status_code=409, detail="connection settings conflict"
+                ) from error
+        return _with_validation_state(request, tenant_id, row)
+
+    @app.post("/v1/shared/connections/gcp/{connection_id}/disable")
+    def disable_shared_gcp(request: Request, connection_id: UUID) -> dict[str, Any]:
+        _shared_gcp_context(request)
+        result = _shared_request(
+            request, "POST", f"/internal/v1/connections/gcp/{connection_id}/disable"
+        )
+        return _gcp_projection(result, {"status"})
+
+    @app.delete("/v1/shared/connections/gcp/{connection_id}")
+    def delete_shared_gcp(
+        request: Request, connection_id: UUID, payload: SharedGcpDelete
+    ) -> dict[str, Any]:
+        _shared_gcp_context(request)
+        shared = next(
+            (
+                row
+                for row in list_shared_gcp(request, Response())["items"]
+                if row.get("id") == str(connection_id)
+            ),
+            None,
+        )
+        if shared is None:
+            raise HTTPException(status_code=404, detail="shared Google Cloud connection not found")
+        if shared.get("availability") != "disabled":
+            raise HTTPException(status_code=409, detail="disable the shared connection first")
+        if payload.confirmation_name != shared.get("display_name"):
+            raise HTTPException(
+                status_code=409, detail="shared connection name confirmation failed"
+            )
+        result = _shared_request(request, "DELETE", f"/internal/v1/connections/gcp/{connection_id}")
+        return _gcp_projection(result, {"status"})
 
     @app.post("/v1/connections", status_code=201)
     def create_connection(request: Request, connection: ConnectionCreate) -> dict[str, Any]:
@@ -2946,6 +3207,10 @@ def create_app(
         target = repo.get_connection_validation_target(current_tenant, str(connection_id))
         if target is None or target["provider"] != "gcp":
             raise HTTPException(status_code=404, detail="Google Cloud connection not found")
+        if target.get("credential_type") == "platform_shared_gcp":
+            raise HTTPException(
+                status_code=409, detail="shared Google Cloud setup belongs to Platform"
+            )
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be launched")
         launcher = request.app.state.gcp_setup_launcher
@@ -3002,6 +3267,10 @@ def create_app(
         target = repo.get_connection_validation_target(current_tenant, str(connection_id))
         if target is None or target["provider"] != "gcp":
             raise HTTPException(status_code=404, detail="Google Cloud connection not found")
+        if target.get("credential_type") == "platform_shared_gcp":
+            raise HTTPException(
+                status_code=409, detail="shared Google Cloud setup belongs to Platform"
+            )
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be completed")
         payload = _decode_gcp_completion_code(completion.completion_code)
@@ -5427,7 +5696,9 @@ def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> 
             result["provider"] == "azure" and request.app.state.azure_setup_launcher is not None
         ),
         "gcp_cloud_shell": (
-            result["provider"] == "gcp" and request.app.state.gcp_setup_launcher is not None
+            result["provider"] == "gcp"
+            and result.get("credential_reference", {}).get("type") != "platform_shared_gcp"
+            and request.app.state.gcp_setup_launcher is not None
         ),
         "github_app": (
             result["provider"] == "github" and request.app.state.github_app_client is not None

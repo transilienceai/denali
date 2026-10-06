@@ -1,23 +1,96 @@
 {
   "schema_version": 1,
   "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
-  "public_operation_count": 88,
-  "explicit_public_operation_count": 84,
+  "public_operation_count": 96,
+  "explicit_public_operation_count": 92,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
   "release_named_read_count": 37,
   "release_named_write_count": 16,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
-  "browser_operation_count": 69,
+  "browser_operation_count": 77,
   "exceptions": {
     "security_admin_user_creation": "Password-based Clerk user creation remains a secure browser workflow; passwords must never enter model/chat context.",
     "security_admin_invitations": "Bulk invitations affect shared Clerk Organization membership across applications. A future capability requires separate per-action, recipient-role, confirmation, and audit design; not included in this rollout.",
     "ci_oidc": "GitHub Actions ingestion binds a verified CI workflow/run/repository to the workload. Human MCP identities cannot impersonate or bypass that separate trust boundary.",
     "provider_callback": "One-time state/consent callbacks are provider protocols, not user-invoked capabilities.",
     "operator": "Health, navigation, API documentation, deployment, migrations, and direct CLI evaluation execution are operator workflows. Evaluation result histories remain product capabilities.",
-    "raw_connection_reads": "Raw credential references and configuration are replaced by reviewed tenant-scoped safe connection projections."
+    "raw_connection_reads": "Raw credential references and configuration are replaced by reviewed tenant-scoped safe connection projections.",
+    "shared_gcp_pilot": "Default-off shared GCP setup/attachment are authenticated browser pilot workflows. Existing named connection validation, collection, job polling and result capabilities work on attached shared references; this pilot does not advertise additional MCP lifecycle tools."
   },
   "operations": [
+    {
+      "method": "DELETE",
+      "path": "/v1/shared/connections/gcp/{connection_id}",
+      "handler": "delete_shared_gcp",
+      "browser_methods": ["deleteSharedGcp"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/gcp",
+      "handler": "list_shared_gcp",
+      "browser_methods": ["sharedGcpConnections"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/gcp",
+      "handler": "create_shared_gcp",
+      "browser_methods": ["createSharedGcp"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/gcp/{connection_id}/validation",
+      "handler": "shared_gcp_status",
+      "browser_methods": ["sharedGcpStatus"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/gcp/{connection_id}/setup.sh",
+      "handler": "shared_gcp_script",
+      "browser_methods": ["sharedGcpScript"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/gcp/{connection_id}/validate",
+      "handler": "validate_shared_gcp",
+      "browser_methods": ["validateSharedGcp"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/gcp/{connection_id}/use-in-denali",
+      "handler": "use_shared_gcp",
+      "browser_methods": ["useSharedGcp"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/gcp/{connection_id}/disable",
+      "handler": "disable_shared_gcp",
+      "browser_methods": ["disableSharedGcp"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
     {
       "method": "GET",
       "path": "/v1/connections/{connection_id}/validation-jobs/{job_id}",

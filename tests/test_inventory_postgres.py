@@ -332,6 +332,66 @@ def test_shared_aws_worker_target_uses_server_resolved_org(repository) -> None:
     assert target["clerk_organization_id"] == clerk_org_id
     assert repo.get_connection_validation_target(other_tenant, connection_id) is None
 
+
+def test_shared_gcp_reference_jobs_and_worker_target_are_durable_and_tenant_bound(repository):
+    _, repo = repository
+    marker = uuid.uuid4().hex
+    org = f"org_SharedGcp{marker}"
+    tenant = repo.resolve_tenant(org)
+    other = repo.resolve_tenant(f"org_SharedGcpOther{marker}")
+    connection_id = str(uuid.uuid4())
+    projects = [{"id": "shared-ai-project", "number": "123456789012", "name": "shared-ai-project"}]
+    created = repo.create_connection(
+        tenant,
+        connection_id=connection_id,
+        provider="gcp",
+        display_name="Shared GCP contract",
+        credential_type="platform_shared_gcp",
+        credential_reference={"platform_connection_id": connection_id},
+        declared_scopes=["gcp.code_to_cloud"],
+        coverage_plan=gcp_coverage_plan(["gcp.code_to_cloud"], projects),
+        configuration={"coverage_mode": "selected-projects", "projects": projects},
+    )
+    assert created["credential_reference"] == {
+        "type": "platform_shared_gcp",
+        "platform_connection_id": connection_id,
+    }
+    target = repo.get_connection_validation_target(tenant, connection_id)
+    assert target["clerk_organization_id"] == org
+    assert target["credential_type"] == "platform_shared_gcp"
+    assert "principal_email" not in target["credential_reference"]
+    assert repo.get_connection_validation_target(other, connection_id) is None
+    assert repo.get_connection(other, connection_id) is None
+    job, new = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind="gcp_deployments"
+    )
+    duplicate, duplicate_new = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind="gcp_deployments"
+    )
+    assert new and not duplicate_new and job["id"] == duplicate["id"]
+    with pytest.raises(ValueError, match="no longer active"):
+        repo.create_connection_collection_job(
+            other, connection_id, collection_kind="gcp_deployments"
+        )
+    restarted = PostgresInventoryRepository(DSN)
+    claimed = restarted.claim_connection_collection_job(str(job["id"]), lease_seconds=60)
+    assert claimed["tenant_id"] == uuid.UUID(tenant)
+    assert claimed["collection_kind"] == "gcp_deployments"
+    result = {"state": "complete", "completed_at": datetime.now(UTC).isoformat(), "projects": []}
+    restarted.complete_connection_collection_job(str(job["id"]), result)
+    assert (
+        repo.connection_collection_status(tenant, connection_id, collection_kind="gcp_deployments")[
+            "last_result"
+        ]
+        == result
+    )
+    repo.disable_connection(tenant, connection_id)
+    with pytest.raises(ValueError, match="no longer active"):
+        repo.create_connection_collection_job(
+            tenant, connection_id, collection_kind="gcp_deployments"
+        )
+
+
 def test_gateway_governance_action_is_audited_once_and_tenant_scoped(repository) -> None:
     _, repo = repository
     marker = uuid.uuid4().hex

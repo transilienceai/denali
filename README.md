@@ -206,6 +206,8 @@ Start with the product and evidence boundaries, then follow only the slice being
   [OCSF boundary](docs/architecture/0002-ocsf-boundary.md)
 - [Hosted multi-tenant runtime](docs/architecture/0028-hosted-multi-tenant-runtime.md) for the
   Vercel, Clerk, Modal, and Neon deployment, tenant authorization, secrets, and durable jobs
+- [Shared Google Cloud pilot](docs/development/shared-gcp-connections-pilot.md) for keyless
+  Platform onboarding, Denali reuse, compatibility and hosted release acceptance
 - [Evidence-bearing issues](docs/architecture/0005-evidence-bearing-issues.md)
 - [SBOM-first vulnerability model](docs/architecture/0006-sbom-first-vulnerability-model.md),
   [artifact correlation](docs/architecture/0013-artifact-vulnerability-correlation.md), and

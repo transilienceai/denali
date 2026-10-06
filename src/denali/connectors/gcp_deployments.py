@@ -194,10 +194,12 @@ class GcpConnectionDeploymentCollector:
     def __init__(
         self,
         asset_client_factory: Callable[[str], GcpAssetClient] | None = None,
+        shared_reader_factory: Callable[[dict[str, Any]], Any] | None = None,
     ):
         self._asset_client_factory = asset_client_factory or (
             lambda principal: GcpCloudAssetRestClient(authorized_gcp_request(principal))
         )
+        self._shared_reader_factory = shared_reader_factory
 
     def collect(
         self,
@@ -222,8 +224,11 @@ class GcpConnectionDeploymentCollector:
         projects = configuration.get("projects", [])
         configured_resource_names = configuration.get("resource_names")
         configured_display_names = configuration.get("resource_display_names")
+        shared = connection.get("credential_type") == "platform_shared_gcp"
         principal = connection.get("credential_reference", {}).get("principal_email")
-        if not isinstance(projects, list) or not projects or not isinstance(principal, str):
+        if not isinstance(projects, list) or not projects or (
+            not shared and not isinstance(principal, str)
+        ):
             raise ValueError("complete Google Cloud project selection before collecting")
         if configured_resource_names is not None and (
             not isinstance(configured_resource_names, list)
@@ -246,10 +251,17 @@ class GcpConnectionDeploymentCollector:
                     "Google Cloud resource_display_names must stay inside resource_names"
                 )
 
-        client = self._asset_client_factory(principal)
+        shared_reader = None
+        if shared:
+            from denali.integrations.shared_gcp import SharedGcpReader
+
+            shared_reader = (self._shared_reader_factory or SharedGcpReader)(connection)
+            client = shared_reader
+        else:
+            client = self._asset_client_factory(principal)
         activity_credentials = None
         cloud_logging = None
-        if GCP_SCOPE_AI_ACTIVITY in scopes:
+        if GCP_SCOPE_AI_ACTIVITY in scopes and not shared:
             from google.cloud import logging as cloud_logging_module
 
             activity_credentials = authorized_gcp_credential(principal)
@@ -297,11 +309,11 @@ class GcpConnectionDeploymentCollector:
                 repository.ingest(tenant_id, batch)
                 all_coverage.extend(batch.coverage)
             activity_count = 0
-            if GCP_SCOPE_AI_ACTIVITY in scopes and cloud_logging is not None:
+            if GCP_SCOPE_AI_ACTIVITY in scopes and (cloud_logging is not None or shared_reader):
                 end_time = datetime.now(UTC)
                 activity_batch = GcpVertexActivityConnector(
                     project_id=project_id,
-                    logging_client=cloud_logging.Client(
+                    logging_client=shared_reader or cloud_logging.Client(
                         project=project_id, credentials=activity_credentials
                     ),
                 ).collect(
