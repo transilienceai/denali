@@ -8,6 +8,16 @@ from datetime import UTC, datetime
 from threading import local
 from typing import Any, Protocol
 
+from denali.connections.aws_selected_resource import (
+    AWS_COVERAGE_RESOURCE,
+    SelectedRoleIamReader,
+    connection_selection,
+    read_lambda,
+    render_selected_cloudformation,
+    selected_coverage_plan,
+    verify_identity,
+)
+
 AWS_SCOPE_BEDROCK_AGENTS = "aws.bedrock_agents"
 AWS_SCOPE_AGENTCORE = "aws.agentcore"
 AWS_SCOPE_AGENT_RUNTIME_ACTIVITY = "aws.agent_runtime_activity"
@@ -259,6 +269,10 @@ def aws_connection_coverage_plan(
 def render_cloudformation(connection: dict[str, Any]) -> str:
     """Render the least-privilege onboarding role for one AWS connection."""
 
+    if connection["configuration"].get("coverage_mode") == AWS_COVERAGE_RESOURCE or (
+        connection["configuration"].get("selected_resource") is not None
+    ):
+        return render_selected_cloudformation(connection)
     configuration = connection["configuration"]
     credential = connection["credential_reference"]
     role_name = configuration["role_name"]
@@ -351,6 +365,13 @@ class AwsConnectionValidator:
         started_at = datetime.now(UTC)
         configuration = connection["configuration"]
         credential = connection["credential_reference"]
+        selected = configuration.get("coverage_mode") == AWS_COVERAGE_RESOURCE or (
+            configuration.get("selected_resource") is not None
+        )
+        try:
+            selection = connection_selection(connection)
+        except ValueError:
+            return _selected_validation(connection, started_at, credential_state="failed")
         try:
             if connection.get("credential_type") == "platform_shared_aws":
                 from denali.integrations.shared_aws_session import leased_aws_session
@@ -381,6 +402,8 @@ class AwsConnectionValidator:
                 )
             identity = session.client("sts").get_caller_identity()
             observed_account = str(identity.get("Account", ""))
+            if selection is not None:
+                verify_identity(identity, selection, credential["role_arn"])
             if observed_account != configuration["account_id"]:
                 return _credential_failure(
                     connection,
@@ -389,7 +412,49 @@ class AwsConnectionValidator:
                     observed_account=observed_account or None,
                 )
         except Exception as error:  # AWS SDK exception types are optional at import time.
+            if selected:
+                return _selected_validation(connection, started_at, credential_state="failed")
             return _credential_failure(connection, started_at, _aws_error_code(error))
+
+        if selection is not None:
+            from denali.connectors.aws_stack_posture import _overbroad_bedrock_permissions
+
+            results = selected_coverage_plan(selection)
+            for result in results:
+                result.pop("validation_state")
+                result["state"] = "unknown"
+                result["detail"] = "Not attempted because the selected resource was not verified."
+            try:
+                read_lambda(_regional_client(session, "lambda", selection.region), selection)
+                results[0].update(
+                    state="passed", detail="Exact Zip Lambda, role and model pins matched."
+                )
+                _overbroad_bedrock_permissions(
+                    SelectedRoleIamReader(
+                        _regional_client(session, "iam", selection.region), selection
+                    ),
+                    selection.role_name,
+                )
+                results[1].update(
+                    state="passed",
+                    detail=(
+                        "Exact execution-role inline policy reads passed; "
+                        "no attached policies were present."
+                    ),
+                )
+            except Exception:
+                index = 1 if results[0]["state"] == "passed" else 0
+                results[index].update(
+                    state="failed",
+                    detail="Selected resource metadata or exact-role read proof was incomplete.",
+                )
+            return _selected_validation(
+                connection,
+                started_at,
+                credential_state="passed",
+                results=results,
+                observed_account=observed_account,
+            )
 
         discovery = self._discover_regions(session, configuration)
         results: list[dict[str, Any]] = [discovery]
@@ -714,6 +779,42 @@ class AwsConnectionValidator:
             _regional_client(session, "sagemaker", region).list_endpoints(MaxResults=1)
         else:  # Creation validation should make this unreachable.
             raise ValueError("unsupported_scope")
+
+
+def _selected_validation(
+    connection: dict[str, Any],
+    started_at: datetime,
+    *,
+    credential_state: str,
+    results: list[dict[str, Any]] | None = None,
+    observed_account: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "started_at": started_at,
+        "completed_at": datetime.now(UTC),
+        "health_state": "partial" if credential_state == "passed" else "unhealthy",
+        "credential_state": credential_state,
+        "account_id_observed": observed_account,
+        "results": results
+        or [
+            {
+                "scope": AWS_SCOPE_CODE_TO_CLOUD,
+                "plane": "aws_selected_lambda_configuration",
+                "label": "Selected Zip Lambda configuration and tags",
+                "region": connection["configuration"].get("deployment_region", "unknown"),
+                "coverage_mode": AWS_COVERAGE_RESOURCE,
+                "state": "unknown",
+                "detail": (
+                    "Not attempted because exact selected-resource credentials "
+                    "or boundaries failed."
+                ),
+            }
+        ],
+        "summary": (
+            "Selected-resource read boundary only; inspect each result. "
+            "Account-wide inventory and enabled Regions were not assessed."
+        ),
+    }
 
 
 def _credential_failure(

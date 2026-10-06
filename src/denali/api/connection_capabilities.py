@@ -79,6 +79,21 @@ def setup_summary(row: dict[str, Any]) -> dict[str, Any]:
         "google_workspace": ("admin_email", "domain", "coverage_mode"),
     }.get(provider, ())
     setup = {field: configuration[field] for field in fields if field in configuration}
+    if provider == "aws" and configuration.get("coverage_mode") == "selected-resource":
+        from denali.connections.aws_selected_resource import parse_selection
+
+        selection = configuration.get("selected_resource")
+        if isinstance(selection, dict):
+            public_selection = {
+                key: selection.get(key)
+                for key in ("kind", "function_arn", "execution_role_arn", "expected_model_id")
+            }
+            try:
+                parse_selection(public_selection)
+            except ValueError:
+                pass
+            else:
+                setup["selected_resource"] = public_selection
     public_identity_fields = {
         "aws": ("role_arn", "platform_connection_id"),
         "azure": ("client_id", "service_principal_id"),

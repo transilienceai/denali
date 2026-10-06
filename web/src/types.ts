@@ -97,7 +97,7 @@ export type ConnectionValidationResult = {
   region: string;
   state: "passed" | "failed" | "unknown" | "not_applicable";
   detail: string;
-  coverage_mode?: "automatic" | "selected";
+  coverage_mode?: "automatic" | "selected" | "selected-resource";
   observed_at?: string;
   discovered_regions?: string[];
   not_enabled_regions?: string[];
@@ -262,7 +262,8 @@ export type Connection = {
     account_id?: string;
     partition?: "aws" | "aws-us-gov" | "aws-cn";
     deployment_region?: string;
-    coverage_mode?: "automatic" | "selected" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "exact-azure-repositories" | "tenant-wide-admin-consent" | "domain-wide-delegation";
+    coverage_mode?: "automatic" | "selected" | "selected-resource" | "selected-subscriptions" | "selected-projects" | "exact-installation-repositories" | "exact-azure-repositories" | "tenant-wide-admin-consent" | "domain-wide-delegation";
+    selected_resource?: AwsSelectedResource;
     regions?: string[];
     role_name?: string;
     stack_scopes?: string[];
@@ -373,6 +374,10 @@ export type AwsDeploymentCollection = {
   region_count: number;
   failed_count: number;
   partial_count: number;
+  coverage_mode?: "selected-resource";
+  resource_coverage_state?: "complete" | "partial" | "failed";
+  resource_count?: number;
+  account_coverage?: "not_assessed";
   regions: Array<{
     region: string;
     state: "complete" | "partial" | "failed";
@@ -417,13 +422,21 @@ export type AwsCloudFormationLaunch = {
   validation_status: "started" | "already_running";
 };
 
+export type AwsSelectedResource = {
+  kind: "lambda_zip";
+  function_arn: string;
+  execution_role_arn: string;
+  expected_model_id: string;
+};
+
 export type AwsConnectionCreate = {
   provider: "aws";
   display_name: string;
   account_id: string;
   partition: "aws" | "aws-us-gov" | "aws-cn";
   deployment_region: string;
-  coverage_mode: "automatic" | "selected";
+  coverage_mode: "automatic" | "selected" | "selected-resource";
+  selected_resource?: AwsSelectedResource;
   regions: string[];
   declared_scopes: string[];
   role_name: string;
