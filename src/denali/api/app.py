@@ -679,6 +679,15 @@ class GitHubVulnerabilityImportCreate(BaseModel):
     authoritative: bool = True
 
 
+class AwsSelectedResource(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: Literal["lambda_zip"]
+    function_arn: str = Field(min_length=1, max_length=300)
+    execution_role_arn: str = Field(min_length=1, max_length=300)
+    expected_model_id: str = Field(min_length=1, max_length=300)
+
+
 class AwsConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -687,7 +696,8 @@ class AwsConnectionCreate(BaseModel):
     account_id: str = Field(pattern=r"^[0-9]{12}$")
     partition: Literal["aws", "aws-us-gov", "aws-cn"] = "aws"
     deployment_region: str = "us-east-1"
-    coverage_mode: Literal["automatic", "selected"] = AWS_COVERAGE_AUTOMATIC
+    coverage_mode: Literal["automatic", "selected", "selected-resource"] = AWS_COVERAGE_AUTOMATIC
+    selected_resource: AwsSelectedResource | None = None
     regions: list[str] = Field(default_factory=list, max_length=40)
     declared_scopes: list[str] = Field(
         default_factory=lambda: list(AWS_SCOPES), min_length=1, max_length=len(AWS_SCOPES)
@@ -698,6 +708,28 @@ class AwsConnectionCreate(BaseModel):
         max_length=64,
         pattern=r"^[A-Za-z0-9+=,.@_-]+$",
     )
+
+    @model_validator(mode="after")
+    def exact_resource_boundary(self):
+        from denali.connections.aws_selected_resource import (
+            AWS_COVERAGE_RESOURCE,
+            connection_selection,
+        )
+        if self.selected_resource is not None or self.coverage_mode == AWS_COVERAGE_RESOURCE:
+            reader_role = f"arn:{self.partition}:iam::{self.account_id}:role/{self.role_name}"
+            selected = self.selected_resource.model_dump() if self.selected_resource else None
+            connection_selection({
+                "provider": "aws", "credential_type": "aws_assume_role",
+                "declared_scopes": self.declared_scopes,
+                "credential_reference": {"role_arn": reader_role},
+                "configuration": {
+                    "account_id": self.account_id, "partition": self.partition,
+                    "coverage_mode": self.coverage_mode, "regions": self.regions,
+                    "deployment_region": self.deployment_region, "role_name": self.role_name,
+                    "selected_resource": selected,
+                },
+            })
+        return self
 
 
 class SharedAwsConnectionCreate(BaseModel):
@@ -1593,7 +1625,12 @@ def create_app(
                     credentials_pending = (
                         wait_for_credentials and validation["credential_state"] != "passed"
                     )
-                    coverage_pending = wait_for_healthy and validation["health_state"] != "healthy"
+                    from denali.connections.aws_selected_resource import selected_validation_passed
+
+                    coverage_pending = (
+                        wait_for_healthy and validation["health_state"] != "healthy"
+                        and not selected_validation_passed(target, validation)
+                    )
                     if not (credentials_pending or coverage_pending) or monotonic() >= deadline:
                         repo.record_connection_validation(current_tenant, connection_id, validation)
                         return
@@ -3071,6 +3108,21 @@ def create_app(
         role_arn = (
             f"arn:{connection.partition}:iam::{connection.account_id}:role/{connection.role_name}"
         )
+        from denali.connections.aws_selected_resource import parse_selection, selected_coverage_plan
+
+        selected_resource = (
+            connection.selected_resource.model_dump() if connection.selected_resource else None
+        )
+        coverage_plan = (
+            selected_coverage_plan(parse_selection(selected_resource))
+            if selected_resource
+            else aws_connection_coverage_plan(
+                scopes,
+                regions if connection.coverage_mode == AWS_COVERAGE_SELECTED else ["all-enabled"],
+                deployment_region=connection.deployment_region,
+                coverage_mode=connection.coverage_mode,
+            )
+        )
         try:
             created = repo.create_connection(
                 current_tenant,
@@ -3080,24 +3132,18 @@ def create_app(
                 credential_type="aws_assume_role",
                 credential_reference={"role_arn": role_arn, "external_id": external_id},
                 declared_scopes=scopes,
-                coverage_plan=aws_connection_coverage_plan(
-                    scopes,
-                    (
-                        regions
-                        if connection.coverage_mode == AWS_COVERAGE_SELECTED
-                        else ["all-enabled"]
-                    ),
-                    deployment_region=connection.deployment_region,
-                    coverage_mode=connection.coverage_mode,
-                ),
+                coverage_plan=coverage_plan,
                 configuration={
                     "account_id": connection.account_id,
                     "partition": connection.partition,
                     "deployment_region": connection.deployment_region,
                     "coverage_mode": connection.coverage_mode,
-                    "regions": regions if connection.coverage_mode == AWS_COVERAGE_SELECTED else [],
+                    "regions": (
+                        regions if connection.coverage_mode != AWS_COVERAGE_AUTOMATIC else []
+                    ),
                     "role_name": connection.role_name,
                     "stack_scopes": [],
+                    **({"selected_resource": selected_resource} if selected_resource else {}),
                 },
             )
             return _with_validation_state(request, current_tenant, created)

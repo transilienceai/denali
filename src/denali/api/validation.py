@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from time import monotonic, sleep
 from typing import Any, Protocol
 
+from denali.connections.aws_selected_resource import selected_validation_passed
 from denali.worker_limits import VALIDATION_WORKER_LEASE_SECONDS, WORKER_LEASE_GRACE_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ def run_durable_validation_job(
             coverage_pending = (
                 bool(job["wait_for_healthy"])
                 and validation["health_state"] != "healthy"
+                and not selected_validation_passed(target, validation)
             )
             if not (credentials_pending or coverage_pending) or monotonic() >= deadline:
                 repository.record_connection_validation(
