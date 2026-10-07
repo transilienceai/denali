@@ -6,6 +6,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from denali.resource_writes.observability import observe_dependency
 from denali.resource_writes.providers import (
     AwsInlineRemediator,
     GitHubRemediator,
@@ -74,7 +75,10 @@ class RemediationService:
         try:
             if self.memberships is None:
                 raise RemediationError("membership_unavailable")
-            if self.memberships.role(organization_id, user_id) != "admin":
+            if (
+                observe_dependency("membership", self.memberships.role, organization_id, user_id)
+                != "admin"
+            ):
                 raise RemediationError("live_organization_admin_required")
         except RemediationError:
             raise
