@@ -13,6 +13,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from denali.resource_writes.observability import observe_dependency
 from denali.resource_writes.templates import (
     RemediationError,
     eligible_source_path,
@@ -106,21 +107,25 @@ class PlatformWriteLeases:
             "reviewer_user_id": reviewer,
         }
         try:
-            token = self._lease_token(claims)
+            token = observe_dependency("lease_mint", self._lease_token, claims)
             with httpx.Client(timeout=15, follow_redirects=False) as client:
-                response = client.post(
-                    f"{self._origin}/internal/v1/resource-write-grants/{grant_id}/lease",
-                    json={
-                        "clerk_org_id": organization_id,
-                        "action": action,
-                        "mode": mode,
-                        "request_id": request_id,
-                        "request_sha256": request_sha256,
-                    },
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                response.raise_for_status()
-                return response.json()
+
+                def fetch_lease():
+                    response = client.post(
+                        f"{self._origin}/internal/v1/resource-write-grants/{grant_id}/lease",
+                        json={
+                            "clerk_org_id": organization_id,
+                            "action": action,
+                            "mode": mode,
+                            "request_id": request_id,
+                            "request_sha256": request_sha256,
+                        },
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    response.raise_for_status()
+                    return response.json()
+
+                return observe_dependency("lease_post", fetch_lease)
         except Exception:
             raise RemediationError("resource_lease_unavailable") from None
 
@@ -133,7 +138,8 @@ class GitHubRemediator:
         self._repo = "/repos/" + self.resource["full_name"]
 
     def _api(self, method, path, *, missing=False, **kwargs):
-        try:
+
+        def request_json():
             response = self._client.request(
                 method,
                 "https://api.github.com" + self._repo + path,
@@ -148,6 +154,13 @@ class GitHubRemediator:
                 return None
             response.raise_for_status()
             return response.json()
+
+        try:
+            return (
+                observe_dependency("github_read", request_json)
+                if method == "GET"
+                else request_json()
+            )
         except (httpx.HTTPError, ValueError):
             raise RemediationError("github_provider_unavailable") from None
 

@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from denali.resource_writes.contract import RESOURCE_WRITE_RECEIVER
+from denali.resource_writes.observability import observe_preview
 from denali.resource_writes.templates import GITHUB_ACTION, PURPOSES, RemediationError
 
 INTERNAL_PATH = RESOURCE_WRITE_RECEIVER
@@ -124,7 +125,8 @@ def register_remediation_routes(app: FastAPI):
         tenant, identity = context(request, payload.expected_organization_id)
         response.headers["Cache-Control"] = "no-store"
         return safe(
-            lambda: service(request).preview(
+            lambda: observe_preview(
+                service(request).preview,
                 tenant_id=tenant,
                 organization_id=identity.organization_id,
                 actor=identity.user_id,

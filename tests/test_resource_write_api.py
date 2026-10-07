@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -9,6 +11,7 @@ from denali.api.app import create_app
 from denali.api.auth import AuthContext, AuthenticationError
 from denali.api.gateway_auth import GatewayPrincipal
 from denali.resource_writes.api import INTERNAL_PATH
+from denali.resource_writes.observability import observe_dependency
 from denali.resource_writes.templates import AWS_ACTION, PURPOSES
 
 ORG = "org_Alpha1"
@@ -149,3 +152,78 @@ def test_default_off_has_no_new_worker_or_credentials():
             "/v1/resource-writes/previews", json=body(), headers={"Authorization": "Bearer browser"}
         )
     assert response.status_code == 404
+
+
+def preview_events(caplog):
+    return [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == "denali.resource_preview"
+    ]
+
+
+@pytest.mark.parametrize("gateway", [False, True])
+def test_authorized_preview_route_activates_only_fixed_diagnostics(caplog, gateway):
+    private = "SIMULATED_PRIVATE_BODY_AND_CREDENTIAL"
+    service = Service()
+    payload = body(parameters={"model_arns": [private]})
+    with TestClient(application(service)) as client:
+        response = client.post(
+            INTERNAL_PATH if gateway else "/v1/resource-writes/previews",
+            json=(
+                {"action": "preview", "resource_action": AWS_ACTION, "payload": payload}
+                if gateway
+                else payload
+            ),
+            headers={"Authorization": "Bearer resource-admin" if gateway else "Bearer browser"},
+        )
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert [(row["phase"], row["category"]) for row in preview_events(caplog)] == [
+        ("preview", "returned")
+    ]
+    assert private not in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["request", "review", "status", "reconcile"])
+def test_other_resource_routes_do_not_activate_preview_observation(caplog, operation):
+    service = Service()
+
+    def inactive(*args, **kwargs):
+        service.calls.append((args, kwargs))
+        return observe_dependency("membership", lambda: {"state": "rejected"})
+
+    service.request = service.review = service.status = service.reconcile = inactive
+    service.store = SimpleNamespace(get=lambda *args: {"action": AWS_ACTION})
+    request_id = str(uuid4())
+    path = "/v1/resource-writes/requests"
+    headers = {"Authorization": "Bearer browser", "Idempotency-Key": str(uuid4())}
+    payload = {"expected_organization_id": ORG}
+    if operation == "request":
+        payload.update(
+            preview_id=str(uuid4()), preview_sha256="a" * 64, justification="Review", confirm=True
+        )
+    else:
+        path += "/" + request_id
+        if operation != "status":
+            path += "/" + operation
+        if operation == "review":
+            payload.update(decision="rejected", review_note="Review", confirm=True)
+    with TestClient(application(service)) as client:
+        response = (
+            client.get(path, headers=headers)
+            if operation == "status"
+            else client.post(path, headers=headers, json=payload)
+        )
+    assert response.status_code == (201 if operation == "request" else 200)
+    assert len(service.calls) == 1 and preview_events(caplog) == []
+
+
+def test_preview_denied_before_product_call_does_not_log_privileged_context(caplog):
+    service = Service()
+    with TestClient(application(service)) as client:
+        response = client.post(
+            INTERNAL_PATH,
+            json={"action": "preview", "resource_action": AWS_ACTION, "payload": body()},
+            headers={"Authorization": "Bearer resource-member"},
+        )
+    assert response.status_code == 403 and service.calls == [] and preview_events(caplog) == []
