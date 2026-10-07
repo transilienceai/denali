@@ -27,6 +27,13 @@ _SINK_NAME = "denali.resource_preview.stderr"
 
 
 class _PreviewStreamHandler(logging.StreamHandler):
+    def flush(self) -> None:
+        try:
+            super().flush()
+        except Exception:
+            # logging.shutdown calls flush directly, outside emit/handleError.
+            pass
+
     def handleError(self, record: logging.LogRecord) -> None:
         # A failed sink must not print a fallback traceback or change product outcomes.
         pass

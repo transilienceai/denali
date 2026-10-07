@@ -160,6 +160,41 @@ def test_sink_failure_cannot_emit_fallback_traceback_or_change_outcome(failed_op
     assert result.stdout == "ok\n" and result.stderr == ""
 
 
+@pytest.mark.parametrize("failure_type", ["RuntimeError", "ValueError", "OSError"])
+def test_real_process_shutdown_flush_failure_never_prints_private_atexit_error(failure_type):
+    result = fresh_process(
+        f"""
+        import json
+        import logging
+        import sys
+        private = {PRIVATE!r}
+        class ShutdownFailureSink:
+            def __init__(self):
+                self.writes = []
+            def write(self, message):
+                self.writes.append(message)
+            def flush(self):
+                raise {failure_type}(private)
+        original = sys.stderr
+        sink = ShutdownFailureSink()
+        sys.stderr = sink
+        logging.raiseExceptions = True
+        from denali.resource_writes import observability as observation
+        value = {{"source": private}}
+        assert observation.observe_preview(lambda: value) is value
+        assert observation._preview_active.get() is False
+        assert len(sink.writes) == 1
+        assert private not in sink.writes[0]
+        assert json.loads(sink.writes[0])["event"] == "resource_preview"
+        # Automatic logging.shutdown will still flush the handler's failed stream.
+        # Restore the real stderr so an atexit fallback traceback would be captured.
+        sys.stderr = original
+        print("ok")
+        """
+    )
+    assert result.stdout == "ok\n" and result.stderr == ""
+
+
 def test_repeated_import_and_reload_install_exactly_one_owned_sink():
     result = fresh_process(
         """
