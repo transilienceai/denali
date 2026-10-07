@@ -161,14 +161,22 @@ class GitHubRemediator:
             # enforce admins, and contain no bypass for this write App.
             protection = self._api("GET", "/branches/" + quote(branch, safe="") + "/protection")
             review = protection.get("required_pull_request_reviews") or {}
-            bypass = review.get("bypass_pull_request_allowances") or {}
-            apps = bypass.get("apps")
+            # GitHub's GET schema/example permits this optional member to be
+            # absent when no bypass is configured. Normalize only absence;
+            # explicit null, malformed objects/lists and any actor fail closed.
+            # Leave protection unchanged so its original shape remains hashed.
+            bypass = (
+                review["bypass_pull_request_allowances"]
+                if "bypass_pull_request_allowances" in review
+                else {"apps": [], "users": [], "teams": []}
+            )
             if review.get("required_approving_review_count", 0) < 1 or (
                 (protection.get("enforce_admins") or {}).get("enabled") is not True
-                or not isinstance(apps, list)
-                or apps
-                or bypass.get("users")
-                or bypass.get("teams")
+                or not isinstance(bypass, dict)
+                or any(
+                    not isinstance(bypass.get(actor_type), list) or bypass[actor_type]
+                    for actor_type in ("apps", "users", "teams")
+                )
             ):
                 raise RemediationError("github_review_rule_not_verified")
             verified_rule_ids = ["classic:" + sha256(protection)]
