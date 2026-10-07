@@ -31,6 +31,16 @@ CATEGORIES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def preview_log_capture(caplog):
+    """Capture this non-propagating logger without changing application logging."""
+    observability._logger.addHandler(caplog.handler)
+    try:
+        yield
+    finally:
+        observability._logger.removeHandler(caplog.handler)
+
+
 def records(caplog):
     observed = [record for record in caplog.records if record.name == "denali.resource_preview"]
     payloads = [json.loads(record.getMessage()) for record in observed]

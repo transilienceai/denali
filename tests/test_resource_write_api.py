@@ -10,11 +10,22 @@ from fastapi.testclient import TestClient
 from denali.api.app import create_app
 from denali.api.auth import AuthContext, AuthenticationError
 from denali.api.gateway_auth import GatewayPrincipal
+from denali.resource_writes import observability
 from denali.resource_writes.api import INTERNAL_PATH
 from denali.resource_writes.observability import observe_dependency
 from denali.resource_writes.templates import AWS_ACTION, PURPOSES
 
 ORG = "org_Alpha1"
+
+
+@pytest.fixture(autouse=True)
+def preview_log_capture(caplog):
+    """Capture only the preview logger; its production sink does not propagate."""
+    observability._logger.addHandler(caplog.handler)
+    try:
+        yield
+    finally:
+        observability._logger.removeHandler(caplog.handler)
 
 
 class Auth:
