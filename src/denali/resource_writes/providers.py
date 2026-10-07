@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
+import time
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -44,6 +46,42 @@ class PlatformWriteLeases:
             os.environ.get("DENALI_PLATFORM_RESOURCE_WRITE_RECEIVER_MACHINE_ID", ""),
         )
 
+    def _lease_token(self, claims: dict[str, Any]) -> str:
+        # Clerk derives receiver scopes from the authenticated machine's
+        # configuration; create_token has no per-token scopes override.
+        minted = self._clerk.m2m.create_token(
+            seconds_until_expiration=60,
+            claims=dict(claims),
+            retries=None,
+            timeout_ms=5000,
+        )
+        created_at, expiration = minted.created_at, minted.expiration
+        now_ms = time.time() * 1000
+        if (
+            not isinstance(minted.scopes, list)
+            or minted.scopes != [self._receiver]
+            or not isinstance(minted.claims, dict)
+            or minted.claims != claims
+            or not isinstance(minted.subject, str)
+            or re.fullmatch(r"mch_[A-Za-z0-9]{1,128}", minted.subject) is None
+            or minted.subject == self._receiver
+            or minted.revoked is not False
+            or minted.expired is not False
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in (created_at, expiration)
+            )
+            or not 0 < created_at <= now_ms + 5000
+            or not now_ms < expiration
+            or not 0 < expiration - created_at <= 60_000
+            or not isinstance(minted.token, str)
+            or re.fullmatch(r"[\x21-\x7e]{1,8192}", minted.token) is None
+        ):
+            raise ValueError("invalid resource lease token")
+        # The machine key authenticates this sender. Platform independently
+        # verifies its exact registered app, receiver, org and purpose binding.
+        return minted.token
+
     def lease(
         self,
         *,
@@ -68,11 +106,7 @@ class PlatformWriteLeases:
             "reviewer_user_id": reviewer,
         }
         try:
-            token = self._clerk.m2m.create_token(
-                seconds_until_expiration=60,
-                scopes=[self._receiver],
-                claims=claims,
-            ).token
+            token = self._lease_token(claims)
             with httpx.Client(timeout=15, follow_redirects=False) as client:
                 response = client.post(
                     f"{self._origin}/internal/v1/resource-write-grants/{grant_id}/lease",
