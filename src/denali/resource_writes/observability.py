@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from collections.abc import Callable
 from contextvars import ContextVar
 from time import monotonic
@@ -22,6 +23,30 @@ _T = TypeVar("_T")
 _preview_active: ContextVar[bool] = ContextVar("resource_preview_active", default=False)
 _logger = logging.getLogger("denali.resource_preview")
 _logger.setLevel(logging.INFO)
+_SINK_NAME = "denali.resource_preview.stderr"
+
+
+class _PreviewStreamHandler(logging.StreamHandler):
+    def flush(self) -> None:
+        try:
+            super().flush()
+        except Exception:
+            # logging.shutdown calls flush directly, outside emit/handleError.
+            pass
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        # A failed sink must not print a fallback traceback or change product outcomes.
+        pass
+
+
+if not any(handler.get_name() == _SINK_NAME for handler in _logger.handlers):
+    _sink = _PreviewStreamHandler(sys.stderr)
+    _sink.set_name(_SINK_NAME)
+    _sink.setLevel(logging.INFO)
+    _sink.setFormatter(logging.Formatter("%(message)s"))
+    _logger.addHandler(_sink)
+# Do not depend on, configure, or duplicate events through the application's root logger.
+_logger.propagate = False
 Phase = Literal["membership", "lease_mint", "lease_post", "github_read"]
 _PHASES = frozenset({"membership", "lease_mint", "lease_post", "github_read"})
 _REJECTIONS = frozenset(
