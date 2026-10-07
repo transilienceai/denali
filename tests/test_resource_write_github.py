@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from denali.resource_writes.providers import GitHubRemediator
-from denali.resource_writes.templates import RemediationError, git_blob_sha
+from denali.resource_writes.templates import RemediationError, git_blob_sha, sha256
 
 CONTENT = b'const call = new InvokeModelCommand({modelId: "approved"});\n'
 RESOURCE = {
@@ -137,6 +137,76 @@ def test_unprovable_repository_policy_never_writes(drift):
     with pytest.raises(RemediationError):
         provider(fake).snapshot("src/model.ts")
     assert all(method == "GET" for method, _ in fake.calls)
+
+
+_ABSENT_BYPASS = object()
+
+
+def classic_protection_provider(bypass):
+    fake = GitHub()
+    observed_protection = []
+
+    def respond(request):
+        response = fake.respond(request)
+        if request.url.path.endswith("/branches/main/protection"):
+            protection = response.json()
+            review = protection["required_pull_request_reviews"]
+            if bypass is _ABSENT_BYPASS:
+                del review["bypass_pull_request_allowances"]
+            else:
+                review["bypass_pull_request_allowances"] = copy.deepcopy(bypass)
+            observed_protection.append(copy.deepcopy(protection))
+            return httpx.Response(200, json=protection)
+        return response
+
+    client = GitHubRemediator(
+        {"resource": RESOURCE, "token": "opaque-test-token"},
+        httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    return client, fake, observed_protection
+
+
+@pytest.mark.parametrize("bypass", [
+    _ABSENT_BYPASS, {"apps": [], "users": [], "teams": []},
+])
+def test_classic_no_bypass_shapes_allow_read_only_snapshot_and_hash_original(bypass):
+    client, fake, protection = classic_protection_provider(bypass)
+    snapshot = client.snapshot("src/model.ts")
+    assert snapshot["content"] == CONTENT
+    assert all(method == "GET" for method, _ in fake.calls)
+    assert snapshot["rules_sha256"] == sha256({
+        "rules": [], "verified_rule_ids": ["classic:" + sha256(protection[0])],
+    })
+    if bypass is _ABSENT_BYPASS:
+        review = protection[0]["required_pull_request_reviews"]
+        assert "bypass_pull_request_allowances" not in review
+
+
+@pytest.mark.parametrize("bypass", [
+    None, False, 0, "", [], {},
+    {"apps": [], "users": []},
+    {"apps": [], "teams": []},
+    {"users": [], "teams": []},
+    *[
+        {**{"apps": [], "users": [], "teams": []}, actor_type: malformed}
+        for actor_type in ("apps", "users", "teams")
+        for malformed in (None, False, 0, "", {}, [{"id": 202}])
+    ],
+])
+def test_present_malformed_or_nonempty_classic_bypass_never_reads_source_or_writes(bypass):
+    client, fake, _ = classic_protection_provider(bypass)
+    with pytest.raises(RemediationError, match="github_review_rule_not_verified"):
+        client.snapshot("src/model.ts")
+    assert all(method == "GET" for method, _ in fake.calls)
+    assert not any(path.startswith("/contents/") for _, path in fake.calls)
+
+
+def test_absent_and_explicit_empty_classic_protection_keep_distinct_original_hashes():
+    absent, _, _ = classic_protection_provider(_ABSENT_BYPASS)
+    explicit, _, _ = classic_protection_provider({"apps": [], "users": [], "teams": []})
+    assert absent.snapshot("src/model.ts")["rules_sha256"] != (
+        explicit.snapshot("src/model.ts")["rules_sha256"]
+    )
 
 
 def test_invalid_or_secret_path_is_denied_before_provider_read():
