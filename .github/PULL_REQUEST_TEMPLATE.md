@@ -6,7 +6,16 @@
 
 <!-- Key files/contracts changed. Keep one concern per PR. -->
 
-## Verification
+## Platform / CLI / MCP impact
+
+- Capability classification and canonical contract changes:
+- Same-PR `docs/platform/changes/*.json` declaration, or docs-only:
+- Paired Platform/portal PR and reviewed source pin:
+- CLI compatibility: generic tools / release required / no external change (why):
+- [ ] Offline delivery gate and capability parity tests pass
+- [ ] No automatic exposure, permission expansion or business logic duplication
+
+## Verification evidence
 
 - [ ] `git diff --check`
 - [ ] Ruff
