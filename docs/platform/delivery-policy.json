@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "product": "denali",
+  "watched_paths": [
+    "src/denali/**",
+    "web/src/**",
+    "contracts/**"
+  ],
+  "evidence_paths": {
+    "contract_files": [
+      "contracts/**",
+      "src/denali/api/capabilities.py",
+      "src/denali/api/connection_capabilities.py",
+      "src/denali/resource_writes/contract.py",
+      "docs/development/capability-surface.json"
+    ],
+    "documentation_files": [
+      "docs/**",
+      "README.md"
+    ],
+    "test_files": [
+      "tests/test_*.py",
+      "web/src/*.test.*",
+      "web/src/*.spec.*"
+    ]
+  }
+}

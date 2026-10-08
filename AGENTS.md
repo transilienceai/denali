@@ -93,6 +93,14 @@ changing or diagnosing the shared Clerk, Vercel, Modal, or Neon development envi
 
 ## Change standards
 
+- For every customer-facing feature, follow
+  [`docs/development/platform-feature-delivery.md`](docs/development/platform-feature-delivery.md).
+  Classify CLI/MCP exposure, update Denali's canonical capability/surface contracts
+  and paired Platform adapter/tests/docs, or record why there is no external change.
+  Watched runtime changes require a same-PR `docs/platform/changes/<feature>.json`
+  declaration. Generic tool discovery is not permission to expose sensitive APIs
+  or bypass a required CLI release for new login scopes/typed commands.
+
 - Preserve the `/api` frontend contract and same-origin production callbacks. A new backend route
   normally needs a matching frontend client method, auth/role classification, tenant-scoped
   repository operation, and tests.
