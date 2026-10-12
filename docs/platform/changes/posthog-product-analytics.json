@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Optional anonymous browser product analytics records sanitized usage only. Denali API behavior, tenant authorization, provider operations, external capabilities, permission scopes, and gateway contracts are preserved.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "No CLI operation, typed command, packaged contract, login scope, or consent behavior changes."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "Browser telemetry does not add or alter a Denali capability or Platform receiver, so no adapter update is required."
+  }
+}

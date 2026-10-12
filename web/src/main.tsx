@@ -7,17 +7,32 @@ import {
   useAuth,
 } from "@clerk/react";
 import { Analytics } from "@vercel/analytics/react";
+import posthog from "posthog-js";
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { sanitizeAnalyticsEvent } from "./analytics";
 import { api, configureApiTokenProvider, type DenaliContext } from "./api";
 import ProfilePage from "./ProfilePage";
+import { posthogConfig } from "./posthog";
 import "./styles.css";
 import { initializeTheme } from "./theme";
 
 const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY?.trim();
 initializeTheme();
+
+const projectToken = import.meta.env.VITE_POSTHOG_PROJECT_TOKEN?.trim();
+if (projectToken) {
+  try {
+    posthog.init(projectToken, {
+      ...posthogConfig,
+      api_host: import.meta.env.VITE_POSTHOG_HOST?.trim() || "https://us.i.posthog.com",
+    });
+  } catch {
+    // Optional analytics must not prevent Denali from becoming interactive.
+    console.warn("Product analytics could not initialize.");
+  }
+}
 
 function HostedDenali() {
   const { getToken, isLoaded, isSignedIn, orgId } = useAuth();

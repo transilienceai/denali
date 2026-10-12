@@ -221,13 +221,17 @@ production from a feature branch or Vercel preview.
 
 ### 6. Create and deploy Vercel
 
-Create a Vercel project from this repository with `web` as the Root Directory. Vercel needs
-only these two values:
+Create a Vercel project from this repository with `web` as the Root Directory. Vercel requires
+these two public values:
 
 | Variable | Value | Classification |
 | --- | --- | --- |
 | `VITE_CLERK_PUBLISHABLE_KEY` | Clerk publishable key | Public client configuration |
 | `MODAL_API_ORIGIN` | Deployed Modal origin, without trailing slash | Public server configuration |
+
+Optional anonymous PostHog product analytics adds public `VITE_POSTHOG_PROJECT_TOKEN` and
+`VITE_POSTHOG_HOST`; see the [product analytics runbook](../development/product-analytics.md).
+The PostHog value is a public project ingestion token, never a personal API key.
 
 For the first URL-reservation deployment, when Modal is not deployed yet, set
 `MODAL_API_ORIGIN=https://example.com`. This is a temporary non-secret placeholder: the UI will
@@ -412,4 +416,5 @@ DENALI_GITHUB_PRIVATE_KEY                  # when GitHub is enabled
 ```
 
 `CLERK_JWT_KEY` is public key material but remains backend-only. Vercel receives no private
-secret: only `VITE_CLERK_PUBLISHABLE_KEY` and `MODAL_API_ORIGIN`.
+secret: only `VITE_CLERK_PUBLISHABLE_KEY`, `MODAL_API_ORIGIN`, and optional public
+`VITE_POSTHOG_PROJECT_TOKEN`/`VITE_POSTHOG_HOST` analytics configuration.
