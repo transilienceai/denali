@@ -64,7 +64,9 @@ changing or diagnosing the shared Clerk, Vercel, Modal, or Neon development envi
 ## Secrets and provider identity
 
 - Vercel may receive only public frontend/server configuration, currently
-  `VITE_CLERK_PUBLISHABLE_KEY` and `MODAL_API_ORIGIN`.
+  `VITE_CLERK_PUBLISHABLE_KEY`, `MODAL_API_ORIGIN`, and optional
+  `VITE_POSTHOG_PROJECT_TOKEN`/`VITE_POSTHOG_HOST` for anonymous browser analytics.
+  The PostHog token must be the public project ingestion token, never a personal API key.
 - Vercel Production uses the Clerk production instance, the `denali-production` Modal app, and
   production Neon. Vercel Preview uses the Clerk development instance, the isolated `denali-dev`
   Modal app, and an isolated Neon `denali-dev` branch/database. Never route a development Clerk
@@ -79,6 +81,11 @@ changing or diagnosing the shared Clerk, Vercel, Modal, or Neon development envi
   Clerk once; never log it, persist it, include it in an API response, job, error detail, or
   telemetry. If Clerk user creation succeeds but Organization membership fails, delete that
   just-created Clerk user as a consistency rollback.
+- Browser product analytics may retain anonymous usage metadata only. Do not identify Clerk
+  users or Organizations, add tenant/customer identifiers, enable person profiles or session
+  replay, or capture customer content. Preserve the event/property and static-route allowlists,
+  URL query/hash removal, and text/attribute masking in the analytics implementation. See the
+  [product analytics runbook](docs/development/product-analytics.md).
 - Modal Secrets contain Denali-operated integration identity and configuration, not one set of
   customer cloud credentials per tenant.
 - Tenant cloud access is keyless or installation/consent based: AWS assume-role with external ID,

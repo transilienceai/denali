@@ -148,6 +148,12 @@ runs provider validation through durable Modal jobs. The canonical service bound
 ownership, tenant isolation rules, and durable-work standard are recorded in
 [ADR 0028](docs/architecture/0028-hosted-multi-tenant-runtime.md).
 
+Optional PostHog browser analytics records anonymous page views and masked clicks. Set the
+public `VITE_POSTHOG_PROJECT_TOKEN` and `VITE_POSTHOG_HOST` build variables only for the
+environments intended to collect usage; an empty token disables capture. See the
+[product analytics runbook](docs/development/product-analytics.md) for the privacy boundary,
+configuration, and verification steps.
+
 ## Run collectors and importers
 
 For CLI work, install the provider extras you need and point the commands at the local

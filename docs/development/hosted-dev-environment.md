@@ -21,7 +21,7 @@ The request path remains browser -> Vercel -> same-origin `/api/*` rewrite -> Mo
 Neon. The browser must never call Modal or Neon directly. Development identity, application
 secrets, and data must never cross into production.
 
-Vercel receives only these two values for Preview and the custom `denali-dev` environment:
+Vercel requires these public values for Preview and the custom `denali-dev` environment:
 
 ```text
 VITE_CLERK_PUBLISHABLE_KEY=<matching Clerk development pk_test_... key>
@@ -30,6 +30,12 @@ MODAL_API_ORIGIN=https://transilience-denali-dev--denali-dev-api.modal.run
 
 The publishable key is public configuration, but keep the Clerk secret key, JWT PEM, Neon DSNs,
 and provider credentials in Modal Secrets. Never create a `VITE_*` secret.
+
+Optional anonymous PostHog usage capture also accepts public `VITE_POSTHOG_PROJECT_TOKEN` and
+`VITE_POSTHOG_HOST`. Configure each Vercel environment intentionally, or leave the project token
+unset to disable capture. Use only a public project ingestion token; a personal API key never
+belongs in the browser. See [product analytics](product-analytics.md) for configuration and
+verification.
 
 ## Clerk development contract
 

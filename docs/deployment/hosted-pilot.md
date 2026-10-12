@@ -55,7 +55,7 @@ Create a production Clerk application and:
 4. Add the final web origin to the allowed origins/authorized parties.
 5. Create pilot organizations and invite their users.
 
-The frontend receives only `VITE_CLERK_PUBLISHABLE_KEY`. Put `CLERK_SECRET_KEY`, the PEM
+For Clerk, the frontend receives only `VITE_CLERK_PUBLISHABLE_KEY`. Put `CLERK_SECRET_KEY`, the PEM
 `CLERK_JWT_KEY`, and `CLERK_AUTHORIZED_PARTIES` in the Modal secret. Optionally set
 `DENALI_CLERK_ORGANIZATIONS` to a comma-separated organization allowlist. When omitted, every
 organization in the invitation-only Clerk instance is eligible.
@@ -209,6 +209,11 @@ Create a Vercel project with `web` as its Root Directory. Set:
 
 - `VITE_CLERK_PUBLISHABLE_KEY` to the Clerk production publishable key;
 - `MODAL_API_ORIGIN` to the deployed Modal `api` origin without a trailing slash.
+
+Optional anonymous PostHog product analytics uses public `VITE_POSTHOG_PROJECT_TOKEN` and
+`VITE_POSTHOG_HOST` build variables. Follow the
+[product analytics runbook](../development/product-analytics.md); keep personal API keys and
+all backend secrets out of Vercel and browser code.
 
 The programmatic `vercel.mjs` configuration builds `dist`, routes `/api/:path*` to Modal without
 caching, and falls back to `index.html` for browser navigation while preserving Vercel's reserved
