@@ -89,6 +89,33 @@ background workers import the API module.
 
 ## Automatic development deployment
 
+### Shared Microsoft backport preparation
+
+The default-off shared Azure and Entra pilot is documented in
+[shared-microsoft-connections.md](shared-microsoft-connections.md). Its browser
+paths are `/api/v1/shared/connections/azure` and `/api/v1/shared/connections/entra`.
+It reuses the existing durable Denali validation/collection workers and
+Microsoft metadata normalizers; native provider routes and the existing dev
+AWS/GitHub bridge behavior remain intact.
+
+The development core Secret additionally supplies the Microsoft-only flags
+`DENALI_PLATFORM_AZURE_ENABLED`, `DENALI_PLATFORM_ENTRA_ENABLED` and exact
+`DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` from Clerk development. Flags default
+false and an empty allowlist admits no Microsoft organization. Keep the
+existing machine sender in that same Clerk development instance and use only
+the isolated Platform development origin in the existing shared configuration
+object. Neither production org IDs nor a development browser body can choose
+another Denali tenant or a production provider target.
+
+Before enabling either flag, a Platform owner must admit the exact Microsoft
+tenant (and Azure subscription UUIDs) for that development organization and
+configure dedicated dev operator applications with fixed Platform-dev callback
+URLs. Microsoft credentials belong to Platform's dev provider configuration;
+Denali receives no client secret or provider token. Prepare this configuration
+alongside production setup for one attended operator call, then obtain separate
+environment-specific Microsoft consent and customer-reviewed Azure Reader
+execution. This source preparation does not grant permissions or deploy dev.
+
 A push to `dev` starts the **Deploy Modal development** GitHub Actions workflow. It requires the
 exact remote `dev` SHA, runs the complete Python/PostgreSQL/frontend verification gate, enters the
 GitHub `denali-dev` environment, checks configuration, applies migrations, deploys the API and

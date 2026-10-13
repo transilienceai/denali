@@ -93,6 +93,7 @@ def _validators():
     )
     from denali.integrations.shared_connections_client import SharedConnectionsClient
     from denali.integrations.shared_github import GitHubValidatorRouter
+    from denali.integrations.shared_microsoft import MicrosoftValidatorRouter
 
     github_app = _github_app_from_environment()
     shared_connections = SharedConnectionsClient.from_environment()
@@ -102,8 +103,14 @@ def _validators():
     workspace_operator = _google_workspace_operator_from_environment()
     return {
         "aws": AwsConnectionValidator(),
-        "azure": AzureConnectionValidator(),
-        "entra": EntraConnectionValidator(entra_client) if entra_client else None,
+        "azure": MicrosoftValidatorRouter("azure", AzureConnectionValidator(), shared_connections),
+        "entra": MicrosoftValidatorRouter(
+            "entra",
+            EntraConnectionValidator(entra_client) if entra_client else None,
+            shared_connections,
+        )
+        if entra_client or shared_connections
+        else None,
         "gcp": GcpConnectionValidator(),
         "github": (
             GitHubValidatorRouter(legacy_github_validator, shared_connections)
@@ -240,6 +247,7 @@ def collection_worker(job_id: str) -> None:
     from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
     from denali.integrations.shared_connections_client import SharedConnectionsClient
     from denali.integrations.shared_github import GitHubCollectorRouter
+    from denali.integrations.shared_microsoft import MicrosoftCollectorRouter
     from denali.store.repository import PostgresInventoryRepository
 
     _configure_aws_oidc()
@@ -255,9 +263,17 @@ def collection_worker(job_id: str) -> None:
         {
             "aws_deployments": AwsConnectionDeploymentCollector(),
             "aws_agent_runtime": AwsConnectionAgentRuntimeCollector(),
-            "azure_deployments": AzureConnectionDeploymentCollector(),
+            "azure_deployments": MicrosoftCollectorRouter(
+                "azure", AzureConnectionDeploymentCollector(), shared_connections
+            ),
             "azure_agent_runtime": AzureConnectionAgentRuntimeCollector(),
-            "entra_ai": EntraConnectionCollector(entra_client) if entra_client else None,
+            "entra_ai": MicrosoftCollectorRouter(
+                "entra",
+                EntraConnectionCollector(entra_client) if entra_client else None,
+                shared_connections,
+            )
+            if entra_client or shared_connections
+            else None,
             "gcp_deployments": GcpConnectionDeploymentCollector(),
             "github_source": (
                 GitHubCollectorRouter(
