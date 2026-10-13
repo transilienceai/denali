@@ -1,0 +1,90 @@
+# Shared Azure and Microsoft Entra pilot
+
+This implementation is dark by default and is not production acceptance evidence.
+`DENALI_PLATFORM_AZURE_ENABLED` and `DENALI_PLATFORM_ENTRA_ENABLED` each default to
+false. Activation also requires the existing HTTPS
+`DENALI_PLATFORM_CONNECTIONS_ORIGIN`, backend-only
+`DENALI_PLATFORM_MACHINE_SECRET_KEY`, and exact
+`DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` allowlist. Provider application credentials
+remain exclusively in Platform's dedicated Microsoft connector configuration;
+native Denali Microsoft identities and existing connections are unchanged.
+The initial pilot additionally requires owner-reviewed Platform admission for
+the exact Microsoft tenant and Azure subscription UUIDs in this Organization's
+app entitlement. The admission lists default to empty. Organization admins
+cannot self-admit a foreign provider target through consent feedback or a
+browser body; they ask their Platform administrator to approve the target first.
+
+The browser calls relative `/api/v1/shared/connections/{azure|entra}`. Denali
+resolves the Clerk Organization and internal Denali tenant, then calls the fixed
+Platform machine API. Members may read projected configuration, list, validation
+status and Azure's reviewable script. Create, setup, validation, attachment,
+disable and delete require an Organization admin. GET setup also requires admin
+because Platform rotates one-time state. Browser bodies cannot select a Clerk
+Organization, Denali tenant or credential reference. The supplied Microsoft
+tenant UUID is an exact provider binding, never Denali authorization.
+
+Create accepts a stable request UUID, display name, Microsoft tenant UUID and
+declared scopes. Azure also accepts 1–8 selected unique subscription UUIDs and
+optional names. Azure shared scopes are `azure.ai_services`, `azure.ai_platform`,
+`azure.ai_activity` and `azure.code_to_cloud`. Foundry agent runtime activity stays
+in the native flow. Shared Entra uses all four scopes together:
+`entra.ai_applications`, `entra.permissions`, `entra.sign_ins` and
+`entra.directory_audits`. Its registered Directory.Read.All / AuditLog.Read.All
+application bundle is disclosed as one consent decision.
+
+Plan creation does not establish readiness. Setup returns a Microsoft consent
+URL using Platform's fixed callback
+`/internal/v1/connections/{azure|entra}/setup/callback`. Platform owns hashed,
+expiring, one-time state and verifies the exact returned Microsoft tenant;
+Denali has no shared callback and does not use the browser's current Organization
+to complete consent. The customer returns to Denali manually and refreshes.
+Azure administrators separately inspect and execute the downloaded Reader script
+in their own Cloud Shell. It targets the exact application service principal and
+selected subscriptions. Denali never executes role assignments or grants consent.
+
+Attachment requires current Platform `availability=ready`, `health_state=healthy`
+and all requested validated/entitled scopes. Denali records only the same shared
+connection UUID, `platform_shared_azure` or `platform_shared_entra` reference,
+provider tenant, selected subscriptions, scopes and coverage plan in its existing
+tenant-scoped `provider_connection`. A conflicting native connection is rejected;
+there is no migration or fallback. Native setup launch/completion routes reject
+shared references. Disable/delete of the shared plan is distinct from disable/delete
+of Denali's reference and never revokes Microsoft consent or Azure IAM automatically.
+
+Existing durable validation and collection jobs, leases and Modal workers execute
+the attached connection. Microsoft routers select shared readers by credential
+type; native credentials are consulted only for native connections. Broker failure,
+feature disablement, entitlement loss or a mismatched response fails closed.
+Validation demonstrates callable metadata planes. Collection feeds existing Denali
+inventory/activity sinks, correlation and finding evaluation separately.
+
+The canonical fixed reads are:
+
+| Provider | Named operations and bindings |
+| --- | --- |
+| Azure | `subscription_metadata` with an explicitly declared Azure scope; `resources` with an allowlisted resource type; `activity` with a 24-hour maximum window. Every read binds the selected subscription and provider tenant. |
+| Entra | `service_principals`, `oauth_grants`, `app_role_assignments` with one service-principal UUID, `sign_ins` with 1–10 app UUIDs and a 24-hour maximum window, and `directory_audits` with a 24-hour maximum ApplicationManagement window. Every read binds the provider tenant. |
+
+Reads contain at most 100 projected dictionary items, `operation`, `tenant_id`,
+Azure `subscription_id` and an opaque `next_page_token`. Azure cursors are bounded
+at 2048 characters and Entra at 8192; repeat cursors, invalid bindings, oversized
+pages and record limits fail closed. Denali never sends provider URLs, Graph paths,
+arbitrary filters, ARM queries or tokens. Shared Entra activity collection covers
+24 hours per run, explicitly shown in the UI and result `lookback_hours`; native
+Entra's existing 168-hour default is preserved.
+
+The named MCP/CLI connection summaries, validation/collection job starts and job
+polling, inventory, activity and finding tools reuse this evidence. Setup summaries
+add only the non-secret Platform connection UUID. No new tool name, login scope,
+typed command or client package release is needed. Microsoft plan/consent/script
+handoffs stay excluded from model tools as recorded in the canonical surface map.
+The paired Platform PR owns provider brokering and refreshes the reviewed Denali
+source pin after this product change is committed.
+
+Before any activation, run the local Python/frontend/PostgreSQL gates and obtain
+separate authorized hosted acceptance: create → tenant-specific consent/callback →
+customer-approved Azure Reader setup → validate → attach → durable collection →
+disable → delete for both providers and two real Organization boundaries. Verify
+licensing/retention limitations and cross-tenant rejection. Local fakes are not a
+provider acceptance pass. This change makes no OAuth request, provider permission
+change, cloud call, merge or deployment.

@@ -96,8 +96,8 @@ def setup_summary(row: dict[str, Any]) -> dict[str, Any]:
                 setup["selected_resource"] = public_selection
     public_identity_fields = {
         "aws": ("role_arn", "platform_connection_id"),
-        "azure": ("client_id", "service_principal_id"),
-        "entra": ("client_id",),
+        "azure": ("client_id", "service_principal_id", "platform_connection_id"),
+        "entra": ("client_id", "platform_connection_id"),
         "google_workspace": ("oauth_client_id", "service_account"),
         "gcp": ("principal_email", "principal_unique_id"),
         "github": ("app_id", "app_slug", "installation_id"),

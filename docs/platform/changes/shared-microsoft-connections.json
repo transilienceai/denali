@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "update",
+  "reason": "Add default-off shared Azure and Entra browser onboarding and reference attachment. Existing named Denali connection jobs and evidence tools reuse fixed Platform metadata reads; provider consent and Reader assignments remain explicit customer handoffs.",
+  "capabilities": [
+    {
+      "name": "shared-microsoft-onboarding",
+      "kind": "not_externally_exposed",
+      "scopes": []
+    }
+  ],
+  "contract_files": [
+    "src/denali/api/connection_capabilities.py",
+    "docs/development/capability-surface.json"
+  ],
+  "documentation_files": ["docs/development/shared-microsoft-connections.md"],
+  "test_files": ["tests/test_shared_microsoft.py", "tests/test_shared_microsoft_api.py"],
+  "cli": {
+    "impact": "generic_tools",
+    "reason": "Existing connection, inventory, activity and findings tools operate on attached shared references with unchanged tool names and read schemas. No new login scope or typed command is introduced."
+  },
+  "gateway": {
+    "impact": "adapter_update",
+    "reason": "Paired Platform Microsoft broker routes and reviewed Denali source pin must ship together; Denali owns normalization, collection and findings. Setup and consent are not new MCP tools."
+  }
+}

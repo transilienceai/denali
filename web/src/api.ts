@@ -148,6 +148,18 @@ export type SharedGcpStatus = {
   retry_available: boolean;
 };
 
+export type SharedMicrosoftProvider = "azure" | "entra";
+export type SharedMicrosoftConnection = {
+  id: string; provider: SharedMicrosoftProvider; connection_kind: "shared_azure" | "shared_entra";
+  display_name: string; tenant_id: string; application_client_id?: string;
+  subscriptions?: Array<{ id: string; name: string }>;
+  availability: string; setup_state: string; health_state: string; validated_scopes: string[];
+};
+export type SharedMicrosoftStatus = {
+  job_state?: string | null; state?: string; setup_state: string; health_state: string;
+  error_code?: string | null; retry_available?: boolean;
+};
+
 export type ResourceWriteAction = "github.guardrail_draft_pr" | "aws.tighten_bedrock_inline_policy";
 export type ResourceWriteStatus = {
   id: string;
@@ -246,6 +258,17 @@ export const api = {
   useSharedGcp: (id: string, declaredScopes: string[]) => request<Connection>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ declared_scopes: declaredScopes }) }),
   disableSharedGcp: (id: string) => request<{ status: string }>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/disable`, { method: "POST" }),
   deleteSharedGcp: (id: string, confirmationName: string) => request<{ status: string }>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirmation_name: confirmationName }) }),
+  sharedMicrosoftConfig: (provider: SharedMicrosoftProvider) => request<{ application_client_id?: string }>(`/v1/shared/connections/${provider}/config`),
+  sharedMicrosoftConnections: (provider: SharedMicrosoftProvider) => request<{ items: SharedMicrosoftConnection[] }>(`/v1/shared/connections/${provider}`),
+  createSharedMicrosoft: (provider: SharedMicrosoftProvider, input: { request_id: string; display_name: string; tenant_id: string; declared_scopes: string[]; subscriptions?: Array<{ id: string; name?: string }> }) =>
+    request<{ id: string; setup_state: string }>(`/v1/shared/connections/${provider}`, { method: "POST", body: JSON.stringify(input) }),
+  sharedMicrosoftStatus: (provider: SharedMicrosoftProvider, id: string) => request<SharedMicrosoftStatus>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/validation`),
+  startSharedMicrosoftSetup: (provider: SharedMicrosoftProvider, id: string) => request<{ consent_url: string; expires_at?: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/setup`, { method: "POST" }),
+  sharedAzureScript: (id: string) => requestBlob(`/v1/shared/connections/azure/${encodeURIComponent(id)}/setup.sh`),
+  validateSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string) => request<{ job_id?: string; state?: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/validate`, { method: "POST" }),
+  useSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string, declaredScopes: string[]) => request<Connection>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ declared_scopes: declaredScopes }) }),
+  disableSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string) => request<{ status: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/disable`, { method: "POST" }),
+  deleteSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string, confirmationName: string) => request<{ status: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirmation_name: confirmationName }) }),
   context: () => request<DenaliContext>("/v1/context"),
   inviteOrganizationMembers: (emails: string[], role: OrganizationRole) =>
     request<BulkInviteResult>("/v1/profile/organization/invitations/bulk", {
