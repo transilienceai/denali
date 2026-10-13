@@ -4,7 +4,17 @@
   "watched_paths": [
     "src/denali/**",
     "web/src/**",
-    "contracts/**"
+    "contracts/**",
+    "docs/development/capability-surface.json",
+    "scripts/check_platform_delivery.py",
+    "scripts/test_platform_delivery_policy.py",
+    "tests/test_platform_delivery_gate.py",
+    "docs/platform/delivery-policy.json",
+    ".github/workflows/platform-delivery.yml",
+    ".github/workflows/ci.yml",
+    ".github/pull_request_template.md",
+    "AGENTS.md",
+    "docs/development/platform-feature-delivery.md"
   ],
   "evidence_paths": {
     "contract_files": [

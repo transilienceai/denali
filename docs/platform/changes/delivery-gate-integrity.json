@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Protect the existing contributor evidence gate and reconcile internal delivery guidance. The checker evaluates both immutable-base and proposed policies; CI executes the reviewed base checker before proposed code. Product operations, capability contracts, browser APIs, OAuth scopes, permissions, cloud access and deployment behavior are unchanged.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "Only offline delivery checks and contributor guidance change; the installed CLI's commands, login permissions and transport are unchanged."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "No gateway adapter, receiver contract, operation, product authorization or activation setting changes in this product repository."
+  }
+}
