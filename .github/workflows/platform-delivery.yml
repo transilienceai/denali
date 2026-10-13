@@ -19,6 +19,13 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
+      - name: Apply the reviewed base checker before proposed gate changes
+        env:
+          PLATFORM_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git show "$PLATFORM_BASE_SHA:scripts/check_platform_delivery.py" > "$RUNNER_TEMP/platform-delivery-base.py"
+          python "$RUNNER_TEMP/platform-delivery-base.py" --self-test
+          python "$RUNNER_TEMP/platform-delivery-base.py" --base "$PLATFORM_BASE_SHA"
       - name: Test the offline policy gate
         run: python scripts/check_platform_delivery.py --self-test
       - name: Require an explicit integration decision for changed features

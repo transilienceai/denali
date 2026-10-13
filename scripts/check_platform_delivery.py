@@ -11,6 +11,22 @@ import sys
 from pathlib import Path
 
 RECORD_PREFIX = "docs/platform/changes/"
+POLICY_PATH = "docs/platform/delivery-policy.json"
+# These checks protect their own delivery surface regardless of a product's
+# watched-path configuration. They do not authorize runtime operations.
+GATE_PATHS = {
+    POLICY_PATH,
+    "scripts/check_platform_delivery.py",
+    "scripts/test_platform_delivery_policy.py",
+    "tests/test_platform_delivery_gate.py",
+    ".github/workflows/platform-delivery.yml",
+    ".github/workflows/ci.yml",
+    ".github/pull_request_template.md",
+    "AGENTS.md",
+    "docs/service-delivery.md",
+    "docs/platform-service-delivery.md",
+    "docs/development/platform-feature-delivery.md",
+}
 FIELDS = {
     "version",
     "product",
@@ -191,7 +207,11 @@ def check(root: Path, config: object, changed: set[str]) -> int:
             ),
             "invalid evidence path pattern",
         )
-    relevant = {name for name in changed if any(fnmatch.fnmatchcase(name, p) for p in patterns)}
+    relevant = {
+        name
+        for name in changed
+        if name in GATE_PATHS or any(fnmatch.fnmatchcase(name, p) for p in patterns)
+    }
     records = sorted(
         name for name in changed if name.startswith(RECORD_PREFIX) and name.endswith(".json")
     )
@@ -207,6 +227,20 @@ def check(root: Path, config: object, changed: set[str]) -> int:
             root, strict_json((root / record_path).read_text()), product, changed, evidence_paths
         )
     return len(records)
+
+
+def check_policies(root: Path, base_config: object, config: object, changed: set[str]) -> int:
+    """Apply both reviewed-base and proposed policy without changing v1 records.
+
+    A proposed policy may extend coverage or move evidence categories, but cannot
+    remove the base policy's requirements for its own PR. Category moves therefore
+    use a two-PR overlap migration, not an in-flight weakening.
+    """
+    base_count = check(root, base_config, changed)
+    count = check(root, config, changed)
+    require(base_config["product"] == config["product"], "policy product cannot change")
+    require(base_count == count, "policy checks disagree on changed delivery records")
+    return count
 
 
 def self_test() -> None:
@@ -274,6 +308,29 @@ def self_test() -> None:
 
         def test_docs_only_does_not_need_receipt(self):
             self.assertEqual(check(self.root, self.config, {"guide.md"}), 0)
+
+        def test_gate_files_need_receipt_even_if_unwatched(self):
+            for name in GATE_PATHS:
+                with self.subTest(path=name), self.assertRaises(ValueError):
+                    check(self.root, self.config, {name})
+
+        def test_policy_shrink_does_not_bypass_base_coverage(self):
+            proposed = {**self.config, "watched_paths": ["elsewhere/**"]}
+            with self.assertRaises(ValueError):
+                check_policies(self.root, self.config, proposed, {"src/service.py"})
+
+        def test_policy_extension_is_enforced_immediately(self):
+            proposed = {**self.config, "watched_paths": ["src/**", "new-contracts/**"]}
+            with self.assertRaises(ValueError):
+                check_policies(self.root, self.config, proposed, {"new-contracts/schema.json"})
+
+        def test_unchanged_policies_accept_unwatched_change(self):
+            self.assertEqual(check_policies(self.root, self.config, self.config, {"guide.md"}), 0)
+
+        def test_policy_product_cannot_change(self):
+            proposed = {**self.config, "product": "different"}
+            with self.assertRaises(ValueError):
+                check_policies(self.root, self.config, proposed, {"guide.md"})
 
         def test_changed_contract_docs_tests_accept(self):
             self.validate()
@@ -394,8 +451,13 @@ def main() -> int:
             capture_output=True,
         )
         changed = changed_paths(args.base)
-        count = check(
-            root, strict_json((root / "docs/platform/delivery-policy.json").read_text()), changed
+        base_config = strict_json(
+            subprocess.check_output(
+                ["git", "show", args.base + ":" + POLICY_PATH], cwd=root, text=True
+            )
+        )
+        count = check_policies(
+            root, base_config, strict_json((root / POLICY_PATH).read_text()), changed
         )
         print(
             f"Platform delivery evidence valid ({count} changed records). "
