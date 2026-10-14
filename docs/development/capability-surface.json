@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
   "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
-  "public_operation_count": 106,
-  "explicit_public_operation_count": 102,
+  "public_operation_count": 112,
+  "explicit_public_operation_count": 108,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
   "release_named_read_count": 38,
   "release_named_write_count": 16,
   "release_named_resource_write_count": 4,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
-  "browser_operation_count": 87,
+  "browser_operation_count": 93,
   "exceptions": {
     "shared_github_pilot": "Default-off shared GitHub installation consent and attachment are authenticated browser workflows. Existing named connection validation, collection, job polling and results capabilities reuse attached shared references; no new MCP lifecycle tools or customer repository writes are advertised.",
     "security_admin_user_creation": "Password-based Clerk user creation remains a secure browser workflow; passwords must never enter model/chat context.",
@@ -18,9 +18,64 @@
     "provider_callback": "One-time state/consent callbacks are provider protocols, not user-invoked capabilities.",
     "operator": "Health, navigation, API documentation, deployment, migrations, and direct CLI evaluation execution are operator workflows. Evaluation result histories remain product capabilities.",
     "raw_connection_reads": "Raw credential references and configuration are replaced by reviewed tenant-scoped safe connection projections.",
-    "shared_gcp_pilot": "Default-off shared GCP setup/attachment are authenticated browser pilot workflows. Existing named connection validation, collection, job polling and result capabilities work on attached shared references; this pilot does not advertise additional MCP lifecycle tools."
+    "shared_gcp_pilot": "Default-off shared GCP setup/attachment are authenticated browser pilot workflows. Existing named connection validation, collection, job polling and result capabilities work on attached shared references; this pilot does not advertise additional MCP lifecycle tools.",
+    "shared_google_workspace_pilot": "Default-off shared Workspace admission, external domain-wide delegation instructions, validation and attachment are authenticated browser workflows. Existing named connection validation, google_workspace_ai collection, durable job polling and results reuse the attached reference; no new CLI command, OAuth scope or MCP onboarding tool is added."
   },
   "operations": [
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/google-workspace/config",
+      "handler": "shared_workspace_config",
+      "browser_methods": ["sharedGoogleWorkspaceConfig"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/google-workspace/inventory",
+      "handler": "shared_workspace_inventory",
+      "browser_methods": ["sharedGoogleWorkspaceInventory"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/google-workspace/setup",
+      "handler": "shared_workspace_setup",
+      "browser_methods": ["startSharedGoogleWorkspaceSetup"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/google-workspace/{connection_id}/status",
+      "handler": "shared_workspace_status",
+      "browser_methods": ["sharedGoogleWorkspaceStatus"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/google-workspace/{connection_id}/validate",
+      "handler": "shared_workspace_validate",
+      "browser_methods": ["validateSharedGoogleWorkspace"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/google-workspace/{connection_id}/use-in-denali",
+      "handler": "use_shared_workspace",
+      "browser_methods": ["useSharedGoogleWorkspaceInDenali"],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
     {
       "method": "POST",
       "path": "/v1/resource-writes/previews",

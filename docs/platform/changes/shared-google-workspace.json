@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "update",
+  "reason": "Default-off browser onboarding attaches an admitted Platform Workspace reference. Existing Denali-owned validation, collection, jobs and result capabilities execute the same native semantics through bounded sanitized report reads.",
+  "capabilities": [
+    {"name": "shared-google-workspace-onboarding", "kind": "not_externally_exposed", "scopes": []},
+    {"name": "connection-validate", "kind": "write", "scopes": ["denali:write"]},
+    {"name": "connection-collect", "kind": "write", "scopes": ["denali:write"]}
+  ],
+  "contract_files": ["docs/development/capability-surface.json"],
+  "documentation_files": ["docs/development/shared-google-workspace-connections-pilot.md"],
+  "test_files": ["tests/test_shared_google_workspace.py", "tests/test_shared_google_workspace_api.py", "tests/test_shared_google_workspace_postgres.py", "tests/test_shared_workspace_transport.py"],
+  "cli": {
+    "impact": "none",
+    "reason": "Existing connections, validation, google_workspace_ai collection, durable job polling, inventory, activity and findings tools retain names, parameters and scopes. No package, installation or login change."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "The paired Platform release adds a private fixed Workspace broker, not a public results adapter. Denali's public capability registry and packaged Platform contract remain unchanged; no new public source pin or capability catalog is required."
+  }
+}
