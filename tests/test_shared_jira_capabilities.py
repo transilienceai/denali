@@ -255,3 +255,47 @@ def test_malformed_broker_identity_and_issue_payload_fail_closed_without_leak():
             "id": CONNECTION, "project_id": "10001",
         })
     assert response.status_code == 502 and "secret" not in response.text
+
+
+@pytest.mark.parametrize("field", ["lifecycle_state", "health_state", "availability"])
+@pytest.mark.parametrize("invalid", [None, [], {}, True])
+def test_malformed_broker_connection_enums_return_sanitized_502(field, invalid):
+    broker = Broker()
+    broker.status[field] = invalid
+    with TestClient(app(broker=broker)) as test:
+        response = call(test, "shared-jira-status", params={"id": CONNECTION})
+    assert response.status_code == 502
+    assert response.json() == {"detail": "shared Jira response invalid"}
+    assert "secret" not in response.text
+
+
+@pytest.mark.parametrize("invalid", [None, [], {}, True])
+def test_malformed_broker_project_type_returns_sanitized_502(invalid):
+    broker = Broker()
+    broker.read = {
+        "projects": [{**PROJECT, "project_type": invalid}],
+        "next_cursor": None,
+        "access_token": "secret",
+    }
+    with TestClient(app(broker=broker)) as test:
+        response = call(test, "shared-jira-projects", params={"id": CONNECTION})
+    assert response.status_code == 502
+    assert response.json() == {"detail": "shared Jira response invalid"}
+    assert "secret" not in response.text
+
+
+@pytest.mark.parametrize("invalid", [None, [], {}, True])
+def test_malformed_broker_issue_status_returns_sanitized_502(invalid):
+    broker = Broker()
+    broker.read = {
+        "issues": [{**ISSUE, "status": invalid}],
+        "next_cursor": None,
+        "access_token": "secret",
+    }
+    with TestClient(app(broker=broker)) as test:
+        response = call(test, "shared-jira-issues", params={
+            "id": CONNECTION, "project_id": "10001",
+        })
+    assert response.status_code == 502
+    assert response.json() == {"detail": "shared Jira response invalid"}
+    assert "secret" not in response.text

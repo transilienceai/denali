@@ -53,6 +53,12 @@ def _string_id(value: Any) -> str:
     return value
 
 
+def _enum(value: Any, allowed: set[str]) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError("invalid shared Jira metadata")
+    return value
+
+
 def connection(value: Any, *, expected_id: UUID | None = None) -> dict[str, Any]:
     """Project only safe inventory/status fields and bind the selected UUID."""
 
@@ -68,13 +74,13 @@ def connection(value: Any, *, expected_id: UUID | None = None) -> dict[str, Any]
         or row.get("connection_kind") != "shared_jira"
         or not isinstance(row.get("site_url"), str)
         or _SITE.fullmatch(row["site_url"]) is None
-        or row.get("lifecycle_state") not in {"active", "disabled"}
-        or row.get("health_state") not in {"healthy", "unavailable", "disabled"}
-        or row.get("availability") not in {
-            "ready", "unavailable", "disabled", "needs_scope_grant"
-        }
     ):
         raise ValueError("invalid shared Jira connection")
+    lifecycle_state = _enum(row.get("lifecycle_state"), {"active", "disabled"})
+    health_state = _enum(row.get("health_state"), {"healthy", "unavailable", "disabled"})
+    availability = _enum(
+        row.get("availability"), {"ready", "unavailable", "disabled", "needs_scope_grant"}
+    )
     projects = row.get("project_ids")
     if (
         not isinstance(projects, list)
@@ -103,9 +109,9 @@ def connection(value: Any, *, expected_id: UUID | None = None) -> dict[str, Any]
         "site_url": row["site_url"],
         "project_ids": sorted(projects),
         "available_scopes": sorted(set(scopes) & _EXPOSED_SCOPES),
-        "availability": row["availability"],
-        "lifecycle_state": row["lifecycle_state"],
-        "health_state": row["health_state"],
+        "availability": availability,
+        "lifecycle_state": lifecycle_state,
+        "health_state": health_state,
         "verified_at": verified_at,
     }
 
@@ -146,9 +152,9 @@ def _project(value: Any, selected: set[int]) -> dict[str, Any]:
         raise ValueError("invalid shared Jira project")
     result = {"id": project_id, "key": key, "name": _text(row.get("name"), 255)}
     if "project_type" in row:
-        if row["project_type"] not in {"software", "service_desk", "business"}:
-            raise ValueError("invalid shared Jira project type")
-        result["project_type"] = row["project_type"]
+        result["project_type"] = _enum(
+            row["project_type"], {"software", "service_desk", "business"}
+        )
     return result
 
 
