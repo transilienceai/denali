@@ -93,6 +93,7 @@ def test_environment_allowlist_is_exact_and_rejects_invalid_ids(monkeypatch):
 
 def test_bounded_jira_broker_response_uses_existing_machine_and_rejects_oversize(monkeypatch):
     calls = []
+    response_body = [b'{"projects":[]}']
 
     class FakeClerk:
         def __init__(self, bearer_auth):
@@ -113,7 +114,7 @@ def test_bounded_jira_broker_response_uses_existing_machine_and_rejects_oversize
             return None
 
         def iter_bytes(self):
-            yield b'{"projects":[]}'
+            yield response_body[0]
 
     class FakeClient:
         def __init__(self, **options):
@@ -147,6 +148,11 @@ def test_bounded_jira_broker_response_uses_existing_machine_and_rejects_oversize
     assert calls[0][2]["headers"]["Authorization"] == "Bearer ephemeral-test-token"
     with pytest.raises(shared_connections_client.SharedConnectionsError) as error:
         client.request("POST", path, clerk_org_id="org_server", payload={}, max_response_bytes=5)
+    assert error.value.status_code == 502
+    response_body[0] = b"[" * 10_000 + b"0" + b"]" * 10_000
+    with pytest.raises(shared_connections_client.SharedConnectionsError) as error:
+        client.request("POST", path, clerk_org_id="org_server", payload={},
+                       max_response_bytes=25_000)
     assert error.value.status_code == 502
     with pytest.raises(ValueError, match="unexpected shared connections path"):
         client.request("GET", "/arbitrary-url", clerk_org_id="org_server")

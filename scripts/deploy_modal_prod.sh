@@ -42,6 +42,11 @@ prod_modal_environment="denali-prod"
 export DENALI_MODAL_APP_NAME="denali-production"
 export DENALI_MODAL_SECRET_NAME="custom-secret"
 export DENALI_MODAL_PROVIDER_SECRET_NAME="${DENALI_MODAL_PROVIDER_SECRET_NAME:-denali-github-provider}"
+export DENALI_ENABLE_SHARED_JIRA_READS="${DENALI_ENABLE_SHARED_JIRA_READS-false}"
+if [[ "${DENALI_ENABLE_SHARED_JIRA_READS}" != "true" && "${DENALI_ENABLE_SHARED_JIRA_READS}" != "false" ]]; then
+  echo "Refusing production deployment: DENALI_ENABLE_SHARED_JIRA_READS must be true or false." >&2
+  exit 2
+fi
 export DENALI_MODAL_REGION="${DENALI_MODAL_REGION:-us-east}"
 production_modal_origin="${DENALI_PRODUCTION_MODAL_ORIGIN:-https://transilience-denali-prod--denali-production-api.modal.run}"
 production_web_origin="${DENALI_PRODUCTION_WEB_ORIGIN:-https://denali.transilience.cloud}"

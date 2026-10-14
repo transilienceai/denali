@@ -24,7 +24,7 @@ _EXPOSED_SCOPES = {"jira.projects", "jira.issues"}
 def shared_jira_enabled() -> bool:
     """An absent or invalid flag never enables the external read bridge."""
 
-    return os.environ.get("DENALI_ENABLE_SHARED_JIRA_READS", "false").lower() == "true"
+    return os.environ.get("DENALI_ENABLE_SHARED_JIRA_READS", "false") == "true"
 
 
 def _record(value: Any) -> dict[str, Any]:

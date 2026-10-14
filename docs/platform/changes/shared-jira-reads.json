@@ -22,7 +22,10 @@
   "test_files": [
     "tests/test_shared_jira_capabilities.py",
     "tests/test_gateway_capabilities.py",
-    "tests/test_shared_connections_client.py"
+    "tests/test_shared_connections_client.py",
+    "tests/test_shasta_modal_secret_mount.py",
+    "tests/test_deploy_modal_dev_script.py",
+    "tests/test_deploy_modal_prod_script.py"
   ],
   "cli": {
     "impact": "generic_tools",

@@ -60,9 +60,13 @@ Responses are `Cache-Control: no-store`.
 
 ## Rollout and verification
 
-`DENALI_ENABLE_SHARED_JIRA_READS` is a server-side Denali core configuration
-flag; unset, empty, or anything except `true` leaves all five reads at 404.
-It does not alter the Modal function dependency graph or add a Secret. Existing
+`DENALI_ENABLE_SHARED_JIRA_READS` is a public deployment selector copied into
+the existing Modal `Secret.from_dict` configuration on every Denali function.
+The dev/prod workflows default it to literal `false`; deploy scripts also
+default to `false` and reject values other than literal `true` or `false`.
+When false, all five reads
+return 404. The same value is mounted in local and remote function graphs;
+it adds no named Secret or new dependency graph edge. Existing
 `DENALI_PLATFORM_CONNECTIONS_ORIGIN`, `DENALI_PLATFORM_MACHINE_SECRET_KEY`
 and `DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` still govern the outbound bridge.
 The gateway needs its own independent read discovery/execution gate and a

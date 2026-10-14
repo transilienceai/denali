@@ -123,7 +123,7 @@ class SharedConnectionsClient:
                         return chunks.decode("utf-8")
                     try:
                         result = json.loads(chunks)
-                    except (ValueError, UnicodeDecodeError) as error:
+                    except (ValueError, UnicodeDecodeError, RecursionError) as error:
                         raise SharedConnectionsError(502) from error
                     if not isinstance(result, dict):
                         raise SharedConnectionsError(502)

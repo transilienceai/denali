@@ -142,6 +142,16 @@ def test_default_off_and_direct_internal_route_never_calls_broker(monkeypatch):
     assert broker.calls == []
 
 
+@pytest.mark.parametrize("invalid", ["TRUE", "1", "yes", " false ", "invalid"])
+def test_nonliteral_jira_flag_never_enables_gateway_reads(monkeypatch, invalid):
+    broker = Broker()
+    monkeypatch.setenv("DENALI_ENABLE_SHARED_JIRA_READS", invalid)
+    with TestClient(app(broker=broker)) as test:
+        response = call(test, "shared-jira-connections")
+    assert response.status_code == 404
+    assert broker.calls == []
+
+
 def test_member_and_admin_reads_use_existing_org_bound_machine_and_safe_projections():
     broker, repo = Broker(), Repository()
     with TestClient(app(repo, broker)) as test:

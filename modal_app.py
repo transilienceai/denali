@@ -20,6 +20,12 @@ PROVIDER_SECRET_NAME = os.environ.get(
 )
 SHASTA_BRIDGE_SECRET_NAME = "shasta-denali-bridge"
 
+# This public deployment selector is copied into every function's runtime
+# environment. Container imports do not inherit the deploy shell's variables.
+shared_jira_reads_flag = os.environ.get("DENALI_ENABLE_SHARED_JIRA_READS", "false")
+if shared_jira_reads_flag not in {"true", "false"}:
+    raise ValueError("DENALI_ENABLE_SHARED_JIRA_READS must be true or false")
+
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .add_local_file("pyproject.toml", remote_path="/opt/denali/pyproject.toml", copy=True)
@@ -33,7 +39,10 @@ image = (
 # machine key in the core Modal Secret even though only the API calls it.
 shared_connections_origin = os.environ.get("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
 shared_connections_allowed_org_ids = os.environ.get("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS")
-shared_connections_config = {"DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin}
+shared_connections_config = {
+    "DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin,
+    "DENALI_ENABLE_SHARED_JIRA_READS": shared_jira_reads_flag,
+}
 if shared_connections_allowed_org_ids:
     # Dev already carries its allowlist in the core Modal Secret. Do not shadow
     # that value with an empty deployment variable.

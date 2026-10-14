@@ -80,6 +80,7 @@ jobs:
       # Public, reviewed pilot config. Empty values keep the bridge disabled.
       DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN: ${{ vars.DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN }}
       DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS: ${{ vars.DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS }}
+      DENALI_ENABLE_SHARED_JIRA_READS: ${{ vars.DENALI_ENABLE_SHARED_JIRA_READS || 'false' }}
     steps:
       - uses: actions/checkout@v4
         with:
