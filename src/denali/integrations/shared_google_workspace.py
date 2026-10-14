@@ -25,6 +25,7 @@ from denali.integrations.shared_connections_client import SharedConnectionsClien
 
 ROOT = "/internal/v1/connections/google-workspace"
 CREDENTIAL_TYPE = "platform_shared_google_workspace"
+_SHARED_REPORT_PAGE_SIZE = 100
 OPERATIONS = {"gemini_in_workspace_apps": "gemini_activity", "token": "oauth_activity"}
 PIN_FIELDS = (
     "target_id",
@@ -375,10 +376,11 @@ class SharedWorkspaceReportsClient:
         cursor = None
         seen: set[str] = set()
         operation = OPERATIONS[application_name]
+        page_size = min(max_results, limit, _SHARED_REPORT_PAGE_SIZE)
         for _ in range(200):
             if self._clock() >= deadline:
                 raise ValueError("shared Workspace collection deadline exceeded")
-            arguments = {"start_time": start, "end_time": end, "limit": min(max_results, limit)}
+            arguments = {"start_time": start, "end_time": end, "limit": page_size}
             if cursor:
                 arguments["cursor"] = cursor
             result = self._client.request(
@@ -408,7 +410,7 @@ class SharedWorkspaceReportsClient:
                 or _time(result.get("start_time")) != start_time
                 or _time(result.get("end_time")) != end_time
                 or not isinstance(result.get("items"), list)
-                or len(result["items"]) > arguments["limit"]
+                or len(result["items"]) > page_size
             ):
                 raise ValueError("shared Workspace read response is invalid")
             page = [

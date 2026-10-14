@@ -60,6 +60,13 @@ cannot establish that admission. Native Google ADC is never a shared fallback.
    separate receipts; a completed job or green badge alone does not prove data.
 
 The adapter retains the native 180-day maximum window and 20,000-record limit.
+Shared reads request at most 100 records per page, including when the existing
+collector requests 1,000; one-record validation probes remain one record. This
+reduces page size rather than truncating the scan: the same opaque cursor and
+exact interval continue across pages, and each response is checked against the
+actual requested size. Native, unshared Reports reads retain their existing
+1,000-record default. An oversized page or any exhausted bound still fails the
+affected coverage plane instead of claiming complete or zero-finding coverage.
 It fixes the exact interval across pages, allows only two operations, limits
 responses to 2 MiB per page and 16 MiB per plane, at most 200 pages and a 1,500-second
 overall reports deadline. Invalid/repeated cursors, identity/revision/window
