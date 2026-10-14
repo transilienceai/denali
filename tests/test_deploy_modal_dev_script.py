@@ -87,6 +87,13 @@ def test_development_deploy_rejects_dirty_worktree(tmp_path: Path) -> None:
     assert not (tmp_path / "calls.log").exists()
 
 
+def test_workspace_nonliteral_development_flag_is_rejected(tmp_path: Path) -> None:
+    result = _run(tmp_path, DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED="1")
+    assert result.returncode == 2
+    assert "literal true or false" in result.stderr
+    assert not (tmp_path / "calls.log").exists()
+
+
 def test_development_deploy_rejects_stale_revision(tmp_path: Path) -> None:
     result = _run(tmp_path, FAKE_ORIGIN_DEV_SHA="b" * 40)
 

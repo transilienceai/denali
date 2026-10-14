@@ -219,7 +219,7 @@ export type Connection = {
         role_arn: string;
       }
     | {
-        type: "platform_shared_aws" | "platform_shared_gcp";
+        type: "platform_shared_aws" | "platform_shared_gcp" | "platform_shared_google_workspace";
         platform_connection_id: string;
       }
     | {
@@ -270,6 +270,16 @@ export type Connection = {
     tenant_id?: string;
     admin_email?: string;
     domain?: string;
+    customer_id?: string;
+    platform_binding?: {
+      target_id: string;
+      customer_id: string;
+      domain: string;
+      admin_email: string;
+      service_account: string;
+      oauth_client_id: string;
+      binding_revision: number;
+    };
     cloud?: "AzureCloud";
     subscriptions?: Array<{ id: string; name: string }>;
     projects?: Array<{ id: string; name: string; number: string }>;
@@ -281,7 +291,7 @@ export type Connection = {
     organization?: string;
     installer?: { id: number; login: string };
     onboarding?: {
-      method: "cloudformation_quick_create" | "azure_cloud_shell" | "azure_repos_entra_oauth" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation" | "platform_shared_github" | "google_workspace_domain_wide_delegation";
+      method: "cloudformation_quick_create" | "azure_cloud_shell" | "azure_repos_entra_oauth" | "entra_admin_consent" | "gcp_cloud_shell" | "github_app_installation" | "platform_shared_github" | "platform_shared_google_workspace" | "google_workspace_domain_wide_delegation";
       template_version?: string;
       template_sha256?: string;
       principal_arn?: string;

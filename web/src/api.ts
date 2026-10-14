@@ -148,6 +148,41 @@ export type SharedGcpStatus = {
   retry_available: boolean;
 };
 
+export type SharedGoogleWorkspaceTarget = {
+  clerk_org_id: string;
+  provider: "google_workspace";
+  target_id: string;
+  customer_id: string;
+  domain: string;
+  admin_email: string;
+  service_account: string;
+  oauth_client_id: string;
+};
+
+export type SharedGoogleWorkspaceConnection = SharedGoogleWorkspaceTarget & {
+  id: string;
+  binding_revision: number;
+  declared_scopes: string[];
+  validated_scopes: string[];
+  lifecycle_state: string;
+  setup_state: string;
+  health_state: string;
+  last_validated_at: string | null;
+};
+
+export type SharedGoogleWorkspaceStatus = SharedGoogleWorkspaceConnection & {
+  job_id?: string | null;
+  job_state?: string | null;
+  error_code?: string | null;
+  observed_customer_id?: string | null;
+  validation_results?: Array<{
+    scope: string;
+    application_name: string;
+    state: "passed" | "failed";
+    customer_identity_observed: boolean;
+  }>;
+};
+
 export type ResourceWriteAction = "github.guardrail_draft_pr" | "aws.tighten_bedrock_inline_policy";
 export type ResourceWriteStatus = {
   id: string;
@@ -170,8 +205,11 @@ export function configureApiTokenProvider(provider: TokenProvider) {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
     super(message);
+    this.status = status;
     this.name = "ApiError";
   }
 }
@@ -246,6 +284,13 @@ export const api = {
   useSharedGcp: (id: string, declaredScopes: string[]) => request<Connection>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ declared_scopes: declaredScopes }) }),
   disableSharedGcp: (id: string) => request<{ status: string }>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}/disable`, { method: "POST" }),
   deleteSharedGcp: (id: string, confirmationName: string) => request<{ status: string }>(`/v1/shared/connections/gcp/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirmation_name: confirmationName }) }),
+  sharedGoogleWorkspaceConfig: () => request<{ enabled: boolean; items: SharedGoogleWorkspaceTarget[]; declared_scopes: string[]; authorization_scope: string; setup_method: string }>("/v1/shared/connections/google-workspace/config"),
+  sharedGoogleWorkspaceInventory: () => request<{ items: SharedGoogleWorkspaceConnection[] }>("/v1/shared/connections/google-workspace/inventory"),
+  startSharedGoogleWorkspaceSetup: (input: { target_id: string; request_id: string; declared_scopes: string[] }) =>
+    request<SharedGoogleWorkspaceConnection>("/v1/shared/connections/google-workspace/setup", { method: "POST", body: JSON.stringify(input) }),
+  sharedGoogleWorkspaceStatus: (id: string) => request<SharedGoogleWorkspaceStatus>(`/v1/shared/connections/google-workspace/${encodeURIComponent(id)}/status`),
+  validateSharedGoogleWorkspace: (id: string) => request<SharedGoogleWorkspaceStatus>(`/v1/shared/connections/google-workspace/${encodeURIComponent(id)}/validate`, { method: "POST" }),
+  useSharedGoogleWorkspaceInDenali: (id: string) => request<Connection>(`/v1/shared/connections/google-workspace/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({}) }),
   context: () => request<DenaliContext>("/v1/context"),
   inviteOrganizationMembers: (emails: string[], role: OrganizationRole) =>
     request<BulkInviteResult>("/v1/profile/organization/invitations/bulk", {

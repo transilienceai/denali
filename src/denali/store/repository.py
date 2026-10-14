@@ -116,6 +116,7 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
         "platform_shared_aws",
         "platform_shared_gcp",
         "platform_shared_github",
+        "platform_shared_google_workspace",
     }:
         credential_reference["platform_connection_id"] = internal_reference[
             "platform_connection_id"
