@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "add",
+  "reason": "Expose five fixed, default-off reads of already-entitled Platform shared Jira metadata through Denali's existing organization-bound results receiver. No Jira credential, provider write or Denali-local Jira record is added.",
+  "capabilities": [
+    {"name": "shared-jira-connections", "kind": "read", "scopes": ["results:read"]},
+    {"name": "shared-jira-status", "kind": "read", "scopes": ["results:read"]},
+    {"name": "shared-jira-projects", "kind": "read", "scopes": ["results:read"]},
+    {"name": "shared-jira-issues", "kind": "read", "scopes": ["results:read"]},
+    {"name": "shared-jira-issue-detail", "kind": "read", "scopes": ["results:read"]}
+  ],
+  "contract_files": [
+    "src/denali/api/capabilities.py",
+    "docs/development/capability-surface.json"
+  ],
+  "documentation_files": [
+    "docs/development/shared-jira-read-capabilities.md",
+    "docs/development/capability-gateway.md",
+    "docs/development/capability-contract.md"
+  ],
+  "test_files": [
+    "tests/test_shared_jira_capabilities.py",
+    "tests/test_gateway_capabilities.py",
+    "tests/test_shared_connections_client.py"
+  ],
+  "cli": {
+    "impact": "generic_tools",
+    "reason": "The existing CLI 0.1.1 generic tools list/describe/call path can discover these read schemas after the separate gateway gate is enabled. No typed command, packaged schema, login scope or endpoint default changes."
+  },
+  "gateway": {
+    "impact": "adapter_update",
+    "reason": "A paired Platform change must pin this exact Denali contract revision and add the five fixed read schemas plus its own default-off discovery/execution gate before the tools are visible."
+  }
+}

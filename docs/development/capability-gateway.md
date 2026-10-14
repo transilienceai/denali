@@ -27,6 +27,7 @@ routes retain the unbounded default when those parameters are omitted.
 | --- | --- |
 | Context | `context` |
 | Connections | `connections`, `connection-detail` (Denali-local status, not Platform connector configuration) |
+| Shared Jira metadata (default off) | `shared-jira-connections`, `shared-jira-status`, `shared-jira-projects`, `shared-jira-issues`, `shared-jira-issue-detail` |
 | Durable connection jobs | `connection-validation-job`, `connection-collection-job` (both require job `id` and canonical `connection_id`) |
 | Inventory | `inventory-summary`, `assets`, `asset-detail`, `sources-coverage` |
 | Findings | `findings-summary`, `findings`, `finding-detail` |
@@ -36,7 +37,7 @@ routes retain the unbounded default when those parameters are omitted.
 | Activity | `activity-summary`, `activity`, `activity-detail`, `runtime-sessions`, `runtime-session-detail`, `runtime-session-export` |
 | Detections | `detections-summary`, `detections`, `detection-detail`, `detection-evaluations` |
 
-The read catalog contains 37 named operations. The exhaustive
+The read catalog contains 43 named operations. The exhaustive
 [machine-readable public surface map](capability-surface.json) records the 84
 explicit public route/method operations, four generated documentation routes,
 and all 69 browser client methods in this release. It retains the pinned baseline,
@@ -50,6 +51,17 @@ metadata-only JSON export schema and attachment header. The gateway export is
 limited to 100 ordered activities and 2 MiB of serialized JSON. Native
 `session.truncated` identifies omitted activities; oversized exports return 413.
 The browser retains its existing export limits.
+
+The five shared Jira reads are a separate, default-off broker projection; see
+[shared Jira read capabilities](shared-jira-read-capabilities.md). They use the
+existing Denali receiver purpose `results:read`, live member/admin check,
+pre-existing tenant mapping and existing Denali outbound Platform machine and
+organization allowlist. They do not create Denali-local Jira connections,
+findings, scans or credential records, and do not expose Jira permission reads,
+setup, disable, arbitrary JQL/URL, attachments or provider writes. The flag
+`DENALI_ENABLE_SHARED_JIRA_READS` defaults to false. The Platform gateway has
+its own independent default-off discovery/execution gate; neither flag alone
+authorizes a customer session.
 
 `connections` accepts `limit` (1–100, default 20) and `offset` (0–100000)
 and returns a stable ID-ordered page with `has_more`. `connection-detail`
@@ -181,7 +193,7 @@ shared-GitHub connector. This is not full Denali API parity.
 
 | Surface | In this release | Still outside MCP/CLI |
 | --- | --- | --- |
-| Denali results | 37 named reads, including durable connection job status, bounded metadata-only runtime export and safe setup reads | Unreviewed future API paths |
+| Denali results | 43 named reads in the product contract, including five default-off shared Jira metadata reads | Unreviewed future API paths and Jira writes |
 | Denali records/jobs | Governance, response proposal/review, evidence import, validation/collection, connector lifecycle/setup | Provider callbacks, invitations and user administration |
 | Customer AWS/GitHub resources | No mutation | All resource-changing actions and remediation |
 

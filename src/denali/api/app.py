@@ -122,6 +122,7 @@ from denali.connectors.github_repository import GitHubRepositoryCollector
 from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
 from denali.domain import ActivityBatch, FindingBatch, InventoryBatch
 from denali.domain.inventory import ASSET_CATEGORY_KINDS, InventoryCategory
+from denali.integrations import shared_jira
 from denali.integrations.shared_aws_probe import probe_shared_bedrock_agents
 from denali.integrations.shared_connections_client import (
     SharedConnectionsClient,
@@ -1481,6 +1482,8 @@ def create_app(
                 request._body = bytes(body)
             if capability_read:
                 operation = original_path.removeprefix("/internal/v1/capabilities/")
+                if operation.startswith("shared-jira-") and not shared_jira.shared_jira_enabled():
+                    return JSONResponse(status_code=404, content={"detail": "not found"})
                 try:
                     path, query = read_route(operation, request.query_params)
                 except HTTPException as error:
@@ -2176,11 +2179,17 @@ def create_app(
         *,
         payload: dict[str, Any] | None = None,
         expect_text: bool = False,
+        max_response_bytes: int | None = None,
     ) -> dict[str, Any] | str:
         client, clerk_org_id = _shared_connections_context(request)
         try:
+            options = (
+                {"max_response_bytes": max_response_bytes}
+                if max_response_bytes is not None else {}
+            )
             return client.request(
-                method, path, clerk_org_id=clerk_org_id, payload=payload, expect_text=expect_text
+                method, path, clerk_org_id=clerk_org_id, payload=payload,
+                expect_text=expect_text, **options,
             )
         except SharedConnectionsError as error:
             status_code = error.status_code
@@ -2192,6 +2201,121 @@ def create_app(
                 status_code=status_code,
                 detail="shared connections request failed",
             ) from error
+
+    def _shared_jira_request(
+        request: Request, method: str, path: str, *, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if not shared_jira.shared_jira_enabled():
+            raise HTTPException(status_code=404, detail="not found")
+        result = _shared_request(
+            request, method, path, payload=payload, max_response_bytes=1_100_000
+        )
+        if not isinstance(result, dict):
+            raise HTTPException(status_code=502, detail="shared Jira response invalid")
+        return result
+
+    def _shared_jira_status(request: Request, connection_id: UUID) -> dict[str, Any]:
+        value = _shared_jira_request(
+            request, "GET", f"/internal/v1/connections/jira/{connection_id}/status"
+        )
+        try:
+            return shared_jira.connection(value, expected_id=connection_id)
+        except ValueError as error:
+            raise HTTPException(status_code=502, detail="shared Jira response invalid") from error
+
+    @app.get("/internal/v1/shared/jira/connections")
+    def shared_jira_connections(
+        request: Request,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=100000),
+    ) -> dict[str, Any]:
+        value = _shared_jira_request(request, "GET", "/internal/v1/connections/jira")
+        try:
+            return shared_jira.connections(value, limit=limit, offset=offset)
+        except ValueError as error:
+            raise HTTPException(status_code=502, detail="shared Jira response invalid") from error
+
+    @app.get("/internal/v1/shared/jira/connections/{connection_id}/status")
+    def shared_jira_status(request: Request, connection_id: UUID) -> dict[str, Any]:
+        return _shared_jira_status(request, connection_id)
+
+    def _shared_jira_metadata(
+        request: Request,
+        connection_id: UUID,
+        *,
+        operation: str,
+        project_id: int | None,
+        limit: int = 20,
+        cursor: str | None = None,
+        issue_id: str | None = None,
+    ) -> dict[str, Any]:
+        status = _shared_jira_status(request, connection_id)
+        try:
+            selected = shared_jira.selected_projects(
+                status, scope="jira.projects" if operation == "projects" else "jira.issues",
+                project_id=project_id,
+            )
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail="shared Jira read unavailable") from error
+        arguments: dict[str, Any] = (
+            {"limit": limit} if operation != "issue_detail" else {"issue_id": issue_id}
+        )
+        if operation == "issues":
+            arguments["project_id"] = project_id
+        payload: dict[str, Any] = {
+            "project_ids": selected,
+            "operation": operation,
+            "arguments": arguments,
+        }
+        if cursor is not None:
+            payload["cursor"] = cursor
+        value = _shared_jira_request(
+            request, "POST", f"/internal/v1/connections/jira/{connection_id}/read",
+            payload=payload,
+        )
+        try:
+            return shared_jira.read_result(
+                value, operation=operation, selected=selected, limit=limit, issue_id=issue_id
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=502, detail="shared Jira response invalid") from error
+
+    @app.get("/internal/v1/shared/jira/connections/{connection_id}/projects")
+    def shared_jira_projects(
+        request: Request,
+        connection_id: UUID,
+        limit: int = Query(default=20, ge=1, le=50),
+        cursor: str | None = Query(default=None, max_length=8192),
+    ) -> dict[str, Any]:
+        return _shared_jira_metadata(
+            request, connection_id, operation="projects", project_id=None,
+            limit=limit, cursor=cursor,
+        )
+
+    @app.get("/internal/v1/shared/jira/connections/{connection_id}/issues")
+    def shared_jira_issues(
+        request: Request,
+        connection_id: UUID,
+        project_id: int = Query(ge=1, lt=2**63),
+        limit: int = Query(default=20, ge=1, le=50),
+        cursor: str | None = Query(default=None, max_length=8192),
+    ) -> dict[str, Any]:
+        return _shared_jira_metadata(
+            request, connection_id, operation="issues", project_id=project_id,
+            limit=limit, cursor=cursor,
+        )
+
+    @app.get("/internal/v1/shared/jira/connections/{connection_id}/issue-detail")
+    def shared_jira_issue_detail(
+        request: Request,
+        connection_id: UUID,
+        project_id: int = Query(ge=1, lt=2**63),
+        issue_id: str = Query(min_length=1, max_length=54),
+    ) -> dict[str, Any]:
+        return _shared_jira_metadata(
+            request, connection_id, operation="issue_detail", project_id=project_id,
+            issue_id=issue_id,
+        )
 
     @app.get("/v1/shared/connections")
     def list_shared_connections(request: Request, response: Response) -> dict[str, Any]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -83,6 +84,7 @@ class SharedConnectionsClient:
         clerk_org_id: str,
         payload: dict[str, Any] | None = None,
         expect_text: bool = False,
+        max_response_bytes: int | None = None,
     ) -> dict[str, Any] | str:
         if not self.allows_org(clerk_org_id):
             raise SharedConnectionsError(404)
@@ -92,18 +94,40 @@ class SharedConnectionsClient:
             token = self._clerk.m2m.create_token(
                 seconds_until_expiration=60, min_remaining_ttl_seconds=20
             ).token
+            params = {"clerk_org_id": clerk_org_id} if method == "GET" or payload is None else None
+            body = {**payload, "clerk_org_id": clerk_org_id} if payload is not None else None
+            headers = {"Authorization": f"Bearer {token}"}
             with httpx.Client(timeout=20, follow_redirects=False) as client:
-                response = client.request(
-                    method,
-                    f"{self._origin}{path}",
-                    params=(
-                        {"clerk_org_id": clerk_org_id}
-                        if method == "GET" or payload is None
-                        else None
-                    ),
-                    json={**payload, "clerk_org_id": clerk_org_id} if payload is not None else None,
-                    headers={"Authorization": f"Bearer {token}"},
-                )
+                if max_response_bytes is None:
+                    response = client.request(
+                        method, f"{self._origin}{path}", params=params, json=body, headers=headers
+                    )
+                else:
+                    if not 1 <= max_response_bytes <= 2 * 1024 * 1024:
+                        raise ValueError("invalid shared connections response limit")
+                    with client.stream(
+                        method, f"{self._origin}{path}", params=params, json=body, headers=headers
+                    ) as response:
+                        if not 200 <= response.status_code < 300:
+                            safe = (
+                                response.status_code
+                                if response.status_code in {404, 409, 422} else 502
+                            )
+                            raise SharedConnectionsError(safe)
+                        chunks = bytearray()
+                        for chunk in response.iter_bytes():
+                            if len(chunks) + len(chunk) > max_response_bytes:
+                                raise SharedConnectionsError(502)
+                            chunks.extend(chunk)
+                    if expect_text:
+                        return chunks.decode("utf-8")
+                    try:
+                        result = json.loads(chunks)
+                    except (ValueError, UnicodeDecodeError) as error:
+                        raise SharedConnectionsError(502) from error
+                    if not isinstance(result, dict):
+                        raise SharedConnectionsError(502)
+                    return result
         except (httpx.RequestError, ClerkBaseError) as error:
             raise SharedConnectionsError(502) from error
         if not 200 <= response.status_code < 300:

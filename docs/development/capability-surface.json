@@ -5,7 +5,7 @@
   "explicit_public_operation_count": 102,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
-  "release_named_read_count": 38,
+  "release_named_read_count": 43,
   "release_named_write_count": 16,
   "release_named_resource_write_count": 4,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
@@ -18,7 +18,8 @@
     "provider_callback": "One-time state/consent callbacks are provider protocols, not user-invoked capabilities.",
     "operator": "Health, navigation, API documentation, deployment, migrations, and direct CLI evaluation execution are operator workflows. Evaluation result histories remain product capabilities.",
     "raw_connection_reads": "Raw credential references and configuration are replaced by reviewed tenant-scoped safe connection projections.",
-    "shared_gcp_pilot": "Default-off shared GCP setup/attachment are authenticated browser pilot workflows. Existing named connection validation, collection, job polling and result capabilities work on attached shared references; this pilot does not advertise additional MCP lifecycle tools."
+    "shared_gcp_pilot": "Default-off shared GCP setup/attachment are authenticated browser pilot workflows. Existing named connection validation, collection, job polling and result capabilities work on attached shared references; this pilot does not advertise additional MCP lifecycle tools.",
+    "shared_jira_reads": "Five default-off read-only gateway capabilities use the existing Platform-owned Jira connection and Denali outbound machine identity. They do not add Denali-local Jira connections, Jira findings or scans, Jira setup/disconnect, permission reads, provider writes, or credentials."
   },
   "operations": [
     {
