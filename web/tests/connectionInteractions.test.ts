@@ -469,3 +469,61 @@ test("shared exact AWS result never implies Region discovery or account inventor
   assert.doesNotMatch(results?.textContent ?? "", /0 Regions/);
   assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Partial"));
 });
+
+for (const shared of [true, false]) {
+  for (const state of ["complete", "partial", "failed"] as const) {
+    test(`Azure Repos ${shared ? "shared" : "native"}: terminal ${state} source result and finish time remain inspectable`, async () => {
+      const completedAt = "2026-10-16T00:02:00Z";
+      const row: Connection = {
+        ...azureAttached, health_state: "healthy", source_collection_state: "idle",
+        credential_reference: shared ? azureAttached.credential_reference : { type: "azure_repos_service_principal", client_id: azureSource.application_client_id },
+        last_validation: {
+          started_at: "2026-10-16T00:00:00Z", completed_at: "2026-10-16T00:01:00Z", health_state: "healthy", credential_state: "passed", account_id_observed: "fixture",
+          summary: "Exact repository metadata verified", results: [{ scope: "azure_repos.repository_metadata", plane: "repository_metadata", label: "Repository metadata", region: "global", state: "passed", detail: "Saved project and repository identities matched", repository_id: azureRepositories[0]!.id, repository_full_name: azureRepositories[0]!.full_name }],
+        },
+        last_source_collection: { connection_id: azureAttached.id, state, completed_at: completedAt, repository_count: 2, failed_count: state === "failed" ? 2 : 0, partial_count: state === "partial" ? 1 : 0, repositories: [], detail: `Recorded ${state} source analysis outcome` },
+      };
+      await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+      const results = container.querySelector('[aria-label="Connection collection results"]');
+      assert.equal(results?.querySelectorAll("section").length, 1);
+      assert.match(results?.textContent ?? "", /Repository source evidence/);
+      assert.match(results?.textContent ?? "", new RegExp(`Latest result: ${state[0]!.toUpperCase()}${state.slice(1)}`));
+      assert.match(results?.textContent ?? "", /2 repositories/);
+      assert.match(results?.textContent ?? "", new RegExp(`Recorded ${state} source analysis outcome`));
+      assert.equal(results?.querySelector("time")?.dateTime, completedAt);
+      if (shared) {
+        const validation = container.querySelector('[aria-label="Connection validation results"]');
+        assert.match(validation?.textContent ?? "", /Exact repository metadata verified/);
+        assert.match(validation?.textContent ?? "", /Saved project and repository identities matched/);
+      }
+      assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === (state === "complete" ? "Ready" : "Needs attention")));
+      assert.equal(calls.azure, 0);
+      assert.equal(calls.native, 0);
+    });
+  }
+}
+
+test("shared GCP shows validation proof and the recorded partial project collection outcome", async () => {
+  const completedAt = "2026-10-16T00:02:00Z";
+  const row: Connection = {
+    ...attached, id: "gcp-shared-result", provider: "gcp", health_state: "healthy", declared_scopes: ["gcp.ai_services"],
+    credential_reference: { type: "platform_shared_gcp", platform_connection_id: "gcp-shared" }, configuration: { projects: [{ id: "fixture-project", number: "123456789012", name: "Fixture" }] },
+    last_validation: {
+      started_at: "2026-10-16T00:00:00Z", completed_at: "2026-10-16T00:01:00Z", health_state: "healthy", credential_state: "passed", account_id_observed: "fixture-project",
+      summary: "Selected project access verified", results: [{ scope: "gcp.ai_services", plane: "ai_services", label: "AI service metadata", region: "global", state: "passed", detail: "Selected project read returned", project_id: "fixture-project", project_name: "Fixture" }],
+    },
+    last_deployment_collection: { connection_id: "gcp-shared-result", state: "partial", completed_at: completedAt, project_count: 1, failed_count: 0, partial_count: 1, projects: [], detail: "Project collection has incomplete coverage" },
+  };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  assert.match(container.querySelector('[aria-label="Connection validation results"]')?.textContent ?? "", /Selected project access verified/);
+  assert.match(container.querySelector('[aria-label="Connection validation results"]')?.textContent ?? "", /Selected project read returned/);
+  const results = container.querySelector('[aria-label="Connection collection results"]');
+  assert.equal(results?.querySelectorAll("section").length, 1);
+  assert.match(results?.textContent ?? "", /Deployment evidence/);
+  assert.match(results?.textContent ?? "", /Latest result: Partial/);
+  assert.match(results?.textContent ?? "", /1 projects · 1 partial · 0 failed/);
+  assert.match(results?.textContent ?? "", /Project collection has incomplete coverage/);
+  assert.equal(results?.querySelector("time")?.dateTime, completedAt);
+  assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Needs attention"));
+  assert.equal(calls.gcp, 0);
+});

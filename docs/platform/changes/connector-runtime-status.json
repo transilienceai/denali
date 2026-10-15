@@ -2,7 +2,7 @@
   "version": 1,
   "product": "denali",
   "change": "no_external_change",
-  "reason": "Correct browser-only AWS/Azure runtime collection waiting, progress, readiness and dependent refresh using existing declared scopes and durable status/result fields. Existing API/CLI/MCP contracts, provider reads, authorization, grants, persistence and worker behavior are unchanged.",
+  "reason": "Correct browser-only AWS/Azure runtime collection waiting, progress, readiness and dependent refresh using existing declared scopes and durable status/result fields. Reuse recorded validation and collection result presentation in shared AWS/Microsoft/GCP/Azure Repos and native Azure Repos details so outcomes and finish times are visible independently of readiness badges. These are existing response fields only: API/CLI/MCP contracts, provider reads, authorization, grants, persistence and worker behavior are unchanged.",
   "capabilities": [],
   "contract_files": [],
   "documentation_files": [],
