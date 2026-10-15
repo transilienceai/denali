@@ -1,7 +1,9 @@
 {
   "version": 1,
-  "status": "default_off_development_backport",
-  "reviewed_source": "2d2de5904af8a60f81f1fd0263855220494e433d",
+  "status": "default_off_entra_first_development_backport",
+  "reviewed_source": "4974a196da56645a9132e3cf05173979d0f2847a",
+  "activation_scope": "entra_only",
+  "azure_activation": "deferred",
   "development_base": "7e853c0c139921b807b838c0622d5c8aedab6cd1",
   "same_origin_browser_prefix": "/api/v1/shared/connections",
   "organization_allowlist": "DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS",

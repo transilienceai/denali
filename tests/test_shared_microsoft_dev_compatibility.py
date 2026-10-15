@@ -11,6 +11,7 @@ import pytest
 from test_shared_microsoft import APP, ID, connection
 from test_shared_microsoft_api import AUTH, Broker, Repository, client
 
+from denali.api.app import create_app
 from denali.integrations import shared_connections_client
 from denali.integrations.shared_connections_client import SharedConnectionsClient
 
@@ -96,8 +97,32 @@ def test_dev_microsoft_contract_classifies_only_added_browser_routes():
                 actual.add((decorator.func.attr.upper(), decorator.args[0].value))
     assert actual == {(row["method"], row["path"]) for row in contract["browser_operations"]}
     assert contract["new_tool_names"] == contract["new_login_scopes"] == []
+    assert contract["activation_scope"] == "entra_only"
+    assert contract["azure_activation"] == "deferred"
     assert all(
         row["role"] == "admin"
         for row in contract["browser_operations"]
         if row["method"] in {"POST", "DELETE"} or row["path"].endswith("/setup")
     )
+
+
+def test_entra_only_rollout_does_not_replace_native_workspace_dependencies(monkeypatch):
+    from fastapi.testclient import TestClient
+    from test_shared_microsoft_api import Authenticator
+
+    monkeypatch.setenv("DENALI_PLATFORM_ENTRA_ENABLED", "true")
+    monkeypatch.delenv("DENALI_PLATFORM_AZURE_ENABLED", raising=False)
+    validator, collector = object(), object()
+    application = create_app(
+        repository=Repository(),
+        auth_mode="clerk",
+        authenticator=Authenticator(),
+        shared_connections_client=Broker("entra"),
+        google_workspace_connection_validator=validator,
+        google_workspace_connection_collector=collector,
+        migrate_on_start=False,
+    )
+    with TestClient(application) as browser:
+        assert browser.get("/v1/shared/connections/entra", headers=AUTH).status_code == 200
+        assert application.state.google_workspace_connection_validator is validator
+        assert application.state.google_workspace_connection_collector is collector

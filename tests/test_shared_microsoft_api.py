@@ -352,3 +352,34 @@ def test_shared_failure_never_creates_native_fallback(provider):
             == 503
         )
     assert not repo.created
+
+
+def test_entra_only_rollout_denies_all_azure_handoffs_without_broker_calls(monkeypatch):
+    monkeypatch.delenv("DENALI_PLATFORM_AZURE_ENABLED", raising=False)
+    broker = Broker("entra")
+    with client(broker) as test:
+        assert test.get("/v1/shared/connections/entra", headers=AUTH).status_code == 200
+        assert test.post(
+            "/v1/shared/connections/entra", headers=AUTH, json=payload("entra")
+        ).status_code == 201
+        before = len(broker.calls)
+        assert test.get("/v1/shared/connections/azure", headers=AUTH).status_code == 404
+        assert test.post(
+            "/v1/shared/connections/azure", headers=AUTH, json=payload("azure")
+        ).status_code == 404
+        azure = f"/v1/shared/connections/azure/{ID}"
+        for path in (
+            "/v1/shared/connections/azure/config",
+            f"{azure}/validation", f"{azure}/setup", f"{azure}/setup.sh",
+        ):
+            assert test.get(path, headers=AUTH).status_code == 404
+        for suffix in ("setup", "validate", "disable", "use-in-denali"):
+            assert test.post(
+                f"{azure}/{suffix}", headers=AUTH,
+                json={"declared_scopes": payload("azure")["declared_scopes"]},
+            ).status_code == 404
+        assert test.request(
+            "DELETE", azure, headers=AUTH, json={"confirmation_name": "Shared Microsoft"}
+        ).status_code == 404
+        assert len(broker.calls) == before
+    assert all("/azure" not in call[1] for call in broker.calls)

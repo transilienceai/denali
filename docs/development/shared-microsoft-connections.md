@@ -1,5 +1,47 @@
 # Shared Azure and Microsoft Entra development backport
 
+## Entra-first development rollout
+
+This focused `dev` refresh tracks reviewed production Microsoft source
+`4974a196da56645a9132e3cf05173979d0f2847a`; the provider adapter is byte-identical.
+It does not merge the divergent production branch or import its newer gateway,
+resource-remediation, shared Workspace or other connector implementations.
+Existing native Workspace/Shasta and native/shared AWS/GitHub behavior stay intact.
+
+Enable only `DENALI_PLATFORM_ENTRA_ENABLED=true` after the separately reviewed
+Platform dev broker, dedicated **Transilience Platform Entra Dev** registration,
+exact `tran-test` → approved Microsoft tenant admission and tenant-wide Graph
+application admin consent are ready. Keep `DENALI_PLATFORM_AZURE_ENABLED=false`
+or absent. Entra needs no Azure subscription or Azure Reader assignment. Creating
+or approving an Azure registration, subscription grant or pilot is deferred.
+
+Keep the development backend identity, Clerk membership and Neon database
+isolated. Do not copy the production Entra credential or production org admission.
+The dedicated registration's callback must be exactly:
+
+```text
+https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run/internal/v1/connections/entra/setup/callback
+```
+
+The callback must match the reviewed deployed broker before consent. The Graph
+application bundle remains only `Directory.Read.All` and `AuditLog.Read.All`,
+with no delegated user permission, Microsoft write, mail or file permission.
+Provider credentials live only in Platform dev's environment-local
+`transilience-platform-entra` Secret, never Denali or Vercel.
+
+Acceptance is create → tenant-specific admin consent/callback → validate all
+declared Graph planes → attach in Denali dev → durable Entra collection →
+existing inventory/activity/findings reads through CLI/MCP. Verify anonymous,
+member/admin, other-org and revoked/disabled boundaries; test destructive
+lifecycle only on an explicitly approved disposable reference. Validation proves
+callability, not collection. Licensing or empty sign-in coverage stays explicit.
+
+This source change authorizes no merge, deployment, flag, secret, database,
+consent or admission mutation. Both Microsoft flags remain off until separately
+approved environment-specific activation.
+
+## Shared Microsoft boundary
+
 This implementation is dark by default and is not production acceptance evidence.
 `DENALI_PLATFORM_AZURE_ENABLED` and `DENALI_PLATFORM_ENTRA_ENABLED` each default to
 false. Activation also requires the existing HTTPS
@@ -84,8 +126,9 @@ from model tools. The fixed route and read classifications are recorded in
 
 Before any activation, run the local Python/frontend/PostgreSQL gates and obtain
 separate authorized hosted acceptance: create → tenant-specific consent/callback →
-customer-approved Azure Reader setup → validate → attach → durable collection →
-disable → delete for both providers and two real Organization boundaries. Verify
+customer-approved Azure Reader setup (Azure only) → validate → attach → durable
+collection → disable → delete for each enabled provider and two Organization
+boundaries. Entra-only acceptance does not activate or accept Azure. Verify
 licensing/retention limitations and cross-tenant rejection. Local fakes are not a
 provider acceptance pass. This change makes no OAuth request, provider permission
 change, cloud call, merge or deployment.
@@ -94,7 +137,8 @@ change, cloud call, merge or deployment.
 
 This backport starts from `origin/dev` at
 `7e853c0c139921b807b838c0622d5c8aedab6cd1` and ports only reviewed Microsoft
-implementation `2d2de5904af8a60f81f1fd0263855220494e433d`. It does not merge main
+implementation `4974a196da56645a9132e3cf05173979d0f2847a` (original adapter also
+reviewed at `2d2de5904af8a60f81f1fd0263855220494e433d`). It does not merge main
 into dev, change the dev read capability catalog, replace worker leases, add
 migrations, or alter existing shared AWS/GitHub admission and native identities.
 The Microsoft gate uses `DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS`; the older dev

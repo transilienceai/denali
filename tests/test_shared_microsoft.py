@@ -323,3 +323,45 @@ def test_mismatched_shared_provider_type_cannot_select_native_credentials():
         MicrosoftCollectorRouter("azure", Native(), Broker()).collect(
             tenant_id="local-tenant", connection=wrong, repository=Sink()
         )
+
+
+def test_entra_can_validate_and_collect_without_azure_enablement(monkeypatch):
+    monkeypatch.delenv("DENALI_PLATFORM_AZURE_ENABLED", raising=False)
+    broker, target, sink = Broker(), connection("entra"), Sink()
+    validated = MicrosoftValidatorRouter("entra", Native(), broker).validate(target)
+    collected = MicrosoftCollectorRouter("entra", Native(), broker).collect(
+        tenant_id="local-tenant", connection=target, repository=sink
+    )
+    assert validated["health_state"] == "healthy"
+    assert collected["state"] == "complete" and collected["lookback_hours"] == 24
+    assert all(call[1] == f"/internal/v1/connections/entra/{ID}/read" for call in broker.calls)
+    assert all("subscription_id" not in call[3] for call in broker.calls)
+
+
+def test_entra_only_rollout_preserves_native_azure_and_entra_routing(monkeypatch):
+    monkeypatch.delenv("DENALI_PLATFORM_AZURE_ENABLED", raising=False)
+    broker, calls = Broker(), []
+
+    class ExistingNative:
+        def validate(self, target):
+            calls.append(("validate", target["provider"]))
+            return {"health_state": "native-result"}
+
+        def collect(self, **kwargs):
+            calls.append(("collect", kwargs["connection"]["provider"]))
+            return {"state": "native-result"}
+
+    native = ExistingNative()
+    for provider in ("azure", "entra"):
+        target = {"provider": provider, "credential_type": f"native_{provider}"}
+        assert MicrosoftValidatorRouter(provider, native, broker).validate(target) == {
+            "health_state": "native-result"
+        }
+        assert MicrosoftCollectorRouter(provider, native, broker).collect(
+            tenant_id="local-tenant", connection=target, repository=Sink()
+        ) == {"state": "native-result"}
+    assert calls == [
+        ("validate", "azure"), ("collect", "azure"),
+        ("validate", "entra"), ("collect", "entra"),
+    ]
+    assert broker.calls == []

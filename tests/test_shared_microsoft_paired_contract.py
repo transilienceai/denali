@@ -19,7 +19,16 @@ pytest.importorskip(
     "transilience_platform", reason="paired Platform source is required on PYTHONPATH"
 )
 
-from test_shared_microsoft import APP, ID, PRINCIPAL, SUBSCRIPTION, TENANT, Native, Sink, connection  # noqa: E402
+from test_shared_microsoft import (  # noqa: E402
+    APP,
+    ID,
+    PRINCIPAL,
+    SUBSCRIPTION,
+    TENANT,
+    Native,
+    Sink,
+    connection,
+)
 from test_shared_microsoft_api import AUTH, Authenticator, Repository, payload  # noqa: E402
 from transilience_platform.azure_api import register_azure_routes  # noqa: E402
 from transilience_platform.entra_api import register_entra_routes  # noqa: E402

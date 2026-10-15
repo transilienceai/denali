@@ -116,6 +116,14 @@ alongside production setup for one attended operator call, then obtain separate
 environment-specific Microsoft consent and customer-reviewed Azure Reader
 execution. This source preparation does not grant permissions or deploy dev.
 
+For the Entra-first rollout, enable only `DENALI_PLATFORM_ENTRA_ENABLED` after
+the dedicated dev Entra registration, exact `tran-test` tenant admission and
+Graph application admin consent have passed their separate readiness checks.
+Keep `DENALI_PLATFORM_AZURE_ENABLED=false` or absent: Entra does not need an
+Azure subscription or Reader assignment. Do not copy the production credential,
+admission or source tree into this older dev runtime. Existing native Workspace,
+Shasta and shared AWS/GitHub continue through their current implementations.
+
 A push to `dev` starts the **Deploy Modal development** GitHub Actions workflow. It requires the
 exact remote `dev` SHA, runs the complete Python/PostgreSQL/frontend verification gate, enters the
 GitHub `denali-dev` environment, checks configuration, applies migrations, deploys the API and

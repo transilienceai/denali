@@ -2,7 +2,7 @@
   "version": 1,
   "product": "denali",
   "change": "update",
-  "reason": "Focused default-off Azure/Entra development backport preserves the diverged dev branch's native connectors, shared AWS/GitHub transport, schema, durable job interfaces and external read catalog. New provider setup remains authenticated browser work; no provider/OAuth grant or gateway expansion is activated.",
+  "reason": "Refresh the focused default-off Microsoft development backport for an Entra-only rollout, verified against reviewed production source 4974a196. The metadata adapter is unchanged; added regressions prove Azure stays off and native Microsoft/Workspace dependencies remain intact. Preserve shared AWS/GitHub transport, schema, jobs and external read catalog; no provider/OAuth grant or gateway expansion is activated.",
   "capabilities": [
     {"name": "shared-microsoft-dev-onboarding", "kind": "not_externally_exposed", "scopes": []}
   ],
