@@ -3,9 +3,9 @@ import test from "node:test";
 
 import { sharedAwsFailureState, showNativeConnectionForm } from "../src/connectionOnboarding.ts";
 
-test("only a dark bridge or a non-pilot organization keeps native AWS as the default", () => {
+test("only an explicitly non-pilot organization is classified as not enabled", () => {
   assert.equal(sharedAwsFailureState(Object.assign(new Error("not allowed"), { status: 404 })), "not_enabled");
-  assert.equal(sharedAwsFailureState(Object.assign(new Error("not configured"), { status: 503 })), "not_enabled");
+  assert.equal(sharedAwsFailureState(Object.assign(new Error("service unavailable"), { status: 503 })), "error");
   assert.equal(showNativeConnectionForm("aws", true, "not_enabled", false), true);
 });
 

@@ -3,6 +3,7 @@ import type {
   AssetDetail,
   AssetPage,
   AwsConnectionCreate,
+  AwsSelectedResource,
   AwsCloudFormationLaunch,
   AzureConnectionCreate,
   AzureReposConnectionCreate,
@@ -52,6 +53,35 @@ export type DenaliContext = {
   can_write: boolean;
 };
 
+export type ConnectionCatalogItem = {
+  provider: Connection["provider"];
+  label: string;
+  onboarding_path: "shared" | "native" | "unavailable";
+  shared_enabled: boolean;
+  native_available: boolean;
+  supported_scopes: string[];
+  supported_coverage_modes?: string[];
+  parity_gaps: string[];
+  reason: string | null;
+  reason_code: string | null;
+};
+
+export type ConnectionCatalog = { items: ConnectionCatalogItem[]; platform_only: boolean; platform_only_blockers: string[] };
+
+export type ConnectionOnboardingWorkflow = {
+  id: string;
+  connection_id?: string | null;
+  platform_connection_id?: string | null;
+  provider: Connection["provider"];
+  management_source: string;
+  stage: string;
+  status: string;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+  error_code: string | null;
+};
+
 export type ConnectionJobStatus = {
   job_id: string;
   connection_id: string;
@@ -89,10 +119,22 @@ export type SharedAwsConnection = {
   connection_kind: "shared_aws" | "legacy_metadata";
   provider: "aws";
   partition: string;
+  deployment_region?: string;
+  coverage_mode?: "selected" | "automatic" | "selected-resource";
+  selected_resource?: AwsSelectedResource;
+  regions?: string[];
   external_account_id: string;
   availability: string;
   validated_scopes: string[];
   last_validated_at: string | null;
+};
+
+export type SharedAwsConfiguration = {
+  coverage_mode: "selected" | "automatic" | "selected-resource";
+  selected_resource?: AwsSelectedResource;
+  regions: string[];
+  deployment_region: string;
+  declared_scopes: string[];
 };
 
 export type SharedAwsValidation = {
@@ -195,6 +237,17 @@ export type SharedMicrosoftStatus = {
   error_code?: string | null; retry_available?: boolean;
 };
 
+export type SharedAzureReposTarget = {
+  target_id: string; tenant_id: string; organization: string; application_client_id: string; display_name: string;
+};
+export type SharedAzureReposConnection = SharedAzureReposTarget & {
+  id: string; provider: "azure_repos"; connection_kind: "shared_azure_repos";
+  lifecycle_state: "active" | "disabled" | "deleted"; setup_state: string; health_state: string;
+  declared_scopes: string[]; validated_scopes: string[]; availability: string; repository_count: number;
+  authority_revision: number; last_validated_at: string | null;
+  job_id?: string | null; job_state?: string | null; error_code?: string | null; retry_available?: boolean;
+};
+
 export type ResourceWriteAction = "github.guardrail_draft_pr" | "aws.tighten_bedrock_inline_policy";
 export type ResourceWriteStatus = {
   id: string;
@@ -211,8 +264,13 @@ export type ResourceWriteStatus = {
 
 type TokenProvider = () => Promise<string | null>;
 let tokenProvider: TokenProvider = async () => null;
+let requestGeneration = 0;
+const pendingRequests = new Set<AbortController>();
 
 export function configureApiTokenProvider(provider: TokenProvider) {
+  requestGeneration += 1;
+  for (const controller of pendingRequests) controller.abort();
+  pendingRequests.clear();
   tokenProvider = provider;
 }
 
@@ -227,34 +285,66 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = await tokenProvider();
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init?.headers,
-    },
-  });
-  if (!response.ok) {
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const payload = await response.json() as { detail?: unknown };
-      if (typeof payload.detail === "string") throw new ApiError(payload.detail, response.status);
+  const generation = requestGeneration;
+  const provider = tokenProvider;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (init?.signal?.aborted) controller.abort();
+  init?.signal?.addEventListener("abort", abort, { once: true });
+  pendingRequests.add(controller);
+  const assertCurrent = () => {
+    if (controller.signal.aborted || generation !== requestGeneration) throw new DOMException("Workspace changed", "AbortError");
+  };
+  try {
+    const token = await provider();
+    assertCurrent();
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...init?.headers,
+      },
+    });
+    assertCurrent();
+    if (!response.ok) {
+      const contentType = response.headers.get("content-type") ?? "";
+      if (contentType.includes("application/json")) {
+        const payload = await response.json() as { detail?: unknown };
+        assertCurrent();
+        if (typeof payload.detail === "string") throw new ApiError(payload.detail, response.status);
+      }
+      throw new ApiError(`Request failed (${response.status})`, response.status);
     }
-    throw new ApiError(`Request failed (${response.status})`, response.status);
+    if (response.status === 204) return undefined as T;
+    const result = await response.json() as T;
+    assertCurrent();
+    return result;
+  } finally {
+    pendingRequests.delete(controller);
+    init?.signal?.removeEventListener("abort", abort);
   }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
 }
 
 async function requestBlob(path: string): Promise<Blob> {
-  const token = await tokenProvider();
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
-  if (!response.ok) throw new ApiError(`Request failed (${response.status})`, response.status);
-  return response.blob();
+  const generation = requestGeneration;
+  const provider = tokenProvider;
+  const controller = new AbortController();
+  pendingRequests.add(controller);
+  try {
+    const token = await provider();
+    if (controller.signal.aborted || generation !== requestGeneration) throw new DOMException("Workspace changed", "AbortError");
+    const response = await fetch(`${API_BASE}${path}`, {
+      signal: controller.signal,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (controller.signal.aborted || generation !== requestGeneration) throw new DOMException("Workspace changed", "AbortError");
+    if (!response.ok) throw new ApiError(`Request failed (${response.status})`, response.status);
+    const result = await response.blob();
+    if (controller.signal.aborted || generation !== requestGeneration) throw new DOMException("Workspace changed", "AbortError");
+    return result;
+  } finally { pendingRequests.delete(controller); }
 }
 
 export const api = {
@@ -284,9 +374,19 @@ export const api = {
     }),
   sharedGithubConnections: () => request<{ items: SharedGitHubConnection[] }>("/v1/shared/connections/github"),
   sharedGithubRepositories: (id: string) => request<{ items: SharedGitHubRepository[] }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/repositories`),
-  startSharedGithubSetup: () => request<{ install_url: string }>("/v1/shared/connections/github/setup", { method: "POST" }),
-  useSharedGithubInDenali: (id: string, repositoryIds?: number[]) => request<Connection>(`/v1/shared/connections/github/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify(repositoryIds === undefined ? {} : { repository_ids: repositoryIds }) }),
+  startSharedGithubSetup: (input?: { request_id?: string; connection_id?: string }) => request<{ install_url: string; workflow_id?: string }>("/v1/shared/connections/github/setup", { method: "POST", body: JSON.stringify(input ?? {}) }),
+  useSharedGithubInDenali: (id: string, repositoryIds?: number[], declaredScopes?: string[]) => request<Connection>(`/v1/shared/connections/github/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ ...(repositoryIds === undefined ? {} : { repository_ids: repositoryIds }), ...(declaredScopes === undefined ? {} : { declared_scopes: declaredScopes }) }) }),
   disableSharedGithub: (id: string) => request<{ status: string }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/disable`, { method: "POST" }),
+  sharedAzureReposConfig: () => request<{ items: SharedAzureReposTarget[] }>("/v1/shared/connections/azure-repos/config"),
+  sharedAzureReposConnections: () => request<{ items: SharedAzureReposConnection[] }>("/v1/shared/connections/azure-repos"),
+  createSharedAzureRepos: (input: { target_id: string; request_id: string; declared_scopes: string[] }) => request<{ id: string }>("/v1/shared/connections/azure-repos/setup", { method: "POST", body: JSON.stringify(input) }),
+  startSharedAzureReposSetup: (id: string, input: { request_id: string; connection_id?: string }) => request<{ authorize_url: string; workflow_id: string }>(`/v1/shared/connections/azure-repos/${encodeURIComponent(id)}/setup`, { method: "POST", body: JSON.stringify(input) }),
+  sharedAzureReposStatus: (id: string) => request<SharedAzureReposConnection>(`/v1/shared/connections/azure-repos/${encodeURIComponent(id)}/status`),
+  sharedAzureReposRepositories: (id: string) => request<{ items: Omit<import("./types").AzureReposRepositoryBoundary, "remote_url">[] }>(`/v1/shared/connections/azure-repos/${encodeURIComponent(id)}/repositories`),
+  validateSharedAzureRepos: (id: string) => request<{ job_id: string; state: string }>(`/v1/shared/connections/azure-repos/${encodeURIComponent(id)}/validate`, { method: "POST", body: JSON.stringify({}) }),
+  useSharedAzureRepos: (id: string, repositoryIds: string[], declaredScopes: string[]) => request<Connection>(`/v1/shared/connections/azure-repos/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ repository_ids: repositoryIds, declared_scopes: declaredScopes }) }),
+  disableSharedAzureRepos: (id: string) => request<{ status: string }>(`/v1/shared/connections/azure-repos/${encodeURIComponent(id)}/disable`, { method: "POST", body: JSON.stringify({}) }),
+  deleteSharedAzureRepos: (id: string, confirmationName: string) => request<{ status: string }>(`/v1/shared/connections/azure-repos/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirmation_name: confirmationName }) }),
   sharedGcpConnections: () => request<{ items: SharedGcpConnection[] }>("/v1/shared/connections/gcp"),
   createSharedGcp: (input: { request_id: string; display_name: string; projects: Array<{ id: string; number: string }>; declared_scopes: string[] }) =>
     request<{ id: string; job_id: string; state: string }>("/v1/shared/connections/gcp", { method: "POST", body: JSON.stringify(input) }),
@@ -314,7 +414,7 @@ export const api = {
   useSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string, declaredScopes: string[]) => request<Connection>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ declared_scopes: declaredScopes }) }),
   disableSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string) => request<{ status: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/disable`, { method: "POST" }),
   deleteSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string, confirmationName: string) => request<{ status: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}`, { method: "DELETE", body: JSON.stringify({ confirmation_name: confirmationName }) }),
-  context: () => request<DenaliContext>("/v1/context"),
+  context: (signal?: AbortSignal) => request<DenaliContext>("/v1/context", { signal }),
   inviteOrganizationMembers: (emails: string[], role: OrganizationRole) =>
     request<BulkInviteResult>("/v1/profile/organization/invitations/bulk", {
       method: "POST",
@@ -332,6 +432,9 @@ export const api = {
       body: JSON.stringify(account),
     }),
   connections: () => request<{ items: Connection[] }>("/v1/connections"),
+  connectionCatalog: () => request<ConnectionCatalog>("/v1/connections/catalog"),
+  onboardingWorkflows: () => request<{ items: ConnectionOnboardingWorkflow[] }>("/v1/connections/onboarding"),
+  onboardingWorkflow: (id: string) => request<ConnectionOnboardingWorkflow>(`/v1/connections/onboarding/${encodeURIComponent(id)}`),
   sharedAwsConnections: () => request<{ items: SharedAwsConnection[] }>("/v1/shared/connections"),
   createSharedAwsConnection: (accountId: string, region: string) =>
     request<{ id: string; availability: string }>("/v1/shared/connections/aws", {
@@ -345,6 +448,8 @@ export const api = {
         declared_scopes: ["aws.bedrock_agents"],
       }),
     }),
+  createSharedAwsConfiguration: (input: SharedAwsConfiguration & { account_id: string; partition: "aws" | "aws-us-gov" | "aws-cn" }) =>
+    request<{ id: string; availability: string }>("/v1/shared/connections/aws", { method: "POST", body: JSON.stringify(input) }),
   sharedAwsTemplate: (id: string) =>
     requestBlob(`/v1/shared/connections/aws/${encodeURIComponent(id)}/cloudformation.yaml`),
   validateSharedAws: (id: string) =>
@@ -365,6 +470,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ region, declared_scopes: ["aws.bedrock_agents"] }),
     }),
+  useSharedAwsConfiguration: (id: string, input: SharedAwsConfiguration) =>
+    request<Connection>(`/v1/shared/connections/aws/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify(input) }),
   disableSharedAws: (id: string) =>
     request<{ status: string }>(
       `/v1/shared/connections/aws/${encodeURIComponent(id)}/disable`, { method: "POST" },

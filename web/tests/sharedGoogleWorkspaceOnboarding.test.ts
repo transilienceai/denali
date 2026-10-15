@@ -164,7 +164,7 @@ test("shared Workspace UI keeps authorization external, attachment explicit, and
   assert.match(sharedDetail, /onValidate/);
   assert.match(sharedDetail, /onCollect/);
   assert.match(sharedDetail, /configuration\.customer_id/);
-  assert.match(sharedDetail, /Disable Denali use/);
+  assert.match(sharedDetail, /Disconnect from Denali/);
   assert.match(sharedDetail, /Delete Denali configuration/);
   assert.doesNotMatch(sharedDetail, /onComplete|google_workspace_admin_authorization|Open Google Admin Console/);
   assert.match(app, /<SharedGoogleWorkspacePilot canWrite=\{canWrite\} onChanged=\{onChanged\}/);

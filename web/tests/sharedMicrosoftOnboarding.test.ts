@@ -84,10 +84,11 @@ test("shared Microsoft UI preserves same-origin boundaries and customer executio
   assert.match(panel, /creation\.current\.id/);
   assert.match(panel, /Fixed Microsoft Graph application bundle/);
   assert.match(panel, /Run it yourself in Azure Cloud Shell only after approving Reader assignments/);
-  assert.match(panel, /Consent returns to Platform; return here manually/);
-  assert.match(panel, /at most 24 hours per run/);
+  assert.match(panel, /This view checks access status when you return/);
+  assert.match(panel, /useSharedStatusPolling/);
+  assert.match(panel, /Azure covers at most 24 hours; Entra covers at most 7 days per run/);
   assert.match(panel, /Microsoft tenant\/subscriptions approved for this organization/);
-  assert.match(app, /<SharedMicrosoftPilot provider="azure"/);
-  assert.match(app, /<SharedMicrosoftPilot provider="entra"/);
+  assert.match(app, /provider === "azure" \|\| provider === "entra"/);
+  assert.match(app, /<SharedMicrosoftPilot provider=\{provider\}/);
   assert.doesNotMatch(panel, /client_secret|access_token|modal\.run|exec\(/);
 });

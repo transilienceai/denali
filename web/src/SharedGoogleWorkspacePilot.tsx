@@ -11,20 +11,21 @@ import {
   sharedGoogleWorkspaceRequestDefinition,
   sharedGoogleWorkspaceSameBinding,
 } from "./sharedGoogleWorkspaceOnboarding";
+import { platformConnectionId, type SharedConnectionAdapterProps } from "./sharedConnectionAdapter";
 
-export function SharedGoogleWorkspacePilot({ canWrite, onChanged }: { canWrite: boolean; onChanged: () => Promise<void> }) {
+export function SharedGoogleWorkspacePilot({ canWrite, onChanged, connection, onAttached, onProgress }: SharedConnectionAdapterProps) {
   const [enabled, setEnabled] = useState(false);
   const [targets, setTargets] = useState<SharedGoogleWorkspaceTarget[]>([]);
   const [items, setItems] = useState<SharedGoogleWorkspaceConnection[]>([]);
   const [targetId, setTargetId] = useState("");
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(() => platformConnectionId(connection));
   const [status, setStatus] = useState<SharedGoogleWorkspaceStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const creation = useRef<{ definition: string; id: string } | null>(null);
   const selectedTarget = targets.find((target) => target.target_id === targetId) ?? targets[0];
-  const selected = items.find((item) => item.id === selectedId) ?? items[0];
+  const selected = selectedId ? items.find((item) => item.id === selectedId) : items[0];
   const matchingStatus = selected && status && sharedGoogleWorkspaceSameBinding(selected, status) ? status : null;
   const validating = ["queued", "running"].includes(matchingStatus?.job_state ?? "");
 
@@ -63,6 +64,12 @@ export function SharedGoogleWorkspacePilot({ canWrite, onChanged }: { canWrite: 
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    const onReturn = () => { if (document.visibilityState !== "hidden") void refresh(); };
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    return () => { window.removeEventListener("focus", onReturn); document.removeEventListener("visibilitychange", onReturn); };
+  }, [refresh]);
   useEffect(() => {
     setStatus(null);
     if (!selected) return;
@@ -121,15 +128,15 @@ export function SharedGoogleWorkspacePilot({ canWrite, onChanged }: { canWrite: 
 
   if (!enabled) return null;
   return <section className="panel shared-aws-pilot" aria-label="Shared Google Workspace onboarding">
-    <div className="shared-aws-pilot-heading"><div><span className="eyebrow">REUSABLE GOOGLE WORKSPACE CONNECTION</span><h3>Connect Workspace once</h3><p>Choose the approved Workspace customer for this organization. Platform supplies read-only audit access for Gemini and observed OAuth application activity.</p></div><button type="button" disabled={busy} onClick={() => void refresh()}>Refresh</button></div>
-    {canWrite && targets.length > 0 && <form className="shared-aws-pilot-form" onSubmit={create}>
+    <div className="shared-aws-pilot-heading"><div><h3>Grant Google Workspace access</h3><p>Choose the approved Workspace customer for read-only Gemini and OAuth application audit activity.</p></div><button type="button" disabled={busy} onClick={() => void refresh()}>Check status</button></div>
+    {canWrite && !connection && targets.length > 0 && <form className="shared-aws-pilot-form" onSubmit={create}>
       <label>Approved Workspace target<select value={selectedTarget?.target_id ?? ""} disabled={busy} onChange={(event) => setTargetId(event.target.value)}>{targets.map((target) => <option key={target.target_id} value={target.target_id}>{target.domain} · customer {target.customer_id}</option>)}</select></label>
       {selectedTarget && <p>Delegated administrator: {selectedTarget.admin_email}. Both Gemini in Workspace activity and OAuth application activity use the fixed read-only audit scope.</p>}
       <button className="primary-action" disabled={busy || !selectedTarget}>Prepare shared Workspace connection</button>
     </form>}
     {targets.length === 0 && !error && <p>No approved Workspace targets are configured for this organization.</p>}
     {selected && <div className="shared-aws-pilot-detail">
-      <label>Shared connection<select value={selected.id} disabled={busy} onChange={(event) => { setSelectedId(event.target.value); setStatus(null); }}>{items.map((item) => <option key={item.id} value={item.id}>{item.domain} · customer {item.customer_id}</option>)}</select></label>
+      <label>Authorized connection<select value={selected.id} disabled={busy || !!connection} onChange={(event) => { setSelectedId(event.target.value); setStatus(null); }}>{items.map((item) => <option key={item.id} value={item.id}>{item.domain} · customer {item.customer_id}</option>)}</select></label>
       <p>Customer {selected.customer_id} · domain {selected.domain} · delegated administrator {selected.admin_email}</p>
       <div className="connection-setup-card workspace-authorization-card">
         <div className="connection-setup-card-head"><span>Authorization</span><div><strong>Authorize these exact values in Google Admin Console</strong><small>A Workspace super administrator opens API controls → Domain-wide delegation and adds the OAuth client ID with the sole scope below.</small></div></div>
@@ -146,6 +153,7 @@ export function SharedGoogleWorkspacePilot({ canWrite, onChanged }: { canWrite: 
       {canWrite && <div className="shared-aws-pilot-actions">
         <button disabled={busy || validating || selected.lifecycle_state !== "active"} onClick={() => void perform(async () => {
           setStatus(null);
+          onProgress?.("verify", "Verifying both Workspace audit planes");
           const result = await api.validateSharedGoogleWorkspace(selected.id);
           if (result.id !== selected.id) throw new Error("Workspace validation returned a different connection");
           const validatedItems = sharedGoogleWorkspaceAcceptValidation(items, selected, result);
@@ -161,8 +169,9 @@ export function SharedGoogleWorkspacePilot({ canWrite, onChanged }: { canWrite: 
             setStatus(current);
             throw new Error("Both Workspace audit planes must be validated for this exact customer before attachment");
           }
-          await api.useSharedGoogleWorkspaceInDenali(selected.id);
+          const attached = await api.useSharedGoogleWorkspaceInDenali(selected.id);
           await onChanged();
+          await onAttached?.(attached);
           setMessage("Attached in Denali. Open its connection detail to validate and collect Workspace evidence using durable jobs.");
         })}>Use in Denali</button>
       </div>}

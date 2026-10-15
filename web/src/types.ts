@@ -195,6 +195,19 @@ export type Connection = {
   display_name: string;
   lifecycle_state: "active" | "disabled";
   health_state: "unknown" | "healthy" | "partial" | "unhealthy" | "disabled";
+  management_source?: "platform" | "denali";
+  platform_availability?: "ready" | "disabled" | "needs_scope_grant" | "requires_shared_setup" | "unavailable" | "unknown" | "not_applicable";
+  platform_status_freshness?: "current" | "unavailable" | "not_applicable";
+  platform_last_checked_at?: string | null;
+  platform_status_reason?: string | null;
+  actions?: {
+    validate: boolean;
+    collect: boolean;
+    disconnect: boolean;
+    delete: boolean;
+    manage_shared: boolean;
+    review_scope: boolean;
+  };
   validation_state?: "idle" | "running";
   source_collection_state?: "idle" | "running";
   last_source_collection?: GitHubSourceCollection | null;
@@ -219,7 +232,7 @@ export type Connection = {
         role_arn: string;
       }
     | {
-        type: "platform_shared_aws" | "platform_shared_gcp" | "platform_shared_google_workspace" | "platform_shared_azure" | "platform_shared_entra";
+        type: "platform_shared_aws" | "platform_shared_gcp" | "platform_shared_google_workspace" | "platform_shared_azure" | "platform_shared_entra" | "platform_shared_azure_repos";
         platform_connection_id: string;
       }
     | {

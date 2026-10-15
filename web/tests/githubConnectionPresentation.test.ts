@@ -43,11 +43,12 @@ test("shared copy assigns App ownership and token issuance to Platform", () => {
   assert.match(shared.planDetail, /Platform-owned GitHub installation/);
   assert.match(shared.validationDetail, /token from Platform for one recorded repository/);
   assert.match(shared.notValidatedDetail, /^Validate this shared connection/);
-  assert.match(shared.setupHint, /explicit new subset while keeping this pinned connection/);
+  assert.match(shared.setupHint, /explicitly approves a replacement selection/);
+  assert.match(shared.setupHint, /pinned connection stays unchanged/);
   assert.match(shared.allRepositoriesDetail, /explicitly selected separate attachment/);
   assert.doesNotMatch(shared.setupHint + shared.allRepositoriesDetail, /detach|delete/);
-  assert.match(shared.lifecycleDetail, /validation\/job history/);
-  assert.match(shared.lifecycleDetail, /preserving the Platform installation and collected evidence/);
+  assert.match(shared.lifecycleDetail, /preserves the Platform installation and collected evidence/);
+  assert.match(shared.lifecycleDetail, /Organization-wide access is managed separately/);
   assert.doesNotMatch(JSON.stringify(shared), /Denali mints|Denali’s configured GitHub App/);
 });
 
@@ -57,7 +58,7 @@ test("shared component hides native controls even if native launch capability is
     children: createElement("code", null, "transilienceai/example · ID 42"),
   });
   assert.match(markup, /Platform installation verified/);
-  assert.match(markup, /reusable GitHub section above/);
+  assert.match(markup, /Manage access and selected resources/);
   assert.match(markup, /transilienceai\/example · ID 42/);
   assert.doesNotMatch(markup, /<button|Reconfigure GitHub App|Install \/ configure|private signing key|launch-unavailable/);
 });
