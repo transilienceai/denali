@@ -62,6 +62,7 @@ class Broker:
         if path.endswith("/setup"):
             return {
                 "consent_url": f"https://login.microsoftonline.com/{TENANT}/v2.0/adminconsent?state=synthetic",
+                "callback_url": "https://platform.example/internal/v1/connections/azure/setup/callback",
                 "internal_provider_material": "hidden",
             }
         if path.endswith("/validation"):
@@ -232,6 +233,10 @@ def test_setup_posts_correct_provider_protocol_and_no_browser_callback(provider)
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert "hidden" not in response.text
+    if provider == "azure":
+        assert response.json()["callback_url"] == "https://platform.example/internal/v1/connections/azure/setup/callback"
+    else:
+        assert "callback_url" not in response.json()
     assert broker.calls[0][3] == {}
 
 

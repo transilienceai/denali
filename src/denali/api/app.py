@@ -3283,6 +3283,7 @@ def create_app(
             result,
             {
                 "consent_url",
+                *({"callback_url"} if provider == "azure" else set()),
                 "expires_at",
                 "expires_in",
                 "consent_permissions",
