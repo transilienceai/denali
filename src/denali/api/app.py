@@ -154,6 +154,13 @@ from denali.integrations.shared_google_workspace import (
     shared_google_workspace_enabled,
     workspace_projection,
 )
+from denali.integrations.shared_microsoft import (
+    SHARED_AZURE_SCOPES,
+    MicrosoftCollectorRouter,
+    MicrosoftValidatorRouter,
+    selected_subscriptions,
+    shared_microsoft_enabled,
+)
 from denali.resource_writes.api import INTERNAL_PATH as RESOURCE_ACTION_PATH
 from denali.resource_writes.api import register_remediation_routes
 from denali.resource_writes.service import RemediationService
@@ -866,6 +873,49 @@ class SharedWorkspaceAttach(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SharedMicrosoftUseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    declared_scopes: list[str] = Field(min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def check_scopes(self):
+        scopes = set(self.declared_scopes)
+        if len(scopes) != len(self.declared_scopes) or not (
+            scopes <= set(SHARED_AZURE_SCOPES) or scopes == set(ENTRA_SCOPES)
+        ):
+            raise ValueError("invalid shared Microsoft scopes")
+        self.declared_scopes.sort()
+        return self
+
+
+class SharedMicrosoftSubscription(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class SharedMicrosoftCreate(SharedMicrosoftUseInput):
+    request_id: UUID
+    display_name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9 _.()-]+$")
+    tenant_id: UUID
+    subscriptions: list[SharedMicrosoftSubscription] | None = Field(
+        default=None, min_length=1, max_length=8
+    )
+
+    @model_validator(mode="after")
+    def check_plan(self):
+        if not self.display_name.strip():
+            raise ValueError("display_name must not be blank")
+        self.display_name = self.display_name.strip()
+        if self.subscriptions is not None:
+            selected_subscriptions([
+                item.model_dump(mode="json", exclude_none=True) for item in self.subscriptions
+            ])
+            self.subscriptions.sort(key=lambda item: str(item.id))
+        return self
+
 class AzureConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1227,12 +1277,19 @@ def create_app(
         app.state.shared_connections_client = configured_shared_connections_client
         app.state.github_actions_token_verifier = configured_github_actions_verifier
         app.state.connection_validator = connection_validator or AwsConnectionValidator()
-        app.state.azure_connection_validator = (
-            azure_connection_validator or AzureConnectionValidator()
+        app.state.azure_connection_validator = MicrosoftValidatorRouter(
+            "azure",
+            azure_connection_validator or AzureConnectionValidator(),
+            configured_shared_connections_client,
         )
-        app.state.entra_connection_validator = entra_connection_validator or (
-            EntraConnectionValidator(configured_entra_client)
-            if configured_entra_client is not None
+        native_entra_validator = entra_connection_validator or (
+            EntraConnectionValidator(configured_entra_client) if configured_entra_client else None
+        )
+        app.state.entra_connection_validator = (
+            MicrosoftValidatorRouter(
+                "entra", native_entra_validator, configured_shared_connections_client
+            )
+            if native_entra_validator or configured_shared_connections_client
             else None
         )
         app.state.google_workspace_connection_validator = google_workspace_connection_validator or (
@@ -1247,8 +1304,10 @@ def create_app(
         app.state.google_workspace_operator = configured_workspace_operator
         app.state.gcp_principal_provisioner = configured_gcp_provisioner
         app.state.gcp_setup_launcher = configured_gcp_launcher
-        app.state.azure_deployment_collector = (
-            azure_deployment_collector or AzureConnectionDeploymentCollector()
+        app.state.azure_deployment_collector = MicrosoftCollectorRouter(
+            "azure",
+            azure_deployment_collector or AzureConnectionDeploymentCollector(),
+            configured_shared_connections_client,
         )
         app.state.azure_agent_runtime_collector = (
             azure_agent_runtime_collector or AzureConnectionAgentRuntimeCollector()
@@ -1294,9 +1353,14 @@ def create_app(
             if configured_azure_repos_client is not None
             else None
         )
-        app.state.entra_connection_collector = entra_connection_collector or (
-            EntraConnectionCollector(configured_entra_client)
-            if configured_entra_client is not None
+        native_entra_collector = entra_connection_collector or (
+            EntraConnectionCollector(configured_entra_client) if configured_entra_client else None
+        )
+        app.state.entra_connection_collector = (
+            MicrosoftCollectorRouter(
+                "entra", native_entra_collector, configured_shared_connections_client
+            )
+            if native_entra_collector or configured_shared_connections_client
             else None
         )
         app.state.google_workspace_connection_collector = google_workspace_connection_collector or (
@@ -1355,6 +1419,8 @@ def create_app(
                 "/v1/shared/connections/gcp",
                 "/v1/shared/connections/github",
                 "/v1/shared/connections/google-workspace",
+                "/v1/shared/connections/azure",
+                "/v1/shared/connections/entra",
             )
         ):
             # Rejected JSON/URL values can contain accidental customer credentials.
@@ -3057,6 +3123,307 @@ def create_app(
                 ) from error
         return _with_validation_state(request, tenant, row)
 
+
+    def _shared_microsoft_context(request: Request, provider: str) -> None:
+        if not shared_microsoft_enabled(provider):
+            raise HTTPException(status_code=404, detail="shared Microsoft provider is not enabled")
+        _shared_connections_context(request)
+
+    def _microsoft_projection(result: Any, fields: set[str]) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise HTTPException(status_code=502, detail="shared Microsoft response is invalid")
+        return {key: value for key, value in result.items() if key in fields}
+
+    def _microsoft_scopes(provider: str, scopes: list[str]) -> None:
+        valid = (
+            set(scopes) <= set(SHARED_AZURE_SCOPES)
+            if provider == "azure"
+            else set(scopes) == set(ENTRA_SCOPES)
+        )
+        if not valid:
+            raise HTTPException(status_code=422, detail="shared Microsoft scopes are invalid")
+
+    @app.get("/v1/shared/connections/{provider}/config")
+    def shared_microsoft_config(
+        request: Request, response: Response, provider: Literal["azure", "entra"]
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        response.headers["Cache-Control"] = "no-store"
+        result = _shared_request(request, "GET", f"/internal/v1/connections/{provider}/config")
+        return _microsoft_projection(
+            result,
+            {
+                "provider",
+                "application_client_id",
+                "client_id",
+                "scopes",
+                "consent_permissions",
+                "consent_bundle",
+                "access_mode",
+                "admission_required",
+                "enabled",
+            },
+        )
+
+    @app.get("/v1/shared/connections/{provider}")
+    def list_shared_microsoft(
+        request: Request, response: Response, provider: Literal["azure", "entra"]
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        listing = _shared_request(request, "GET", "/v1/connections")
+        if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
+            raise HTTPException(status_code=502, detail="shared Microsoft list is invalid")
+        response.headers["Cache-Control"] = "no-store"
+        items = []
+        for item in listing["items"]:
+            if (
+                not isinstance(item, dict)
+                or item.get("connection_kind") != f"shared_{provider}"
+                or item.get("provider") != provider
+            ):
+                continue
+            projected = _microsoft_projection(
+                item,
+                {
+                    "id",
+                    "provider",
+                    "connection_kind",
+                    "display_name",
+                    "tenant_id",
+                    "application_client_id",
+                    "subscriptions",
+                    "setup_state",
+                    "health_state",
+                    "availability",
+                    "validated_scopes",
+                    "last_validated_at",
+                },
+            )
+            try:
+                projected["id"] = str(UUID(str(item["id"])))
+                projected["tenant_id"] = str(UUID(str(item["tenant_id"])))
+                if provider == "azure":
+                    projected["subscriptions"] = selected_subscriptions(item.get("subscriptions"))
+            except (KeyError, TypeError, ValueError) as error:
+                raise HTTPException(
+                    status_code=502, detail="shared Microsoft boundary is invalid"
+                ) from error
+            items.append(projected)
+        return {"items": items}
+
+    @app.post("/v1/shared/connections/{provider}", status_code=201)
+    def create_shared_microsoft(
+        request: Request, provider: Literal["azure", "entra"], payload: SharedMicrosoftCreate
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        _microsoft_scopes(provider, payload.declared_scopes)
+        if (provider == "azure") != (payload.subscriptions is not None):
+            raise HTTPException(
+                status_code=422, detail="shared Microsoft subscription selection is invalid"
+            )
+        result = _shared_request(
+            request,
+            "POST",
+            f"/internal/v1/connections/{provider}",
+            payload=payload.model_dump(mode="json", exclude_none=True),
+        )
+        return _microsoft_projection(
+            result, {"id", "state", "setup_state", "application_client_id"}
+        )
+
+    @app.get("/v1/shared/connections/{provider}/{connection_id}/validation")
+    def shared_microsoft_status(
+        request: Request,
+        response: Response,
+        provider: Literal["azure", "entra"],
+        connection_id: UUID,
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        response.headers["Cache-Control"] = "no-store"
+        result = _shared_request(
+            request, "GET", f"/internal/v1/connections/{provider}/{connection_id}/validation"
+        )
+        return _microsoft_projection(
+            result,
+            {
+                "setup_state",
+                "health_state",
+                "credential_state",
+                "last_validated_at",
+                "job_id",
+                "job_kind",
+                "job_state",
+                "state",
+                "error_code",
+                "retry_available",
+                "validated_scopes",
+            },
+        )
+
+    @app.get("/v1/shared/connections/{provider}/{connection_id}/setup")
+    @app.post("/v1/shared/connections/{provider}/{connection_id}/setup")
+    def shared_microsoft_setup(
+        request: Request,
+        response: Response,
+        provider: Literal["azure", "entra"],
+        connection_id: UUID,
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        # GET also issues/rotates one-time state upstream, so it is an admin handoff.
+        if not request.state.denali_auth.can_write:
+            raise HTTPException(status_code=403, detail="organization admin role is required")
+        response.headers["Cache-Control"] = "no-store"
+        result = _shared_request(
+            request,
+            request.method,
+            f"/internal/v1/connections/{provider}/{connection_id}/setup",
+            payload={} if request.method == "POST" else None,
+        )
+        return _microsoft_projection(
+            result,
+            {
+                "consent_url",
+                "expires_at",
+                "expires_in",
+                "consent_permissions",
+                "setup_state",
+                "application_client_id",
+                "tenant_id",
+                "subscriptions",
+                "reader_role_definition_id",
+            },
+        )
+
+    @app.get("/v1/shared/connections/azure/{connection_id}/setup.sh")
+    def shared_azure_script(request: Request, connection_id: UUID) -> PlainTextResponse:
+        _shared_microsoft_context(request, "azure")
+        script = _shared_request(
+            request,
+            "GET",
+            f"/internal/v1/connections/azure/{connection_id}/setup.sh",
+            expect_text=True,
+        )
+        if not isinstance(script, str) or len(script) > 128_000:
+            raise HTTPException(status_code=502, detail="shared Azure script is invalid")
+        return PlainTextResponse(script, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/shared/connections/{provider}/{connection_id}/validate", status_code=202)
+    def validate_shared_microsoft(
+        request: Request, provider: Literal["azure", "entra"], connection_id: UUID
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        result = _shared_request(
+            request, "POST", f"/internal/v1/connections/{provider}/{connection_id}/validate"
+        )
+        return _microsoft_projection(
+            result, {"id", "job_id", "state", "health_state", "setup_state"}
+        )
+
+    @app.post("/v1/shared/connections/{provider}/{connection_id}/use-in-denali", status_code=201)
+    def use_shared_microsoft(
+        request: Request,
+        provider: Literal["azure", "entra"],
+        connection_id: UUID,
+        payload: SharedMicrosoftUseInput,
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        _microsoft_scopes(provider, payload.declared_scopes)
+        repo, tenant_id = _context(request)
+        shared = next(
+            (
+                item
+                for item in list_shared_microsoft(request, Response(), provider)["items"]
+                if item["id"] == str(connection_id)
+            ),
+            None,
+        )
+        if shared is None:
+            raise HTTPException(status_code=404, detail="shared Microsoft connection not found")
+        if shared.get("availability") != "ready" or shared.get("health_state") != "healthy":
+            raise HTTPException(status_code=409, detail="shared Microsoft connection is not ready")
+        if not set(payload.declared_scopes) <= set(shared.get("validated_scopes") or []):
+            raise HTTPException(status_code=403, detail="shared Microsoft scopes are not entitled")
+        configuration = {
+            "tenant_id": shared["tenant_id"],
+            "coverage_mode": "selected-subscriptions"
+            if provider == "azure"
+            else "tenant-wide-admin-consent",
+        }
+        if provider == "azure":
+            configuration.update(cloud=AZURE_CLOUD_PUBLIC, subscriptions=shared["subscriptions"])
+            coverage = azure_coverage_plan(payload.declared_scopes, shared["subscriptions"])
+        else:
+            coverage = entra_coverage_plan(payload.declared_scopes, shared["tenant_id"])
+        reference = {"platform_connection_id": str(connection_id)}
+
+        def matches(row: dict[str, Any] | None) -> bool:
+            return bool(
+                row
+                and row.get("provider") == provider
+                and row.get("credential_reference", {}).get("type") == f"platform_shared_{provider}"
+                and row.get("lifecycle_state") == "active"
+                and row.get("configuration") == configuration
+                and set(row.get("declared_scopes") or []) == set(payload.declared_scopes)
+            )
+
+        existing = repo.get_connection(tenant_id, str(connection_id))
+        if existing is not None:
+            if not matches(existing):
+                raise HTTPException(
+                    status_code=409, detail="connection ID or settings are already in use"
+                )
+            return _with_validation_state(request, tenant_id, existing)
+        try:
+            row = repo.create_connection(
+                tenant_id,
+                connection_id=str(connection_id),
+                provider=provider,
+                display_name=shared.get("display_name")
+                or f"Shared {provider} {str(connection_id)[:8]}",
+                credential_type=f"platform_shared_{provider}",
+                credential_reference=reference,
+                declared_scopes=payload.declared_scopes,
+                coverage_plan=coverage,
+                configuration=configuration,
+            )
+        except ValueError as error:
+            row = repo.get_connection(tenant_id, str(connection_id))
+            if not matches(row):
+                raise HTTPException(
+                    status_code=409, detail="connection settings conflict"
+                ) from error
+        return _with_validation_state(request, tenant_id, row)
+
+    @app.post("/v1/shared/connections/{provider}/{connection_id}/disable")
+    def disable_shared_microsoft(
+        request: Request, provider: Literal["azure", "entra"], connection_id: UUID
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        result = _shared_request(
+            request, "POST", f"/internal/v1/connections/{provider}/{connection_id}/disable"
+        )
+        return _microsoft_projection(result, {"status"})
+
+    @app.delete("/v1/shared/connections/{provider}/{connection_id}")
+    def delete_shared_microsoft(
+        request: Request,
+        provider: Literal["azure", "entra"],
+        connection_id: UUID,
+        payload: SharedGcpDelete,
+    ) -> dict[str, Any]:
+        _shared_microsoft_context(request, provider)
+        # A revoked cloud-target admission deliberately hides data/list access.
+        # Cleanup still delegates to Platform's exact app/org/creator boundary,
+        # which atomically requires disabled lifecycle and matching typed name.
+        # Do not preflight through an admission-gated list and strand revocation.
+        result = _shared_request(
+            request,
+            "POST",
+            f"/internal/v1/connections/{provider}/{connection_id}/delete",
+            payload=payload.model_dump(),
+        )
+        return _microsoft_projection(result, {"status"})
+
     @app.post("/v1/connections", status_code=201)
     def create_connection(request: Request, connection: ConnectionCreate) -> dict[str, Any]:
         repo, current_tenant = _context(request)
@@ -3427,9 +3794,18 @@ def create_app(
             raise HTTPException(status_code=404, detail="connection job not found")
         response.headers["Cache-Control"] = "no-store"
         return {
-            key: row[key] for key in (
-                "job_id", "connection_id", "job_type", "collection_kind", "state",
-                "attempt_count", "created_at", "started_at", "completed_at", "error_code"
+            key: row[key]
+            for key in (
+                "job_id",
+                "connection_id",
+                "job_type",
+                "collection_kind",
+                "state",
+                "attempt_count",
+                "created_at",
+                "started_at",
+                "completed_at",
+                "error_code",
             )
         }
 
@@ -3547,6 +3923,8 @@ def create_app(
         target = repo.get_connection_validation_target(current_tenant, str(connection_id))
         if target is None or target["provider"] != "azure":
             raise HTTPException(status_code=404, detail="Azure connection not found")
+        if target.get("credential_type") == "platform_shared_azure":
+            raise HTTPException(status_code=409, detail="shared Azure setup belongs to Platform")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be launched")
         launcher = request.app.state.azure_setup_launcher
@@ -3604,6 +3982,8 @@ def create_app(
         target = repo.get_connection_validation_target(current_tenant, str(connection_id))
         if target is None or target["provider"] != "azure":
             raise HTTPException(status_code=404, detail="Azure connection not found")
+        if target.get("credential_type") == "platform_shared_azure":
+            raise HTTPException(status_code=409, detail="shared Azure setup belongs to Platform")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be completed")
         payload = _decode_azure_completion_code(completion.completion_code)
@@ -3683,6 +4063,8 @@ def create_app(
         target = repo.get_connection_validation_target(current_tenant, str(connection_id))
         if target is None or target["provider"] != "entra":
             raise HTTPException(status_code=404, detail="Microsoft Entra connection not found")
+        if target.get("credential_type") == "platform_shared_entra":
+            raise HTTPException(status_code=409, detail="shared Entra consent belongs to Platform")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot be launched")
         consent_client = request.app.state.entra_consent_client
@@ -4392,8 +4774,10 @@ def create_app(
                 status_code=409,
                 detail="complete Azure Repos repository selection before validation",
             )
-        if target["provider"] == "entra" and not target["configuration"].get("onboarding", {}).get(
-            "completed_at"
+        if (
+            target["provider"] == "entra"
+            and target.get("credential_type") != "platform_shared_entra"
+            and not target["configuration"].get("onboarding", {}).get("completed_at")
         ):
             raise HTTPException(
                 status_code=409,
@@ -4427,7 +4811,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="Microsoft Entra connection not found")
         if target["lifecycle_state"] != "active":
             raise HTTPException(status_code=409, detail="disabled connections cannot collect")
-        if not target["configuration"].get("onboarding", {}).get("completed_at"):
+        if target.get("credential_type") != "platform_shared_entra" and not target[
+            "configuration"
+        ].get("onboarding", {}).get("completed_at"):
             raise HTTPException(
                 status_code=409,
                 detail="complete Microsoft Entra admin consent before collection",
@@ -4879,13 +5265,28 @@ def create_app(
                         }[action.provider]
                         result = handler(request, response, identifier)
                     output["setup"] = {
-                        key: result[key] for key in (
-                            "launch_url", "stack_name", "stack_region", "template_version",
-                            "template_sha256", "expires_at", "validation_status",
-                            "cloud_shell_url", "script_url", "setup_command", "script_version",
-                            "script_sha256", "principal_email", "identity_prepared_in_script",
-                            "consent_url", "install_url", "app_slug", "authorize_url",
-                        ) if key in result
+                        key: result[key]
+                        for key in (
+                            "launch_url",
+                            "stack_name",
+                            "stack_region",
+                            "template_version",
+                            "template_sha256",
+                            "expires_at",
+                            "validation_status",
+                            "cloud_shell_url",
+                            "script_url",
+                            "setup_command",
+                            "script_version",
+                            "script_sha256",
+                            "principal_email",
+                            "identity_prepared_in_script",
+                            "consent_url",
+                            "install_url",
+                            "app_slug",
+                            "authorize_url",
+                        )
+                        if key in result
                     }
                     status_code = 201
                 else:
@@ -6161,9 +6562,11 @@ def _require_gateway_connection_job_ready(
         raise HTTPException(status_code=409, detail="complete Google Cloud project selection first")
     if provider in {"github", "azure_repos"} and not configuration.get("repositories"):
         raise HTTPException(status_code=409, detail="complete repository selection first")
-    if provider in {"entra", "google_workspace"} and not configuration.get(
-        "onboarding", {}
-    ).get("completed_at"):
+    if (
+        provider in {"entra", "google_workspace"}
+        and target.get("credential_type") != "platform_shared_entra"
+        and not configuration.get("onboarding", {}).get("completed_at")
+    ):
         raise HTTPException(status_code=409, detail="complete provider authorization first")
     if collection_kind is None:
         return
@@ -6319,7 +6722,9 @@ def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> 
             result["provider"] == "aws" and request.app.state.cloudformation_launcher is not None
         ),
         "azure_cloud_shell": (
-            result["provider"] == "azure" and request.app.state.azure_setup_launcher is not None
+            result["provider"] == "azure"
+            and result.get("credential_reference", {}).get("type") != "platform_shared_azure"
+            and request.app.state.azure_setup_launcher is not None
         ),
         "gcp_cloud_shell": (
             result["provider"] == "gcp"
@@ -6335,7 +6740,9 @@ def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> 
             result["provider"] == "azure_repos" and request.app.state.azure_repos_client is not None
         ),
         "entra_admin_consent": (
-            result["provider"] == "entra" and request.app.state.entra_consent_client is not None
+            result["provider"] == "entra"
+            and result.get("credential_reference", {}).get("type") != "platform_shared_entra"
+            and request.app.state.entra_consent_client is not None
         ),
         "google_workspace_admin_authorization": (
             result["provider"] == "google_workspace"

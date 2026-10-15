@@ -467,9 +467,12 @@ def test_shared_github_subset_binding_jobs_and_local_lifecycle_are_independent(r
         "completed_at": datetime.now(UTC).isoformat(),
     }
     restarted.complete_connection_collection_job(str(subset_job["id"]), result)
-    assert repo.connection_collection_status(tenant, local_id, collection_kind="github_source")[
-        "last_result"
-    ] == result
+    assert (
+        repo.connection_collection_status(tenant, local_id, collection_kind="github_source")[
+            "last_result"
+        ]
+        == result
+    )
     assert repo.disable_connection(other, local_id) is None
     assert repo.delete_connection(other, local_id) == "not_found"
     assert repo.delete_connection(tenant, local_id) == "active"
@@ -477,9 +480,12 @@ def test_shared_github_subset_binding_jobs_and_local_lifecycle_are_independent(r
     assert repo.delete_connection(tenant, local_id) == "deleted"
     assert repo.get_connection(tenant, local_id) is None
     assert repo.get_connection(tenant, platform_id) == legacy_snapshot
-    assert repo.connection_collection_status(tenant, platform_id, collection_kind="github_source")[
-        "state"
-    ] == "running"
+    assert (
+        repo.connection_collection_status(tenant, platform_id, collection_kind="github_source")[
+            "state"
+        ]
+        == "running"
+    )
     surviving = restarted.claim_connection_collection_job(str(legacy_job["id"]), lease_seconds=60)
     assert surviving["connection_id"] == uuid.UUID(platform_id)
 
@@ -543,6 +549,153 @@ def test_shared_gcp_reference_jobs_and_worker_target_are_durable_and_tenant_boun
         )
 
 
+@pytest.mark.parametrize(
+    "provider,collection_kind", [("azure", "azure_deployments"), ("entra", "entra_ai")]
+)
+def test_shared_microsoft_reference_jobs_survive_restart_and_reject_foreign_tenant(
+    repository, provider, collection_kind
+):
+    from denali.integrations.shared_microsoft import SHARED_AZURE_SCOPES
+
+    _, repo = repository
+    marker = uuid.uuid4().hex
+    org = f"org_SharedMicrosoft{marker}"
+    tenant = repo.resolve_tenant(org)
+    other = repo.resolve_tenant(f"org_SharedMicrosoftOther{marker}")
+    connection_id = str(uuid.uuid4())
+    microsoft_tenant = str(uuid.uuid4())
+    scopes = list(SHARED_AZURE_SCOPES if provider == "azure" else ENTRA_SCOPES)
+    subscriptions = [{"id": str(uuid.uuid4()), "name": "Selected subscription"}]
+    coverage = (
+        azure_coverage_plan(scopes, subscriptions)
+        if provider == "azure"
+        else entra_coverage_plan(scopes, microsoft_tenant)
+    )
+    configuration = {
+        "tenant_id": microsoft_tenant,
+        "coverage_mode": "selected-subscriptions"
+        if provider == "azure"
+        else "tenant-wide-admin-consent",
+    }
+    if provider == "azure":
+        configuration["subscriptions"] = subscriptions
+    created = repo.create_connection(
+        tenant,
+        connection_id=connection_id,
+        provider=provider,
+        display_name=f"Shared {provider} contract",
+        credential_type=f"platform_shared_{provider}",
+        credential_reference={"platform_connection_id": connection_id},
+        declared_scopes=scopes,
+        coverage_plan=coverage,
+        configuration=configuration,
+    )
+    assert created["credential_reference"] == {
+        "type": f"platform_shared_{provider}",
+        "platform_connection_id": connection_id,
+    }
+    target = repo.get_connection_validation_target(tenant, connection_id)
+    assert target["clerk_organization_id"] == org
+    assert target["credential_reference"] == {"platform_connection_id": connection_id}
+    assert repo.get_connection(other, connection_id) is None
+    assert repo.get_connection_validation_target(other, connection_id) is None
+    assert repo.disable_connection(other, connection_id) is None
+    validation, new = repo.create_connection_validation_job(
+        tenant, connection_id, wait_for_credentials=False, wait_for_healthy=False
+    )
+    repeated_validation, repeated_new = repo.create_connection_validation_job(
+        tenant, connection_id, wait_for_credentials=False, wait_for_healthy=False
+    )
+    assert new and not repeated_new and repeated_validation["id"] == validation["id"]
+    repo.fail_connection_validation_job(str(validation["id"]), "Offline test terminal state.")
+    job, new = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind=collection_kind
+    )
+    duplicate, duplicate_new = repo.create_connection_collection_job(
+        tenant, connection_id, collection_kind=collection_kind
+    )
+    assert new and not duplicate_new and job["id"] == duplicate["id"]
+    with pytest.raises(ValueError, match="no longer active"):
+        repo.create_connection_collection_job(other, connection_id, collection_kind=collection_kind)
+    restarted = PostgresInventoryRepository(DSN)
+    claimed = restarted.claim_connection_collection_job(str(job["id"]), lease_seconds=60)
+    assert claimed["tenant_id"] == uuid.UUID(tenant)
+    assert claimed["collection_kind"] == collection_kind
+    restarted.complete_connection_collection_job(str(job["id"]), {"state": "complete"})
+    retained = repo.connection_collection_status(
+        tenant, connection_id, collection_kind=collection_kind
+    )["last_result"]
+    assert retained["state"] == "complete" and retained["completed_at"]
+    repo.disable_connection(tenant, connection_id)
+    with pytest.raises(ValueError, match="no longer active"):
+        repo.create_connection_collection_job(
+            tenant, connection_id, collection_kind=collection_kind
+        )
+
+
+@pytest.mark.parametrize("provider", ["azure", "entra"])
+def test_shared_microsoft_attachment_allows_durable_browser_and_gateway_jobs(
+    repository, provider, monkeypatch
+):
+    from fastapi.testclient import TestClient
+    from test_shared_gcp_api import Authenticator
+    from test_shared_microsoft_api import AUTH, MEMBER, Broker, payload
+
+    from denali.api.app import _require_gateway_connection_job_ready, create_app
+
+    monkeypatch.setenv(f"DENALI_PLATFORM_{provider.upper()}_ENABLED", "true")
+    _, repo = repository
+    broker = Broker(provider)
+    connection_id = str(uuid.uuid4())
+    broker.listing[0]["id"] = connection_id
+    broker.listing[0]["display_name"] = f"Shared Microsoft {connection_id[:8]}"
+    dispatched = []
+    application = create_app(
+        repository=repo,
+        auth_mode="clerk",
+        authenticator=Authenticator(),
+        shared_connections_client=broker,
+        migrate_on_start=False,
+        validation_dispatcher=lambda job: dispatched.append(("validation", job)),
+        collection_dispatcher=lambda job: dispatched.append(("collection", job)),
+    )
+    kind = "azure_deployments" if provider == "azure" else "entra_ai"
+    collect_suffix = "azure/collect-deployments" if provider == "azure" else "entra/collect"
+    collect_path = f"/v1/connections/{connection_id}/{collect_suffix}"
+    with TestClient(application) as test:
+        attached = test.post(
+            f"/v1/shared/connections/{provider}/{connection_id}/use-in-denali",
+            headers=AUTH,
+            json={"declared_scopes": payload(provider)["declared_scopes"]},
+        )
+        assert attached.status_code == 201
+        local_tenant = repo.resolve_tenant("org_alpha")
+        target = repo.get_connection_validation_target(local_tenant, connection_id)
+        assert "onboarding" not in target["configuration"]
+        _require_gateway_connection_job_ready(target, collection_kind=None)
+        _require_gateway_connection_job_ready(target, collection_kind=kind)
+        assert (
+            test.post(f"/v1/connections/{connection_id}/validate", headers=AUTH).status_code == 202
+        )
+        assert test.post(collect_path, headers=AUTH).status_code == 202
+        assert test.post(collect_path, headers=MEMBER).status_code == 403
+        assert (
+            test.post(collect_path, headers={"Authorization": "Bearer beta-admin"}).status_code
+            == 404
+        )
+        assert test.get(f"/v1/connections/{connection_id}", headers=MEMBER).status_code == 200
+    assert [kind for kind, _job in dispatched] == ["validation", "collection"]
+    # A newly constructed repository sees the queued jobs from the same tenant.
+    restarted = PostgresInventoryRepository(DSN)
+    assert restarted.connection_validation_job_state(local_tenant, connection_id) == "running"
+    assert (
+        restarted.connection_collection_status(local_tenant, connection_id, collection_kind=kind)[
+            "state"
+        ]
+        == "running"
+    )
+
+
 def test_gateway_governance_action_is_audited_once_and_tenant_scoped(repository) -> None:
     _, repo = repository
     marker = uuid.uuid4().hex
@@ -576,7 +729,6 @@ def test_gateway_governance_action_is_audited_once_and_tenant_scoped(repository)
             (alpha, key),
         ).fetchone()
     assert audit == ("user_GatewayAdmin", 1)
-
 
 
 def test_github_ci_import_resolves_tenant_repository_and_exact_observed_digest(
@@ -1866,9 +2018,10 @@ def test_runtime_detections_are_evidence_linked_and_idempotent(repository) -> No
         tenant, detection_id, **proposal_values
     )
     assert proposal is not None and proposal["state"] == "awaiting_approval"
-    assert repo.create_runtime_response_request_idempotent(
-        tenant, detection_id, **proposal_values
-    ) == proposal
+    assert (
+        repo.create_runtime_response_request_idempotent(tenant, detection_id, **proposal_values)
+        == proposal
+    )
     with pytest.raises(ValueError, match="idempotency key"):
         repo.create_runtime_response_request_idempotent(
             tenant,
@@ -1882,23 +2035,34 @@ def test_runtime_detections_are_evidence_linked_and_idempotent(repository) -> No
         "reviewed_by": "user_GatewayReviewer",
         "idempotency_key": "review-fixture-01",
     }
-    assert repo.review_runtime_response_request_idempotent(
-        tenant,
-        detection_id,
-        response_id,
-        **{**review_values, "reviewed_by": proposal_values["requested_by"]},
-    ) is None
+    assert (
+        repo.review_runtime_response_request_idempotent(
+            tenant,
+            detection_id,
+            response_id,
+            **{**review_values, "reviewed_by": proposal_values["requested_by"]},
+        )
+        is None
+    )
     review = repo.review_runtime_response_request_idempotent(
         tenant, detection_id, response_id, **review_values
     )
     assert review is not None and review["state"] == "approved"
-    assert repo.review_runtime_response_request_idempotent(
-        tenant, detection_id, response_id, **review_values
-    ) == review
-    assert repo.review_runtime_response_request_idempotent(
-        str(uuid.uuid4()), detection_id, response_id,
-        **{**review_values, "idempotency_key": "cross-tenant-01"},
-    ) is None
+    assert (
+        repo.review_runtime_response_request_idempotent(
+            tenant, detection_id, response_id, **review_values
+        )
+        == review
+    )
+    assert (
+        repo.review_runtime_response_request_idempotent(
+            str(uuid.uuid4()),
+            detection_id,
+            response_id,
+            **{**review_values, "idempotency_key": "cross-tenant-01"},
+        )
+        is None
+    )
     with psycopg.connect(DSN) as connection:
         audit_count = connection.execute(
             "SELECT count(*) FROM gateway_runtime_response_action WHERE tenant_id = %s::uuid",
