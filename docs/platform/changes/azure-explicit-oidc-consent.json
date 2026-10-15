@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Repair only the private shared Azure browser onboarding handoff: require the tenant-specific v2 admin-consent URL with explicit openid, exact selected client, registered callback metadata and bounded one-use state. Project only the additive public Azure callback_url from the authenticated broker. Entra's consent behavior, native providers and existing public capability names, schemas, OAuth scopes and write authority remain unchanged. Ship the reviewed Denali validator before the paired Platform Azure URL builder.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "Microsoft plan and consent handoffs remain browser-only. Existing connection, inventory, activity and findings capabilities use the same names and user OAuth scopes; no package release."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "No public capability adapter or MCP schema changes. The private Platform Azure setup URL and additive public callback metadata are coordinated through the paired implementation."
+  }
+}

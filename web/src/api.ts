@@ -308,7 +308,7 @@ export const api = {
   createSharedMicrosoft: (provider: SharedMicrosoftProvider, input: { request_id: string; display_name: string; tenant_id: string; declared_scopes: string[]; subscriptions?: Array<{ id: string; name?: string }> }) =>
     request<{ id: string; setup_state: string }>(`/v1/shared/connections/${provider}`, { method: "POST", body: JSON.stringify(input) }),
   sharedMicrosoftStatus: (provider: SharedMicrosoftProvider, id: string) => request<SharedMicrosoftStatus>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/validation`),
-  startSharedMicrosoftSetup: (provider: SharedMicrosoftProvider, id: string) => request<{ consent_url: string; expires_at?: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/setup`, { method: "POST" }),
+  startSharedMicrosoftSetup: (provider: SharedMicrosoftProvider, id: string) => request<{ consent_url: string; expires_at?: string; callback_url?: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/setup`, { method: "POST" }),
   sharedAzureScript: (id: string) => requestBlob(`/v1/shared/connections/azure/${encodeURIComponent(id)}/setup.sh`),
   validateSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string) => request<{ job_id?: string; state?: string }>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/validate`, { method: "POST" }),
   useSharedMicrosoft: (provider: SharedMicrosoftProvider, id: string, declaredScopes: string[]) => request<Connection>(`/v1/shared/connections/${provider}/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ declared_scopes: declaredScopes }) }),

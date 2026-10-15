@@ -21,12 +21,29 @@ export function sharedMicrosoftReady(connection: { availability: string; health_
     scopes.length > 0 && scopes.every((scope) => connection.validated_scopes.includes(scope));
 }
 
-export function microsoftConsentUrl(value: string, tenantId: string, provider: "azure" | "entra" = "entra"): string {
+export function microsoftConsentUrl(value: string, tenantId: string, provider: "azure" | "entra" = "entra", azureBinding?: { clientId: string; callbackUrl: string }): string {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.hostname !== "login.microsoftonline.com" ||
     url.port || url.username || url.password ||
-    url.pathname !== `/${microsoftTenantId(tenantId)}/${provider === "azure" ? "adminconsent" : "v2.0/adminconsent"}` || url.hash) {
+    url.pathname !== `/${microsoftTenantId(tenantId)}/v2.0/adminconsent` || url.hash) {
     throw new Error("Microsoft consent response is invalid");
+  }
+  if (provider === "azure") {
+    // Azure bootstrap requests only OIDC sign-in, not the legacy endpoint's
+    // static permission bundle. Bind it to authenticated Platform setup metadata.
+    if (!azureBinding) throw new Error("Microsoft consent response is invalid");
+    const callback = new URL(azureBinding.callbackUrl);
+    const keys = [...url.searchParams.keys()].sort();
+    if (callback.protocol !== "https:" || !callback.hostname || callback.port ||
+      callback.username || callback.password || callback.search || callback.hash ||
+      callback.pathname !== "/internal/v1/connections/azure/setup/callback" ||
+      keys.join(",") !== "client_id,redirect_uri,scope,state" ||
+      url.searchParams.get("client_id") !== microsoftTenantId(azureBinding.clientId) ||
+      url.searchParams.get("redirect_uri") !== azureBinding.callbackUrl ||
+      url.searchParams.get("scope") !== "openid" ||
+      !/^[A-Za-z0-9_-]{32,128}$/.test(url.searchParams.get("state") ?? "")) {
+      throw new Error("Microsoft consent response is invalid");
+    }
   }
   return url.href;
 }

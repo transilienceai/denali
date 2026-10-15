@@ -35,6 +35,7 @@ from test_shared_microsoft import (  # noqa: E402
 )
 from test_shared_microsoft_api import AUTH, payload  # noqa: E402
 from transilience_platform.azure_api import register_azure_routes  # noqa: E402
+from transilience_platform.azure_connector import AzureBroker  # noqa: E402
 from transilience_platform.entra_api import register_entra_routes  # noqa: E402
 from transilience_platform.entra_connector import EntraBroker  # noqa: E402
 
@@ -168,7 +169,10 @@ class Registry:
 
 
 class Provider:
-    config = SimpleNamespace(client_id=APP)
+    config = SimpleNamespace(
+        client_id=APP,
+        callback_url="https://platform.example/internal/v1/connections/azure/setup/callback",
+    )
 
     def consent_url(self, tenant_or_binding, state):
         tenant = (
@@ -177,8 +181,14 @@ class Provider:
             else tenant_or_binding
         )
         provider = "entra" if isinstance(tenant_or_binding, dict) else "azure"
-        path = "adminconsent" if provider == "azure" else "v2.0/adminconsent"
-        return f"https://login.microsoftonline.com/{tenant}/{path}?" + urlencode(
+        if provider == "azure":
+            with httpx.Client(transport=httpx.MockTransport(
+                lambda _request: pytest.fail("consent construction must not call a provider")
+            )) as http:
+                return AzureBroker(
+                    self.config, http=http, token_factory=lambda *_: "offline-unused"
+                ).consent_url(tenant, state)
+        return f"https://login.microsoftonline.com/{tenant}/v2.0/adminconsent?" + urlencode(
             {
                 "state": state,
                 "client_id": APP,
@@ -274,6 +284,10 @@ def test_denali_and_platform_router_wire_contract_create_setup_attach_read_and_r
             f"https://platform.example/internal/v1/connections/{provider}/setup/callback"
         ]
         if provider == "azure":
+            assert urlsplit(launch.json()["consent_url"]).path == f"/{TENANT}/v2.0/adminconsent"
+            assert query["scope"] == ["openid"]
+            assert set(query) == {"client_id", "redirect_uri", "scope", "state"}
+            assert launch.json()["callback_url"] == Provider.config.callback_url
             script = browser.get(f"{base}/{ID}/setup.sh", headers=AUTH)
             assert script.status_code == 200 and SUBSCRIPTION in script.text and APP in script.text
         with TestClient(platform) as callback:

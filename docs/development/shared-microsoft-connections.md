@@ -70,6 +70,26 @@ Azure administrators separately inspect and execute the downloaded Reader script
 in their own Cloud Shell. It targets the exact application service principal and
 selected subscriptions. Denali never executes role assignments or grants consent.
 
+Shared Azure uses only the tenant-specific **v2** admin-consent endpoint with
+the explicit OIDC scope `openid`. This sign-in-only setup handoff must not use
+the legacy `/adminconsent` endpoint's static permission bundle, `/.default`,
+`User.Read`, `profile`, `email` or `offline_access`. The browser requires exactly
+one each of `client_id`, `redirect_uri`, `scope` and bounded one-use `state`.
+It matches the client to the selected shared connection and the redirect to
+Platform's authenticated, public `callback_url` setup metadata. The callback is
+HTTPS with the exact Azure setup path; no private credential crosses the browser.
+Origins are supplied by the reviewed server configuration, not hard-coded for
+production/development. Missing paired metadata or a legacy Azure URL fails closed.
+
+This changes only shared Azure's browser setup protocol. Certificate/app-only
+tokens still target ARM, with Reader only on selected subscriptions; the handoff
+does not request or retain a delegated user token or refresh token. Entra keeps
+its existing v2 consent URL and separate Graph application-permission bundle.
+Callbacks still consume the existing hashed, expiring state and must reject any
+provider error even when `admin_consent=True` appears. Release the reviewed
+Denali browser validator before the matching Platform URL builder; complete a
+fresh real consent and collection run before accepting Azure activation.
+
 Attachment requires current Platform `availability=ready`, `health_state=healthy`
 and all requested validated/entitled scopes. Denali records only the same shared
 connection UUID, `platform_shared_azure` or `platform_shared_entra` reference,
