@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlencode, urlsplit
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.testclient import TestClient
@@ -28,18 +29,25 @@ from test_shared_microsoft import (  # noqa: E402
     TENANT,
     Native,
     Sink,
+    audit_items,
+    audit_parameters,
     connection,
 )
 from test_shared_microsoft_api import AUTH, payload  # noqa: E402
 from transilience_platform.azure_api import register_azure_routes  # noqa: E402
 from transilience_platform.entra_api import register_entra_routes  # noqa: E402
+from transilience_platform.entra_connector import EntraBroker  # noqa: E402
 
 from denali.api.app import create_app  # noqa: E402
 from denali.integrations import shared_connections_client  # noqa: E402
-from denali.integrations.shared_connections_client import SharedConnectionsClient  # noqa: E402
+from denali.integrations.shared_connections_client import (  # noqa: E402
+    SharedConnectionsClient,
+    SharedConnectionsError,
+)
 from denali.integrations.shared_microsoft import (  # noqa: E402
     MicrosoftCollectorRouter,
     MicrosoftValidatorRouter,
+    SharedEntraReader,
 )
 
 
@@ -309,3 +317,112 @@ def test_denali_and_platform_router_wire_contract_create_setup_attach_read_and_r
             == 200
         )
     assert dispatched
+
+
+def entra_graph_bridge(monkeypatch, respond):
+    """Use the real broker projection/cursor, route and private Denali bridge offline."""
+    monkeypatch.setenv("DENALI_PLATFORM_ENTRA_ENABLED", "true")
+    platform, registry = FastAPI(), Registry("entra")
+    registry.bound.update(setup_state="ready", health_state="healthy")
+    requests = []
+
+    def graph(request):
+        requests.append(request)
+        return respond(request)
+
+    config = SimpleNamespace(
+        client_id=APP,
+        callback_url="https://platform.example/internal/v1/connections/entra/setup/callback",
+        cursor_key=b"offline-paired-entra-cursor-fixture",
+        token=lambda tenant, scope: "offline-provider-token",
+    )
+    provider = EntraBroker(config, http=httpx.Client(transport=httpx.MockTransport(graph)))
+
+    def entitled(authorization, org):
+        if authorization != "Bearer offline-machine" or org != "org_alpha":
+            raise HTTPException(403, "machine/org mismatch")
+        return "denali"
+
+    register_entra_routes(platform, registry, entitled, provider, None)
+    bridge = SharedConnectionsClient(
+        "https://platform.example",
+        "offline-machine",
+        allowed_clerk_org_ids=frozenset({"org_alpha"}),
+    )
+    bridge._clerk = SimpleNamespace(
+        m2m=SimpleNamespace(create_token=lambda **kwargs: SimpleNamespace(token="offline-machine"))
+    )
+    monkeypatch.setattr(
+        shared_connections_client.httpx, "Client", lambda **kwargs: TestClient(platform)
+    )
+    return bridge, registry, requests
+
+
+@pytest.mark.parametrize("count", [103, 200, 201])
+def test_real_paired_broker_and_denali_directory_audit_response_envelope(count, monkeypatch):
+    bridge, registry, requests = entra_graph_bridge(
+        monkeypatch, lambda request: httpx.Response(200, json={"value": audit_items(count)})
+    )
+    reader = SharedEntraReader(connection("entra"), client=bridge)
+    if count > 200:
+        with pytest.raises(SharedConnectionsError) as caught:
+            reader.read("directory_audits", page_size=100, **audit_parameters())
+        assert caught.value.status_code == 502
+        assert registry.reads == []
+    else:
+        response = reader.read("directory_audits", page_size=100, **audit_parameters())
+        assert [item["id"] for item in response["items"]] == [
+            f"synthetic-audit-{index}" for index in range(count)
+        ]
+        assert len(registry.reads) == 1
+    assert len(requests) == 1
+    assert requests[0].url.params["$top"] == "100"
+
+
+def test_real_paired_directory_audit_pagination_is_lossless_and_record_cap_is_preserved(
+    monkeypatch,
+):
+    def graph(request):
+        continued = "$skiptoken" in request.url.params
+        payload = {"value": audit_items(103, offset=103 if continued else 0)}
+        if not continued:
+            payload["@odata.nextLink"] = str(
+                request.url.copy_add_param("$skiptoken", "opaque-offline-next-page")
+            )
+        return httpx.Response(200, json=payload)
+
+    bridge, _registry, requests = entra_graph_bridge(monkeypatch, graph)
+    reader = SharedEntraReader(connection("entra"), client=bridge)
+    result = reader._list("directory_audits", limit=206, **audit_parameters())
+    assert [item["id"] for item in result] == [f"synthetic-audit-{index}" for index in range(206)]
+    assert len(requests) == 2
+    assert requests[1].url.params["$skiptoken"] == "opaque-offline-next-page"
+    assert all(request.url.params["$top"] == "100" for request in requests)
+    with pytest.raises(ValueError, match="record limit reached"):
+        reader._list("directory_audits", limit=205, **audit_parameters())
+    assert len(requests) == 4
+
+
+def test_real_paired_103_non_ai_audits_complete_six_planes_without_inventing_inventory(
+    monkeypatch,
+):
+    def graph(request):
+        if request.url.path.endswith("servicePrincipals"):
+            items = [{"id": PRINCIPAL, "appId": APP, "displayName": "Finance Portal"}]
+        elif request.url.path.endswith("directoryAudits"):
+            items = audit_items(103)
+        else:
+            items = []
+        return httpx.Response(200, json={"value": items})
+
+    bridge, _registry, requests = entra_graph_bridge(monkeypatch, graph)
+    sink = Sink()
+    result = MicrosoftCollectorRouter("entra", Native(), bridge).collect(
+        tenant_id="local-tenant", connection=connection("entra"), repository=sink
+    )
+    assert result["state"] == "complete" and result["coverage_complete"] == 6
+    assert result["coverage_failed"] == result["coverage_partial"] == 0
+    assert result["matched_ai_applications"] == result["activity_events"] == 0
+    assert sink.inventory[0][1].assets == () and sink.activity[0][1].activities == ()
+    audits = [request for request in requests if request.url.path.endswith("directoryAudits")]
+    assert len(audits) == 1 and audits[0].url.params["$top"] == "100"

@@ -208,6 +208,13 @@ class SharedMicrosoftReader:
             clerk_org_id=self._org,
             payload=payload,
         )
+        # Graph can exceed the 100-item directory-audit request hint. Match the
+        # broker's bounded compatibility envelope without truncating a page.
+        response_limit = (
+            200
+            if self.provider == "entra" and operation == "directory_audits" and page_size == 100
+            else page_size
+        )
         if (
             not isinstance(result, dict)
             or result.get("operation") != operation
@@ -215,7 +222,7 @@ class SharedMicrosoftReader:
             or self.provider == "azure"
             and result.get("subscription_id") != subscription_id
             or not isinstance(result.get("items"), list)
-            or len(result["items"]) > page_size
+            or len(result["items"]) > response_limit
             or any(not isinstance(item, dict) for item in result["items"])
             or result.get("next_page_token") is not None
             and (

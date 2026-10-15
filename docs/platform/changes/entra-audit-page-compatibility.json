@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Repair only the private shared Entra directory_audits response envelope when page_size=100: accept at most 200 projected dictionary items, without slicing or losing the opaque cursor. Requests remain bounded at 100; all other operations, smaller requests, tenant/scope checks, collection limits and existing public capabilities are unchanged. The paired Platform broker fix must be reviewed and released with this reader.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "Existing inventory, activity, connection and findings reads retain their tool names, schemas and OAuth scopes. No typed CLI command or package release changes."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "The public capability adapter, catalog and MCP contract are unchanged. Only the private provider broker response-bound repair is paired with this Denali reader fix."
+  }
+}

@@ -191,6 +191,146 @@ def test_entra_pagination_preserves_signed_cursor_and_never_forwards_graph_queri
         reader.read("service_principals", page_token="x" * 8193)
 
 
+def audit_parameters():
+    end = datetime.now(UTC)
+    return {"window_start": end - timedelta(hours=24), "window_end": end}
+
+
+def audit_items(count, *, offset=0):
+    return [
+        {
+            "id": f"synthetic-audit-{index}",
+            "activityDateTime": "2026-01-01T12:00:00Z",
+            "activityDisplayName": "Update application",
+            "category": "ApplicationManagement",
+            "result": "success",
+            "targetResources": [{"id": PRINCIPAL, "type": "ServicePrincipal"}],
+        }
+        for index in range(offset, offset + count)
+    ]
+
+
+@pytest.mark.parametrize("count", [103, 200])
+def test_entra_directory_audit_100_item_hint_accepts_bounded_complete_page(count):
+    items = audit_items(count)
+    broker = Broker(lambda payload, result: {**result, "items": items})
+    reader = SharedEntraReader(connection("entra"), client=broker)
+    result = reader.read("directory_audits", page_size=100, **audit_parameters())
+    assert result["items"] == items
+    assert len(result["items"]) == count
+    assert broker.calls[0][3]["page_size"] == 100
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"items": audit_items(201)},
+        {"items": [*audit_items(102), "not-a-dictionary"]},
+        {"items": {"value": audit_items(103)}},
+        {"items": audit_items(103), "tenant_id": APP},
+        {"items": audit_items(103), "operation": "sign_ins"},
+        {"items": audit_items(103), "next_page_token": "x" * 8193},
+    ],
+)
+def test_entra_directory_audit_compatibility_still_rejects_invalid_response(change):
+    broker = Broker(lambda payload, result: {**result, **change})
+    with pytest.raises(ValueError, match="read response is invalid"):
+        SharedEntraReader(connection("entra"), client=broker).read(
+            "directory_audits", page_size=100, **audit_parameters()
+        )
+
+
+@pytest.mark.parametrize("page_size", [1, 50, 99])
+def test_entra_directory_audit_smaller_request_keeps_its_strict_response_bound(page_size):
+    broker = Broker(lambda payload, result: {**result, "items": audit_items(page_size + 1)})
+    with pytest.raises(ValueError, match="read response is invalid"):
+        SharedEntraReader(connection("entra"), client=broker).read(
+            "directory_audits", page_size=page_size, **audit_parameters()
+        )
+    assert broker.calls[0][3]["page_size"] == page_size
+
+
+@pytest.mark.parametrize(
+    "operation,parameters",
+    [
+        ("service_principals", {}),
+        ("oauth_grants", {}),
+        ("app_role_assignments", {"service_principal_id": PRINCIPAL}),
+        ("sign_ins", {"app_ids": [APP]}),
+    ],
+)
+def test_non_audit_entra_reads_reject_101_items(operation, parameters):
+    broker = Broker(lambda payload, result: {**result, "items": audit_items(101)})
+    if operation == "sign_ins":
+        parameters = {**parameters, **audit_parameters()}
+    with pytest.raises(ValueError, match="read response is invalid"):
+        SharedEntraReader(connection("entra"), client=broker).read(
+            operation, page_size=100, **parameters
+        )
+
+
+def test_azure_read_keeps_100_item_response_bound():
+    broker = Broker(lambda payload, result: {**result, "items": audit_items(101)})
+    with pytest.raises(ValueError, match="read response is invalid"):
+        SharedAzureReader(connection(), client=broker).read(
+            "activity", subscription_id=SUBSCRIPTION, page_size=100, **audit_parameters()
+        )
+
+
+@pytest.mark.parametrize("page_size", [101, 200, True])
+def test_directory_audit_compatibility_does_not_expand_request_page_size(page_size):
+    broker = Broker()
+    with pytest.raises(ValueError, match="page size is invalid"):
+        SharedEntraReader(connection("entra"), client=broker).read(
+            "directory_audits", page_size=page_size, **audit_parameters()
+        )
+    assert broker.calls == []
+
+
+def test_entra_directory_audit_pagination_preserves_all_206_records_and_opaque_cursor():
+    first, second = audit_items(103), audit_items(103, offset=103)
+    cursor = "opaque-signed-audit-cursor"
+
+    def pages(payload, result):
+        if "page_token" not in payload:
+            return {**result, "items": first, "next_page_token": cursor}
+        assert payload["page_token"] == cursor
+        return {**result, "items": second}
+
+    broker = Broker(pages)
+    reader = SharedEntraReader(connection("entra"), client=broker)
+    records = reader._list("directory_audits", limit=206, **audit_parameters())
+    assert records == tuple(first + second)
+    assert len({item["id"] for item in records}) == 206
+    assert [call[3]["page_size"] for call in broker.calls] == [100, 100]
+    assert broker.calls[1][3]["page_token"] == cursor
+
+    broker.calls.clear()
+    with pytest.raises(ValueError, match="record limit reached"):
+        reader._list("directory_audits", limit=205, **audit_parameters())
+    assert len(broker.calls) == 2
+
+
+def test_entra_directory_audit_repeated_cursor_and_page_limits_are_unchanged():
+    broker = Broker(lambda payload, result: {**result, "next_page_token": "repeat"})
+    reader = SharedEntraReader(connection("entra"), client=broker)
+    with pytest.raises(ValueError, match="page token repeated"):
+        reader._list("directory_audits", **audit_parameters())
+    assert len(broker.calls) == 2
+
+    def unique_pages(payload, result):
+        return {**result, "next_page_token": f"opaque-{len(broker.calls)}"}
+
+    broker = Broker(unique_pages)
+    reader = SharedEntraReader(connection("entra"), client=broker)
+    with pytest.raises(ValueError, match="page limit reached"):
+        reader._list("directory_audits", **audit_parameters())
+    assert len(broker.calls) == 200
+    with pytest.raises(ValueError, match="record limit is invalid"):
+        reader._list("directory_audits", limit=20_001, **audit_parameters())
+    assert len(broker.calls) == 200
+
+
 def test_entra_known_native_queries_translate_into_fixed_operations():
     broker = Broker()
     reader = SharedEntraReader(connection("entra"), client=broker)
@@ -303,6 +443,36 @@ def test_shared_collection_reuses_native_evidence_sink_and_24_hour_activity(prov
             ) <= timedelta(hours=24)
     if provider == "entra":
         assert result["lookback_hours"] == 24
+
+
+def test_entra_collector_completes_six_planes_with_103_non_ai_directory_audits():
+    def metadata(payload, result):
+        if payload["operation"] == "service_principals":
+            return {
+                **result,
+                "items": [{"id": PRINCIPAL, "appId": APP, "displayName": "Finance Portal"}],
+            }
+        if payload["operation"] == "directory_audits":
+            return {**result, "items": audit_items(103)}
+        return result
+
+    broker, sink = Broker(metadata), Sink()
+    result = MicrosoftCollectorRouter("entra", Native(), broker).collect(
+        tenant_id="local-tenant", connection=connection("entra"), repository=sink
+    )
+    assert result["state"] == "complete"
+    assert result["coverage_complete"] == 6
+    assert result["coverage_partial"] == result["coverage_failed"] == 0
+    assert result["lookback_hours"] == 24
+    assert result["matched_ai_applications"] == result["activity_events"] == 0
+    assert sink.inventory[0][1].assets == ()
+    assert sink.activity[0][1].activities == ()
+    assert all(tenant == "local-tenant" for tenant, _ in sink.inventory + sink.activity)
+    audits = [call[3] for call in broker.calls if call[3]["operation"] == "directory_audits"]
+    assert len(audits) == 1 and audits[0]["page_size"] == 100
+    assert datetime.fromisoformat(audits[0]["window_end"]) - datetime.fromisoformat(
+        audits[0]["window_start"]
+    ) == timedelta(hours=24)
 
 
 def test_no_native_fallback_when_shared_reader_is_disabled(monkeypatch):
