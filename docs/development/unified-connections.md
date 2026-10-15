@@ -46,8 +46,10 @@ GitHub and Azure Repos external returns have durable PostgreSQL onboarding
 receipts. Denali stores a hash of a random expiring return capability, provider,
 original tenant, request identity and optional original/local Platform source IDs.
 Platform stores the originating app/org and a snapshot of the operator-registered
-callback origin, never a browser-supplied URL. Its one-time provider callback
-returns to the fixed same-origin Denali callback, which consumes the Denali state
+exact callback URL and authorization revisions, never a browser-supplied URL.
+Each application registers its own host and path; Platform has no Denali route
+default or legacy-origin fallback. For Denali, the one-time provider callback
+returns to its registered same-origin callback, which consumes the Denali state
 once and redirects with an opaque workflow ID. Authenticated resume reads are
 tenant scoped: switching organizations cannot reveal or attach the original
 organization's source. Relaunch invalidates the previous return capability.
@@ -119,9 +121,13 @@ existing bounded reads are not a Denali connector and are not in this catalog.
 1. Review and merge the paired Denali/Platform PRs separately. Do not deploy feature
    branches or Vercel previews to production. Review default-off provider flags,
    exact org/app entitlements and callback/target admission before any activation.
-2. Apply forward-only Platform migrations 011–014 using its approved migration
-   process and schema-014 runtime privilege manifest. They add durable return/
-   semantic revisions, Azure runtime scope, Azure Repos, and exact-resource AWS.
+2. Merge and deploy Platform before Denali: the new shared Entra 168-hour window
+   and optional repository return context require the compatible broker first.
+   Apply forward-only Platform migrations 011–015 using its approved migration
+   process and schema-015 runtime privilege manifest. They add durable return/
+   semantic revisions, Azure runtime scope, Azure Repos, exact-resource AWS and
+   app-independent exact callback registrations. Preserve the live provider flags
+   and Secret names; omitted deployment-shell flags can disable existing pilots.
    Apply Denali migrations 027–028 under its existing advisory-lock migration
    function. Do not run migrations at API startup or change old migration files.
 3. Configure environment-local provider identities only in Modal Secrets.
@@ -130,10 +136,12 @@ existing bounded reads are not a Denali connector and are not in this catalog.
    credential. `DENALI_PLATFORM_AWS_SELECTED_RESOURCE_ENABLED` and
    `PLATFORM_ENABLE_AWS_SELECTED_RESOURCE` default off. Existing pilot org allowlist
    and per-provider flags remain in force; flags do not grant entitlements.
-4. Register the fixed callback origin through the approved Platform operator
-   process. Its production helper supports read-only preview plus reviewed
-   expected-state apply; this PR does not run it. Keep dev/prod machines, Clerk,
-   Modal Secrets, Neon branches and return origins isolated.
+4. Before deploying Denali, register its exact HTTPS callback endpoint through
+   Platform's generic `scripts/register_connector_callback_modal.py` operator.
+   The endpoint is `/api/v1/connections/onboarding/callback` on the approved
+   environment-local Denali origin. There are no default app/machine/URL values.
+   Preview is read-only; apply requires its reviewed expected-state digest. Keep
+   dev/prod machines, Clerk, Modal Secrets, Neon branches and callbacks isolated.
 5. Run all Python/Ruff/frontend gates and PostgreSQL integration tests. Test native
    and shared side by side, repository add/remove/rename/transfer and pagination,
    stale/duplicate/concurrent leases, callback replay, delayed responses, organization
