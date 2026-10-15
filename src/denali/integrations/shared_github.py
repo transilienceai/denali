@@ -113,8 +113,30 @@ def shared_github_binding_id(
         separators=(",", ":"),
     )
     return str(
-        uuid5(NAMESPACE_URL, f"https://denali.transilience.cloud/shared-github-bindings/v1/{boundary}")
+        uuid5(
+            NAMESPACE_URL, f"https://denali.transilience.cloud/shared-github-bindings/v1/{boundary}"
+        )
     )
+
+
+def same_github_authorization_boundary(saved: dict[str, Any], current: dict[str, Any]) -> bool:
+    """Mutable metadata does not change consent; repository/owner identities do.
+
+    A repeated attach must preserve the stored configuration. Privacy, archived
+    state, default branch and an installation's broader selection mode may change
+    without widening the exact saved numeric repository selection.
+    """
+
+    keys = ("coverage_mode", "account_id", "account_login")
+    if any(saved.get(key) != current.get(key) for key in keys):
+        return False
+    identity = ("id", "node_id", "full_name", "owner_id", "owner_login")
+    try:
+        saved_ids = {tuple(repo[key] for key in identity) for repo in saved["repositories"]}
+        current_ids = {tuple(repo[key] for key in identity) for repo in current["repositories"]}
+        return bool(saved_ids) and saved_ids == current_ids
+    except (KeyError, TypeError):
+        return False
 
 
 class SharedGitHubAppClient:

@@ -599,6 +599,37 @@ body { font-size: 14px; }
 }
 
 /* Self-service AWS connections */
+.connection-onboarding-wizard { padding: 24px; display: grid; gap: 20px; scroll-margin-top: 24px; }
+.connection-wizard-heading { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
+.connection-wizard-heading h3 { margin: 6px 0; font-size: 21px; }
+.connection-wizard-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.connection-wizard-heading .drawer-close { position: static; flex: 0 0 auto; }
+.connection-journey { list-style: none; margin: 0; padding: 15px 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; background: var(--color-role-surface-component-subtle); border: 1px solid var(--line); border-radius: 10px; }
+.connection-journey li { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
+.connection-journey li > span { width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 50%; display: grid; place-items: center; flex: 0 0 auto; }
+.connection-journey li svg { width: 15px; height: 15px; }
+.connection-journey li.current { color: var(--color-role-foreground-accent); }
+.connection-journey li.current > span { border-color: currentColor; }
+.connection-journey li.complete { color: var(--green); }
+.connection-journey li.attention { color: var(--color-role-status-high-foreground); }
+.connection-method-note { display: flex; align-items: start; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; background: var(--color-role-surface-component-subtle); }
+.connection-method-note > svg { width: 20px; flex: 0 0 auto; color: var(--color-role-foreground-accent); }
+.connection-method-note p { margin: 5px 0; color: var(--muted); line-height: 1.6; }
+.connection-method-note button { border: 0; padding: 5px 0 0; background: none; color: var(--color-role-foreground-accent); font: inherit; cursor: pointer; text-align: left; }
+.connection-wizard-adapter .shared-aws-pilot { border: 0; box-shadow: none; padding: 0; }
+.connection-wizard-adapter .shared-aws-pilot-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.connection-wizard-adapter .shared-aws-pilot-form > button, .connection-wizard-adapter .shared-aws-pilot-form > fieldset { grid-column: 1 / -1; }
+.connection-wizard-adapter textarea, .connection-wizard-adapter select, .connection-wizard-adapter input:not([type="checkbox"]) { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; }
+.connection-wizard-adapter textarea { min-height: 100px; resize: vertical; }
+.connection-wizard-adapter .shared-aws-pilot-detail { border-top: 1px solid var(--line); padding-top: 20px; }
+.connection-detail-stack { display: grid; align-content: start; gap: 14px; min-width: 0; }
+.connection-detail-stack > .secondary-action { margin-top: 0; }
+@media (max-width: 767px) {
+  .connection-onboarding-wizard { padding: 18px; }
+  .connection-journey { gap: 7px; padding: 12px; }
+  .connection-journey li { align-items: start; flex-direction: column; font-size: 11px; }
+  .connection-wizard-adapter .shared-aws-pilot-form { grid-template-columns: 1fr; }
+}
 .shared-aws-pilot { padding: 20px; display: grid; gap: 16px; }
 .shared-aws-pilot-heading { display: flex; justify-content: space-between; gap: 16px; align-items: start; }
 .shared-aws-pilot-heading h3 { margin: 4px 0 6px; }
@@ -610,6 +641,16 @@ body { font-size: 14px; }
 .shared-aws-pilot-detail { display: grid; gap: 12px; }
 .shared-aws-pilot-detail .shared-github-repository-choice { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
 .shared-github-repository-choice input { flex: 0 0 auto; margin: 0; }
+.connection-wizard-adapter fieldset { margin: 16px 0; padding: 16px; min-width: 0; border: 1px solid var(--line); border-radius: 10px; }
+.connection-wizard-adapter fieldset legend { padding: 0 6px; color: var(--ink); font-size: 12px; font-weight: 600; }
+.connection-wizard-adapter fieldset ul { padding: 0; margin: 0; list-style: none; max-height: 340px; overflow-y: auto; }
+.connection-wizard-adapter fieldset label { padding: 7px 0; line-height: 1.5; }
+.connection-wizard-adapter fieldset input[type="checkbox"] { accent-color: var(--denali-brand-primary); width: 16px; height: 16px; }
+.connection-wizard-adapter .connection-repository-summary { display: grid; gap: 6px; padding: 14px 0; }
+.connection-wizard-adapter .connection-repository-summary p { margin: 0; }
+.connection-wizard-adapter .connection-repository-changes { padding: 12px 14px; border-left: 3px solid var(--denali-brand-primary); background: var(--color-role-surface-component-subtle); border-radius: 0 8px 8px 0; }
+.connection-wizard-adapter .connection-repository-changes p { margin: 4px 0; line-height: 1.5; }
+.connection-wizard-adapter .connection-organization-access { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .shared-aws-pilot-message { color: var(--green); margin: 0; }
 .shared-aws-pilot-error { color: var(--color-role-status-high-foreground); margin: 0; }
 .connection-intro { align-items: center; }
@@ -1230,6 +1271,7 @@ textarea::placeholder { color: var(--color-role-text-content-placeholder); }
   background: var(--color-role-surface-component-selected);
   color: var(--color-role-foreground-brand);
 }
+.connection-provider-picker button.active { color: var(--ink); box-shadow: inset 0 -2px 0 var(--denali-brand-primary); }
 .connection-form-grid label > span,
 .connection-scope-picker legend,
 .workspace-copy-item > strong { color: var(--color-role-text-content-subtle); }

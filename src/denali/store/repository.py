@@ -119,6 +119,7 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
         "platform_shared_google_workspace",
         "platform_shared_azure",
         "platform_shared_entra",
+        "platform_shared_azure_repos",
     }:
         credential_reference["platform_connection_id"] = internal_reference[
             "platform_connection_id"
@@ -4159,6 +4160,120 @@ class PostgresInventoryRepository:
         if created is None:
             raise RuntimeError("created connection was not found")
         return created
+
+    def begin_connection_onboarding(
+        self,
+        tenant_id: str,
+        *,
+        request_id: str,
+        return_state_sha256: str,
+        connection_id: str | None = None,
+        provider: str = "github",
+        platform_connection_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Relaunch one tenant-owned receipt; only the latest one-time state works."""
+
+        if provider not in {"github", "azure_repos"}:
+            raise ValueError("unsupported repository onboarding provider")
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                INSERT INTO connection_onboarding_workflow
+                  (tenant_id, request_id, connection_id, platform_connection_id,
+                   provider, management_source,
+                   stage, status, return_state_sha256, expires_at)
+                VALUES (%s::uuid, %s::uuid, %s::uuid, %s::uuid, %s, 'platform',
+                        'external_authorization', 'in_progress', %s,
+                        now() + interval '30 minutes')
+                ON CONFLICT (tenant_id, provider, request_id) DO UPDATE
+                SET return_state_sha256 = EXCLUDED.return_state_sha256,
+                    expires_at = EXCLUDED.expires_at, consumed_at = NULL,
+                    stage = 'external_authorization', status = 'in_progress',
+                    error_code = NULL, updated_at = now()
+                WHERE connection_onboarding_workflow.connection_id
+                      IS NOT DISTINCT FROM EXCLUDED.connection_id
+                  AND connection_onboarding_workflow.platform_connection_id
+                      IS NOT DISTINCT FROM EXCLUDED.platform_connection_id
+                RETURNING *
+                """,
+                (
+                    tenant_id,
+                    request_id,
+                    connection_id,
+                    platform_connection_id,
+                    provider,
+                    return_state_sha256,
+                ),
+            ).fetchone()
+        if row is None:
+            raise ValueError("onboarding request belongs to another connection")
+        return dict(row)
+
+    def fail_connection_onboarding(
+        self, tenant_id: str, workflow_id: str, *, return_state_sha256: str
+    ) -> None:
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE connection_onboarding_workflow
+                SET stage = 'attention_required', status = 'failed',
+                    error_code = 'setup_unavailable', consumed_at = now(), updated_at = now()
+                WHERE tenant_id = %s::uuid AND id = %s::uuid AND consumed_at IS NULL
+                  AND return_state_sha256 = %s
+                """,
+                (tenant_id, workflow_id, return_state_sha256),
+            )
+
+    def consume_connection_onboarding_return(
+        self, return_state_sha256: str, *, succeeded: bool
+    ) -> dict[str, Any] | None:
+        """The verified capability resolves the original tenant, never browser state."""
+
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                UPDATE connection_onboarding_workflow
+                SET consumed_at = now(), updated_at = now(),
+                    stage = CASE WHEN %s THEN 'select_repositories' ELSE 'attention_required' END,
+                    status = CASE WHEN %s THEN 'returned' ELSE 'failed' END,
+                    error_code = CASE WHEN %s THEN NULL ELSE 'authorization_failed' END
+                WHERE return_state_sha256 = %s AND consumed_at IS NULL
+                  AND expires_at > now() AND status = 'in_progress'
+                RETURNING id
+                """,
+                (succeeded, succeeded, succeeded, return_state_sha256),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def get_connection_onboarding(self, tenant_id: str, workflow_id: str) -> dict[str, Any] | None:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                SELECT id, provider, management_source, connection_id,
+                       platform_connection_id, stage, status,
+                       expires_at, created_at, updated_at, error_code
+                FROM connection_onboarding_workflow
+                WHERE tenant_id = %s::uuid AND id = %s::uuid
+                """,
+                (tenant_id, workflow_id),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def list_connection_onboarding(self, tenant_id: str) -> list[dict[str, Any]]:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, provider, management_source, connection_id,
+                       platform_connection_id, stage, status,
+                       expires_at, created_at, updated_at, error_code
+                FROM connection_onboarding_workflow
+                WHERE tenant_id = %s::uuid AND created_at > now() - interval '7 days'
+                ORDER BY created_at DESC, id LIMIT 20
+                """,
+                (tenant_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_connections(self, tenant_id: str) -> list[dict[str, Any]]:
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:

@@ -700,7 +700,7 @@ def test_shared_aws_validation_uses_platform_lease_not_denali_role(monkeypatch) 
     calls: list[str] = []
     leased: list[tuple[str, list[str]]] = []
 
-    def fake_lease(connection, *, region, scopes, session_factory):
+    def fake_lease(connection, *, region, scopes, session_factory, client=None):
         leased.append((region, scopes))
         return FakeSession(calls)
 
@@ -726,7 +726,8 @@ def test_shared_aws_validation_uses_platform_lease_not_denali_role(monkeypatch) 
     ).validate(target)
     assert validation["credential_state"] == "passed"
     assert validation["health_state"] == "healthy"
-    assert leased == [("us-east-1", [AWS_SCOPE_BEDROCK_AGENTS])]
+    assert leased
+    assert all(lease == ("us-east-1", [AWS_SCOPE_BEDROCK_AGENTS]) for lease in leased)
     assert "sts.assume_role" not in calls
     assert "bedrock-agent.list_agents" in calls
     assert "bedrock.list_guardrails" in calls

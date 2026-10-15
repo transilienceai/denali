@@ -1,6 +1,6 @@
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const SHARED_AZURE_SCOPES = ["azure.ai_services", "azure.ai_platform", "azure.ai_activity", "azure.code_to_cloud"];
+export const SHARED_AZURE_SCOPES = ["azure.ai_services", "azure.ai_platform", "azure.ai_activity", "azure.agent_runtime_activity", "azure.code_to_cloud"];
 export const SHARED_ENTRA_SCOPES = ["entra.ai_applications", "entra.permissions", "entra.sign_ins", "entra.directory_audits"];
 
 export function microsoftTenantId(value: string): string {

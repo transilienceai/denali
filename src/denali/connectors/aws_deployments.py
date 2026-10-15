@@ -164,14 +164,10 @@ class AwsConnectionDeploymentCollector:
             raise ValueError("AWS account boundary is incomplete")
 
         if connection.get("credential_type") == "platform_shared_aws":
-            from denali.integrations.shared_aws_session import leased_aws_session
+            from denali.integrations.shared_aws_session import shared_aws_session
 
-            regions = configuration.get("regions") or []
-            if len(regions) != 1:
-                raise ValueError("shared AWS collection requires one selected Region")
-            session = leased_aws_session(
+            session = shared_aws_session(
                 connection,
-                region=regions[0],
                 scopes=sorted(scopes & supported_scopes),
                 session_factory=self._session_factory,
             )

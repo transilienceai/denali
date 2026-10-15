@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "update",
+  "reason": "Unify native and Platform browser connector management with a server-driven catalog, durable organization-bound repository returns, explicit immutable repository selection, safe availability metadata and missing shared AWS/Azure/Entra/Azure Repos collection adapters. Existing native references, evidence and externally named capabilities retain their contracts; new provider modes and global activation remain separately gated.",
+  "capabilities": [
+    {"name": "unified-connection-onboarding", "kind": "not_externally_exposed", "scopes": []},
+    {"name": "shared-azure-repos-onboarding", "kind": "not_externally_exposed", "scopes": []},
+    {"name": "connection-validate", "kind": "write", "scopes": ["denali:write"]},
+    {"name": "connection-collect", "kind": "write", "scopes": ["denali:write"]}
+  ],
+  "contract_files": ["docs/development/capability-surface.json"],
+  "documentation_files": ["docs/development/unified-connections.md"],
+  "test_files": ["tests/test_connection_experience.py", "tests/test_connection_onboarding_postgres.py", "tests/test_shared_azure_repos.py", "tests/test_shared_aws_selected_resource.py", "tests/test_shared_azure_runtime.py", "tests/test_gateway_product_capabilities.py"],
+  "cli": {
+    "impact": "none",
+    "reason": "Provider consent, catalog and repository selection are private authenticated browser workflows. Existing connection validation, collection, jobs and result tool names, parameters and login scopes remain compatible; no typed command or package release is needed."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "The paired Platform PR updates private provider broker and handoff contracts, not Denali's versioned public results receiver or MCP adapter schemas. Existing externally named capabilities reuse product-owned tenant-scoped operations; no public source pin or tool registration changes."
+  }
+}

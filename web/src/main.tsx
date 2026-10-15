@@ -42,15 +42,23 @@ function HostedDenali() {
   useEffect(() => {
     configureApiTokenProvider(() => getToken());
     return () => configureApiTokenProvider(async () => null);
-  }, [getToken]);
+  }, [getToken, orgId]);
 
   useEffect(() => {
     setContext(null);
     setError(null);
     if (!isLoaded || !isSignedIn || !orgId) return;
-    void api.context()
-      .then(setContext)
-      .catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to authorize this workspace"));
+    const controller = new AbortController();
+    void api.context(controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        if (result.organization_id === orgId) setContext(result);
+        else setError("Workspace authorization changed. Select the organization again to continue.");
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Unable to authorize this workspace");
+      });
+    return () => controller.abort();
   }, [isLoaded, isSignedIn, orgId]);
 
   if (!isLoaded) return <div className="auth-shell"><div className="auth-status">Loading Denali…</div></div>;
@@ -58,9 +66,10 @@ function HostedDenali() {
     return <div className="auth-shell"><div className="auth-card"><h1>Select a workspace</h1><p>Denali requires an active Clerk organization.</p><OrganizationSwitcher hidePersonal organizationProfileMode="navigation" organizationProfileUrl="/profile" /></div></div>;
   }
   if (error) return <div className="auth-shell"><div className="auth-card"><h1>Workspace unavailable</h1><p>{error}</p><OrganizationSwitcher hidePersonal organizationProfileMode="navigation" organizationProfileUrl="/profile" /><UserButton userProfileMode="navigation" userProfileUrl="/profile" /></div></div>;
-  if (!context) return <div className="auth-shell"><div className="auth-status">Authorizing workspace…</div></div>;
+  if (!context || context.organization_id !== orgId) return <div className="auth-shell"><div className="auth-status">Authorizing workspace…</div></div>;
 
   return <App
+    key={orgId}
     canWrite={context.can_write}
     accountControls={<>
       <div className="identity-control"><span>Workspace</span><OrganizationSwitcher hidePersonal organizationProfileMode="navigation" organizationProfileUrl="/profile" /></div>

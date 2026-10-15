@@ -18,3 +18,45 @@ export function selectedGithubRepositoryIds(selected: readonly number[], availab
   }
   return [...selected].sort((left, right) => left - right);
 }
+
+export type GithubRepositoryIdentity = {
+  id: number | string;
+  node_id?: string;
+  full_name: string;
+  owner_id?: number;
+  owner_login?: string;
+};
+
+export function sameGithubRepositoryIdentity(left: GithubRepositoryIdentity, right: GithubRepositoryIdentity): boolean {
+  return String(left.id) === String(right.id)
+    && left.node_id === right.node_id && left.full_name === right.full_name
+    && left.owner_id === right.owner_id && left.owner_login === right.owner_login;
+}
+
+export function githubRepositoryChanges<T extends GithubRepositoryIdentity>(
+  saved: readonly GithubRepositoryIdentity[], available: readonly T[],
+) {
+  const before = new Map(saved.map((repo) => [String(repo.id), repo]));
+  const after = new Map(available.map((repo) => [String(repo.id), repo]));
+  return {
+    added: available.filter((repo) => !before.has(String(repo.id))),
+    removed: saved.filter((repo) => !after.has(String(repo.id))),
+    changed: available.filter((repo) => {
+      const original = before.get(String(repo.id));
+      return !!original && !sameGithubRepositoryIdentity(original, repo);
+    }),
+  };
+}
+
+/** Retain reviewed choices only while their immutable identity still matches. */
+export function retainGithubRepositorySelection(
+  selected: readonly number[], before: readonly GithubRepositoryIdentity[], after: readonly GithubRepositoryIdentity[],
+): number[] {
+  const previous = new Map(before.map((repo) => [String(repo.id), repo]));
+  const current = new Map(after.map((repo) => [String(repo.id), repo]));
+  return [...new Set(selected)].filter((id) => {
+    const left = previous.get(String(id));
+    const right = current.get(String(id));
+    return !!left && !!right && sameGithubRepositoryIdentity(left, right);
+  }).sort((left, right) => left - right);
+}
