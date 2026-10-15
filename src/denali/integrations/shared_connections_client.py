@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,7 +19,13 @@ class SharedConnectionsError(Exception):
 
 
 class SharedConnectionsClient:
-    def __init__(self, origin: str, machine_secret_key: str):
+    def __init__(
+        self,
+        origin: str,
+        machine_secret_key: str,
+        *,
+        allowed_clerk_org_ids: frozenset[str] | None = None,
+    ):
         origin = origin.rstrip("/")
         parsed = urlsplit(origin)
         if (
@@ -35,6 +42,26 @@ class SharedConnectionsClient:
             raise ValueError("Denali shared-connections machine secret is required")
         self._origin = origin
         self._clerk = Clerk(bearer_auth=machine_secret_key)
+        self._allowed_clerk_org_ids = allowed_clerk_org_ids
+
+    @staticmethod
+    def allowed_org_ids_from_environment() -> frozenset[str]:
+        org_ids = frozenset(
+            value.strip()
+            for value in os.environ.get("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "").split(",")
+            if value.strip()
+        )
+        if any(not re.fullmatch(r"org_[A-Za-z0-9]+", value) for value in org_ids):
+            raise ValueError("shared Microsoft allowlist contains an invalid Clerk org ID")
+        return org_ids
+
+    def allows_org(self, clerk_org_id: str) -> bool:
+        # Microsoft-only admission: preserve this dev branch's existing AWS/GitHub
+        # request/from_environment behavior and their Platform entitlement checks.
+        allowed = self._allowed_clerk_org_ids
+        if allowed is None:
+            allowed = self.allowed_org_ids_from_environment()
+        return clerk_org_id in allowed
 
     @classmethod
     def from_environment(cls) -> SharedConnectionsClient | None:

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "update",
+  "reason": "Refresh the focused default-off Microsoft development backport for an Entra-only rollout, verified against reviewed production source 4974a196. The metadata adapter is unchanged; added regressions prove Azure stays off and native Microsoft/Workspace dependencies remain intact. Preserve shared AWS/GitHub transport, schema, jobs and external read catalog; no provider/OAuth grant or gateway expansion is activated.",
+  "capabilities": [
+    {"name": "shared-microsoft-dev-onboarding", "kind": "not_externally_exposed", "scopes": []}
+  ],
+  "contract_files": ["docs/development/shared-microsoft-contract.v1.json"],
+  "documentation_files": ["docs/development/shared-microsoft-connections.md"],
+  "test_files": ["tests/test_shared_microsoft_api.py", "tests/test_shared_microsoft_dev_compatibility.py", "tests/test_shared_microsoft_postgres.py"],
+  "cli": {
+    "impact": "generic_tools",
+    "reason": "Existing dev inventory/activity/finding reads consume product-owned collected evidence. Setup and job controls remain in the authenticated app APIs; no tool name, typed command, login scope or package release changes."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "The existing development results receiver/catalog is preserved; only the separately paired shared-connection broker gains Microsoft support. Main's expanded lifecycle/job gateway is not ported to dev."
+  }
+}

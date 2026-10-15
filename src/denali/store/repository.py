@@ -112,6 +112,10 @@ def _connection_response(row: dict[str, Any]) -> dict[str, Any]:
         credential_reference["platform_connection_id"] = internal_reference[
             "platform_connection_id"
         ]
+    elif credential_type in {"platform_shared_azure", "platform_shared_entra"}:
+        credential_reference["platform_connection_id"] = internal_reference[
+            "platform_connection_id"
+        ]
     elif credential_type == "platform_shared_github":
         credential_reference["platform_connection_id"] = internal_reference[
             "platform_connection_id"

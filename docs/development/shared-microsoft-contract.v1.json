@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "status": "default_off_entra_first_development_backport",
+  "reviewed_source": "4974a196da56645a9132e3cf05173979d0f2847a",
+  "activation_scope": "entra_only",
+  "azure_activation": "deferred",
+  "development_base": "7e853c0c139921b807b838c0622d5c8aedab6cd1",
+  "same_origin_browser_prefix": "/api/v1/shared/connections",
+  "organization_allowlist": "DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS",
+  "flags": {
+    "azure": "DENALI_PLATFORM_AZURE_ENABLED",
+    "entra": "DENALI_PLATFORM_ENTRA_ENABLED"
+  },
+  "browser_operations": [
+    {"method": "GET", "path": "/v1/shared/connections/{provider}/config", "role": "member", "disposition": "not_externally_exposed"},
+    {"method": "GET", "path": "/v1/shared/connections/{provider}", "role": "member", "disposition": "not_externally_exposed"},
+    {"method": "POST", "path": "/v1/shared/connections/{provider}", "role": "admin", "disposition": "authenticated_browser_handoff"},
+    {"method": "GET", "path": "/v1/shared/connections/{provider}/{connection_id}/validation", "role": "member", "disposition": "not_externally_exposed"},
+    {"method": "GET", "path": "/v1/shared/connections/{provider}/{connection_id}/setup", "role": "admin", "disposition": "authenticated_browser_handoff"},
+    {"method": "POST", "path": "/v1/shared/connections/{provider}/{connection_id}/setup", "role": "admin", "disposition": "authenticated_browser_handoff"},
+    {"method": "GET", "path": "/v1/shared/connections/azure/{connection_id}/setup.sh", "role": "member", "disposition": "not_externally_exposed"},
+    {"method": "POST", "path": "/v1/shared/connections/{provider}/{connection_id}/validate", "role": "admin", "disposition": "authenticated_browser_handoff"},
+    {"method": "POST", "path": "/v1/shared/connections/{provider}/{connection_id}/use-in-denali", "role": "admin", "disposition": "authenticated_browser_handoff"},
+    {"method": "POST", "path": "/v1/shared/connections/{provider}/{connection_id}/disable", "role": "admin", "disposition": "authenticated_browser_handoff"},
+    {"method": "DELETE", "path": "/v1/shared/connections/{provider}/{connection_id}", "role": "admin", "disposition": "authenticated_browser_handoff"}
+  ],
+  "azure": {
+    "credential_type": "platform_shared_azure",
+    "scopes": ["azure.ai_services", "azure.ai_platform", "azure.ai_activity", "azure.code_to_cloud"],
+    "operations": ["subscription_metadata", "resources", "activity"],
+    "page_size_max": 100,
+    "page_token_max": 2048,
+    "subscriptions_max": 8,
+    "window_hours_max": 24
+  },
+  "entra": {
+    "credential_type": "platform_shared_entra",
+    "fixed_scope_bundle": ["entra.ai_applications", "entra.permissions", "entra.sign_ins", "entra.directory_audits"],
+    "operations": ["service_principals", "oauth_grants", "app_role_assignments", "sign_ins", "directory_audits"],
+    "page_size_max": 100,
+    "page_token_max": 8192,
+    "sign_in_app_ids_max": 10,
+    "window_hours_max": 24
+  },
+  "external_result_catalog": "unchanged_existing_development_reads",
+  "new_tool_names": [],
+  "new_login_scopes": [],
+  "provider_writes": "customer_approved_consent_and_reader_script_only_never_denali_execution",
+  "provider_target_admission": "exact_owner_reviewed_tenant_and_selected_subscriptions_per_development_organization"
+}
