@@ -1,5 +1,6 @@
 import type { Connection } from "./types";
 import type { ConnectionCatalogItem } from "./api";
+import { connectionCollectionStatus } from "./connectionCollections.ts";
 
 type ConnectionProvider = Connection["provider"];
 
@@ -68,16 +69,11 @@ export function connectionJourney(connection?: Connection, phase: ConnectionJour
     && connection.actions?.collect === true;
   const verified = (connection?.health_state === "healthy" || exactValidation) && !platformUnavailable;
   const hasBoundary = Boolean(connection && (connection.credential_reference.type.startsWith("platform_shared_") || validationRunning || connection.last_validation || verified));
-  const collection = connection?.provider === "github" || connection?.provider === "azure_repos"
-    ? connection.last_source_collection
-    : connection?.provider === "entra" || connection?.provider === "google_workspace"
-      ? connection.last_evidence_collection
-      : connection?.last_deployment_collection;
-  const collecting = connection?.source_collection_state === "running" || connection?.evidence_collection_state === "running" || connection?.deployment_collection_state === "running";
+  const collection = connection ? connectionCollectionStatus(connection) : null;
   const state = (complete: boolean, current: boolean) => complete ? "complete" : current ? "current" : "pending";
   return [
     { label: "Grant access", state: connection?.platform_availability && ["disabled", "needs_scope_grant", "requires_shared_setup"].includes(connection.platform_availability) ? "attention" : state(hasBoundary || phase !== "grant", !hasBoundary && phase === "grant") },
     { label: "Verify access", state: platformUnavailable || (connection?.last_validation && !verified && !validationRunning) ? "attention" : state(Boolean(verified), validationRunning || (hasBoundary && !verified) || (!connection && phase === "verify")) },
-    { label: "Collect evidence", state: collection && collection.state !== "complete" && !collecting ? "attention" : state(collection?.state === "complete", collecting || (Boolean(verified) && !collection) || (!connection && phase === "collect")) },
+    { label: "Collect evidence", state: collection?.attention ? "attention" : state(collection?.complete === true, collection?.running === true || (Boolean(verified) && !collection?.complete) || (!connection && phase === "collect")) },
   ];
 }

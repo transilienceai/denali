@@ -1,4 +1,5 @@
 import type { Connection } from "./types";
+import { connectionCollectionStatus } from "./connectionCollections.ts";
 
 export type ConnectionProgressStepState = "complete" | "current" | "pending" | "attention";
 
@@ -23,19 +24,6 @@ const PROVIDER_LABELS: Record<Connection["provider"], string> = {
   google_workspace: "Google Workspace",
 };
 
-function collectionState(connection: Connection) {
-  if (connection.provider === "github" || connection.provider === "azure_repos") {
-    return connection.source_collection_state;
-  }
-  if (connection.provider === "entra" || connection.provider === "google_workspace") {
-    return connection.evidence_collection_state;
-  }
-  if (connection.provider === "aws" && connection.runtime_collection_state === "running") {
-    return connection.runtime_collection_state;
-  }
-  return connection.deployment_collection_state;
-}
-
 function busyAction(connection: Connection, busy: string | null) {
   const suffix = `:${connection.id}`;
   return busy?.endsWith(suffix) ? busy.slice(0, -suffix.length) : null;
@@ -44,7 +32,7 @@ function busyAction(connection: Connection, busy: string | null) {
 export function getConnectionProgress(connection: Connection, busy: string | null): ConnectionProgress | null {
   const provider = PROVIDER_LABELS[connection.provider];
   const action = busyAction(connection, busy);
-  const collecting = collectionState(connection) === "running" || action?.startsWith("collect") === true;
+  const collecting = connectionCollectionStatus(connection).running || action?.startsWith("collect") === true;
   const validating = connection.validation_state === "running"
     || action === "validate"
     || action === "complete"
