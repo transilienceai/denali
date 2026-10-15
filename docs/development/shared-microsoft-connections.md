@@ -93,13 +93,41 @@ The canonical fixed reads are:
 | Azure | `subscription_metadata` with an explicitly declared Azure scope; `resources` with an allowlisted resource type; `activity` with a 24-hour maximum window. Every read binds the selected subscription and provider tenant. |
 | Entra | `service_principals`, `oauth_grants`, `app_role_assignments` with one service-principal UUID, `sign_ins` with 1–10 app UUIDs and a 24-hour maximum window, and `directory_audits` with a 24-hour maximum ApplicationManagement window. Every read binds the provider tenant. |
 
-Reads contain at most 100 projected dictionary items, `operation`, `tenant_id`,
+Requests use a page-size hint of at most 100. Reads contain at most that many
+projected dictionary items, `operation`, `tenant_id`,
 Azure `subscription_id` and an opaque `next_page_token`. Azure cursors are bounded
 at 2048 characters and Entra at 8192; repeat cursors, invalid bindings, oversized
 pages and record limits fail closed. Denali never sends provider URLs, Graph paths,
 arbitrary filters, ARM queries or tokens. Shared Entra activity collection covers
 24 hours per run, explicitly shown in the UI and result `lookback_hours`; native
 Entra's existing 168-hour default is preserved.
+
+### Entra directory-audit response compatibility
+
+For **only** Entra `directory_audits` with a requested `page_size=100`, the paired
+Platform broker and Denali reader accept up to 200 projected dictionary items in
+one response. A production Graph response contained 103 valid audit records for
+the 100-item hint; rejecting the entire page left directory-audit coverage failed
+while the other five planes completed. This is a bounded compatibility exception,
+not a larger request, a new permission, or a general Graph page-size guarantee.
+
+Neither side slices an oversized page: every accepted record and the complete
+opaque cursor continue through the existing pagination path. Responses of 201 or
+more items fail closed. Smaller audit requests retain their exact requested bound;
+all other Entra and Azure operations remain strict. Tenant/operation binding,
+dictionary-item validation, the 8192-character Entra cursor bound, repeated-cursor
+denial, 200-page/20,000-record limits and the maximum 24-hour shared activity
+window are unchanged. Metadata that does not match Denali's AI catalog must not
+create AI assets or activity merely because coverage completes.
+
+Ship the reviewed broker and this reader fix together; the broker's accepted
+response envelope must not exceed the deployed Denali reader's envelope. Then
+retry durable collection only for the approved shared Entra connection and verify
+all six terminal coverage planes, real normalized inventory/activity, and existing
+API/CLI/MCP read parity. A queued retry, healthy validation, or mocked six-plane
+test is not live collection acceptance. No database migration, secret, feature
+flag, OAuth scope, public tool schema or CLI package release is needed. Azure
+activation and other connector behavior remain outside this change.
 
 The named MCP/CLI connection summaries, validation/collection job starts and job
 polling, inventory, activity and finding tools reuse this evidence. Setup summaries
