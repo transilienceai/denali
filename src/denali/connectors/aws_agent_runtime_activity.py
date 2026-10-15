@@ -420,9 +420,7 @@ class AwsAgentRuntimeRegionConnector:
             if not next_token:
                 break
             if len(groups) >= MAX_LOG_GROUPS:
-                warnings.append(
-                    f"AgentCore log-group safety limit reached at {MAX_LOG_GROUPS}"
-                )
+                warnings.append(f"AgentCore log-group safety limit reached at {MAX_LOG_GROUPS}")
                 break
             if not isinstance(next_token, str) or next_token in seen:
                 raise AwsAgentRuntimeCollectionError("invalid/repeated log-group pagination token")
@@ -486,9 +484,7 @@ class AwsAgentRuntimeRegionConnector:
                 event_bytes += size
             next_token = response.get("nextToken")
             if len(events) == max_events and next_token:
-                warnings.append(
-                    f"{log_group}: runtime event safety limit reached at {max_events}"
-                )
+                warnings.append(f"{log_group}: runtime event safety limit reached at {max_events}")
                 return events, event_bytes, warnings
             if not next_token:
                 return events, event_bytes, warnings
@@ -560,9 +556,7 @@ class AwsConnectionAgentRuntimeCollector:
         session = self._assumed_session(connection, account_id)
         regions = _connection_regions(session, configuration)
         end_time = _aware(self._now())
-        cursor = repository.latest_aws_agent_runtime_cursor(
-            tenant_id, str(connection["id"])
-        )
+        cursor = repository.latest_aws_agent_runtime_cursor(tenant_id, str(connection["id"]))
         start_time, catchup_capped = _collection_window(
             end_time,
             cursor=cursor,
@@ -634,14 +628,10 @@ class AwsConnectionAgentRuntimeCollector:
 
     def _assumed_session(self, connection: dict[str, Any], account_id: str) -> Any:
         if connection.get("credential_type") == "platform_shared_aws":
-            from denali.integrations.shared_aws_session import leased_aws_session
+            from denali.integrations.shared_aws_session import shared_aws_session
 
-            regions = connection.get("configuration", {}).get("regions") or []
-            if len(regions) != 1:
-                raise ValueError("shared AWS runtime collection requires one selected Region")
-            session = leased_aws_session(
+            session = shared_aws_session(
                 connection,
-                region=regions[0],
                 scopes=[AWS_SCOPE_AGENT_RUNTIME_ACTIVITY],
                 session_factory=self._session_factory,
             )

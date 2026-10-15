@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 AWS_COVERAGE_RESOURCE = "selected-resource"
 SELECTED_LAMBDA_PLANE = "aws_selected_lambda_configuration"
@@ -85,8 +86,11 @@ def connection_selection(connection: dict[str, Any]) -> LambdaSelection | None:
     if mode != AWS_COVERAGE_RESOURCE and selected is None:
         return None
     selection = parse_selection(selected)
-    if mode != AWS_COVERAGE_RESOURCE or connection.get("credential_type") != "aws_assume_role":
-        raise ValueError("selected resource requires a native exact-resource AWS connection")
+    if mode != AWS_COVERAGE_RESOURCE or connection.get("credential_type") not in {
+        "aws_assume_role",
+        "platform_shared_aws",
+    }:
+        raise ValueError("selected resource requires an exact-resource AWS connection")
     if connection.get("provider") != "aws" or connection.get("declared_scopes") != [
         "aws.code_to_cloud"
     ]:
@@ -106,6 +110,19 @@ def connection_selection(connection: dict[str, Any]) -> LambdaSelection | None:
     credential = connection.get("credential_reference", {})
     if not isinstance(credential, dict):
         raise ValueError("selected reader credential boundary is invalid")
+    if connection.get("credential_type") == "platform_shared_aws":
+        try:
+            platform_id = str(UUID(str(credential.get("platform_connection_id"))))
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("selected shared AWS reference is invalid") from None
+        if (
+            platform_id != str(connection.get("id"))
+            or "external_id" in credential
+            or not re.fullmatch(
+                r"org_[A-Za-z0-9]+", str(connection.get("clerk_organization_id", ""))
+            )
+        ):
+            raise ValueError("selected shared AWS identity boundary differs")
     role_match = _ROLE.fullmatch(str(credential.get("role_arn", "")))
     if (
         role_match is None

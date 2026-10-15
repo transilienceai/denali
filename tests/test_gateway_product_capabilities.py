@@ -390,10 +390,14 @@ def test_exhaustive_public_surface_map_covers_every_explicit_route_and_browser_m
     root = Path(__file__).resolve().parents[1]
     mapped = json.loads((root / "docs/development/capability-surface.json").read_text())
     actual = set()
-    product_sources = ["src/denali/api/app.py", "src/denali/resource_writes/api.py"]
-    for node in (
-        node
-        for source in product_sources
+    product_sources = [
+        ("src/denali/api/app.py", "app", ""),
+        ("src/denali/resource_writes/api.py", "app", ""),
+        ("src/denali/api/shared_azure_repos.py", "router", "/v1/shared/connections/azure-repos"),
+    ]
+    for node, receiver, prefix in (
+        (node, receiver, prefix)
+        for source, receiver, prefix in product_sources
         for node in ast.walk(ast.parse((root / source).read_text()))
     ):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -403,14 +407,14 @@ def test_exhaustive_public_surface_map_covers_every_explicit_route_and_browser_m
                 isinstance(decorator, ast.Call)
                 and isinstance(decorator.func, ast.Attribute)
                 and isinstance(decorator.func.value, ast.Name)
-                and decorator.func.value.id == "app"
+                and decorator.func.value.id == receiver
                 and decorator.func.attr in {"get", "post", "patch", "delete", "put"}
                 and decorator.args
             ):
                 if isinstance(decorator.args[0], ast.Name):
                     assert decorator.args[0].id == "INTERNAL_PATH"
                     continue  # Versioned product-owned receiver, checked by its contract tests.
-                route = ast.literal_eval(decorator.args[0])
+                route = prefix + ast.literal_eval(decorator.args[0])
                 if not route.startswith("/internal/"):
                     actual.add((decorator.func.attr.upper(), route, node.name))
     rows = mapped["operations"]

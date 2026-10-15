@@ -45,6 +45,12 @@ from denali.api.clerk_admin import (
 )
 from denali.api.collection import COLLECTION_KINDS_BY_PROVIDER, run_durable_collection_job
 from denali.api.connection_capabilities import connection_summary, setup_summary, shared_summary
+from denali.api.connection_catalog import (
+    connection_presentation,
+    platform_statuses,
+    provider_catalog,
+)
+from denali.api.connection_workflows import new_return_state, state_digest, workflow_projection
 from denali.api.evidence_import import (
     MAX_REPORT_BYTES,
     EvidenceReportStore,
@@ -64,6 +70,7 @@ from denali.api.github_oidc import (
     GitHubOidcAuthenticationError,
     GitHubOidcVerifier,
 )
+from denali.api.shared_azure_repos import register_shared_azure_repos_routes
 from denali.api.validation import run_durable_validation_job
 from denali.connections import (
     AWS_COVERAGE_AUTOMATIC,
@@ -124,6 +131,13 @@ from denali.domain import ActivityBatch, FindingBatch, InventoryBatch
 from denali.domain.inventory import ASSET_CATEGORY_KINDS, InventoryCategory
 from denali.integrations import shared_jira
 from denali.integrations.shared_aws_probe import probe_shared_bedrock_agents
+from denali.integrations.shared_aws_session import shared_aws_selected_resource_enabled
+from denali.integrations.shared_azure_repos import (
+    AzureReposCollectorRouter,
+    AzureReposValidatorRouter,
+    shared_azure_repos_enabled,
+)
+from denali.integrations.shared_azure_runtime import AzureRuntimeCollectorRouter
 from denali.integrations.shared_connections_client import (
     SharedConnectionsClient,
     SharedConnectionsError,
@@ -135,6 +149,7 @@ from denali.integrations.shared_github import (
     SharedGitHubAppClient,
     normalize_shared_repositories,
     safe_install_url,
+    same_github_authorization_boundary,
     shared_github_binding_id,
     shared_github_enabled,
 )
@@ -740,20 +755,27 @@ class AwsConnectionCreate(BaseModel):
             AWS_COVERAGE_RESOURCE,
             connection_selection,
         )
+
         if self.selected_resource is not None or self.coverage_mode == AWS_COVERAGE_RESOURCE:
             reader_role = f"arn:{self.partition}:iam::{self.account_id}:role/{self.role_name}"
             selected = self.selected_resource.model_dump() if self.selected_resource else None
-            connection_selection({
-                "provider": "aws", "credential_type": "aws_assume_role",
-                "declared_scopes": self.declared_scopes,
-                "credential_reference": {"role_arn": reader_role},
-                "configuration": {
-                    "account_id": self.account_id, "partition": self.partition,
-                    "coverage_mode": self.coverage_mode, "regions": self.regions,
-                    "deployment_region": self.deployment_region, "role_name": self.role_name,
-                    "selected_resource": selected,
-                },
-            })
+            connection_selection(
+                {
+                    "provider": "aws",
+                    "credential_type": "aws_assume_role",
+                    "declared_scopes": self.declared_scopes,
+                    "credential_reference": {"role_arn": reader_role},
+                    "configuration": {
+                        "account_id": self.account_id,
+                        "partition": self.partition,
+                        "coverage_mode": self.coverage_mode,
+                        "regions": self.regions,
+                        "deployment_region": self.deployment_region,
+                        "role_name": self.role_name,
+                        "selected_resource": selected,
+                    },
+                }
+            )
         return self
 
 
@@ -764,11 +786,33 @@ class SharedAwsConnectionCreate(BaseModel):
     partition: Literal["aws", "aws-us-gov", "aws-cn"] = "aws"
     role_name: Literal["TransilienceSecurityAuditRole"] = "TransilienceSecurityAuditRole"
     deployment_region: str = "us-east-1"
-    coverage_mode: Literal["automatic", "selected"] = AWS_COVERAGE_AUTOMATIC
+    coverage_mode: Literal["automatic", "selected", "selected-resource"] = AWS_COVERAGE_AUTOMATIC
+    selected_resource: AwsSelectedResource | None = None
     regions: list[str] = Field(default_factory=list, max_length=40)
     declared_scopes: list[str] = Field(
         default_factory=lambda: list(AWS_SCOPES), min_length=1, max_length=len(AWS_SCOPES)
     )
+
+    @model_validator(mode="after")
+    def selected_resource_boundary(self) -> SharedAwsConnectionCreate:
+        if self.coverage_mode == "selected-resource" or self.selected_resource is not None:
+            from denali.connections.aws_selected_resource import parse_selection
+
+            selection = parse_selection(
+                self.selected_resource.model_dump() if self.selected_resource else None
+            )
+            if (
+                self.coverage_mode != "selected-resource"
+                or self.declared_scopes != ["aws.code_to_cloud"]
+                or self.regions != [selection.region]
+                or self.deployment_region != selection.region
+                or self.account_id != selection.account_id
+                or self.partition != selection.partition
+            ):
+                raise ValueError(
+                    "selected-resource setup requires its exact account, Region and scope"
+                )
+        return self
 
 
 class SharedAwsReadProbeInput(BaseModel):
@@ -780,12 +824,67 @@ class SharedAwsReadProbeInput(BaseModel):
 class SharedAwsUseInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    region: str = Field(min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")
+    region: str | None = Field(
+        default=None, min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$"
+    )
+    coverage_mode: Literal["automatic", "selected", "selected-resource"] = AWS_COVERAGE_SELECTED
+    selected_resource: AwsSelectedResource | None = None
+    regions: list[Annotated[str, Field(pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$")]] = Field(
+        default_factory=list, max_length=40
+    )
+    deployment_region: str | None = Field(
+        default=None, min_length=5, max_length=32, pattern=r"^[a-z]{2}(?:-[a-z]+)+-[0-9]+$"
+    )
     declared_scopes: list[str] = Field(
         default_factory=lambda: [AWS_SCOPE_BEDROCK_AGENTS],
         min_length=1,
         max_length=len(AWS_SCOPES),
     )
+
+    @model_validator(mode="after")
+    def selected_boundary(self) -> SharedAwsUseInput:
+        if self.coverage_mode == "selected-resource" or self.selected_resource is not None:
+            from denali.connections.aws_selected_resource import parse_selection
+
+            selection = parse_selection(
+                self.selected_resource.model_dump() if self.selected_resource else None
+            )
+            if (
+                self.coverage_mode != "selected-resource"
+                or self.declared_scopes != ["aws.code_to_cloud"]
+                or self.region is not None
+                or self.regions != [selection.region]
+                or self.deployment_region not in {None, selection.region}
+            ):
+                raise ValueError("selected-resource attachment requires exact Region and scope")
+            self.deployment_region = selection.region
+            return self
+        if self.region is not None:
+            if (
+                self.regions
+                or self.coverage_mode != AWS_COVERAGE_SELECTED
+                or self.deployment_region not in {None, self.region}
+            ):
+                raise ValueError("legacy Region cannot be combined with another coverage boundary")
+            self.regions = [self.region]
+            self.deployment_region = self.region
+        if len(set(self.regions)) != len(self.regions):
+            raise ValueError("shared AWS Regions must be unique")
+        if self.coverage_mode == AWS_COVERAGE_SELECTED:
+            if not self.regions:
+                raise ValueError("selected coverage requires Regions")
+            self.deployment_region = self.deployment_region or self.regions[0]
+            if self.deployment_region not in self.regions:
+                raise ValueError("deployment Region must be selected")
+        else:
+            if self.regions:
+                raise ValueError("automatic coverage discovers enabled Regions")
+            self.deployment_region = self.deployment_region or "us-east-1"
+        if not set(self.declared_scopes) <= set(AWS_SCOPES) or len(
+            set(self.declared_scopes)
+        ) != len(self.declared_scopes):
+            raise ValueError("invalid shared AWS scopes")
+        return self
 
 
 class SharedGitHubUseInput(BaseModel):
@@ -811,6 +910,13 @@ class SharedGitHubUseInput(BaseModel):
         ):
             raise ValueError("shared GitHub repository IDs are duplicated")
         return self
+
+
+class SharedGitHubSetupInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID = Field(default_factory=uuid4)
+    connection_id: UUID | None = None
 
 
 class SharedGcpProject(BaseModel):
@@ -877,7 +983,7 @@ class SharedWorkspaceAttach(BaseModel):
 class SharedMicrosoftUseInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    declared_scopes: list[str] = Field(min_length=1, max_length=4)
+    declared_scopes: list[str] = Field(min_length=1, max_length=5)
 
     @model_validator(mode="after")
     def check_scopes(self):
@@ -911,11 +1017,12 @@ class SharedMicrosoftCreate(SharedMicrosoftUseInput):
             raise ValueError("display_name must not be blank")
         self.display_name = self.display_name.strip()
         if self.subscriptions is not None:
-            selected_subscriptions([
-                item.model_dump(mode="json", exclude_none=True) for item in self.subscriptions
-            ])
+            selected_subscriptions(
+                [item.model_dump(mode="json", exclude_none=True) for item in self.subscriptions]
+            )
             self.subscriptions.sort(key=lambda item: str(item.id))
         return self
+
 
 class AzureConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1310,8 +1417,9 @@ def create_app(
             azure_deployment_collector or AzureConnectionDeploymentCollector(),
             configured_shared_connections_client,
         )
-        app.state.azure_agent_runtime_collector = (
-            azure_agent_runtime_collector or AzureConnectionAgentRuntimeCollector()
+        app.state.azure_agent_runtime_collector = AzureRuntimeCollectorRouter(
+            azure_agent_runtime_collector or AzureConnectionAgentRuntimeCollector(),
+            configured_shared_connections_client,
         )
         app.state.aws_deployment_collector = (
             aws_deployment_collector or AwsConnectionDeploymentCollector()
@@ -1344,15 +1452,29 @@ def create_app(
             else legacy_github_collector
         )
         app.state.azure_repos_client = configured_azure_repos_client
-        app.state.azure_repos_connection_validator = azure_repos_connection_validator or (
+        native_azure_repos_validator = azure_repos_connection_validator or (
             AzureReposConnectionValidator(configured_azure_repos_client)
             if configured_azure_repos_client is not None
             else None
         )
-        app.state.azure_repos_repository_collector = azure_repos_repository_collector or (
+        native_azure_repos_collector = azure_repos_repository_collector or (
             AzureReposRepositoryCollector(configured_azure_repos_client)
             if configured_azure_repos_client is not None
             else None
+        )
+        app.state.azure_repos_connection_validator = (
+            AzureReposValidatorRouter(
+                native_azure_repos_validator, configured_shared_connections_client
+            )
+            if configured_shared_connections_client
+            else native_azure_repos_validator
+        )
+        app.state.azure_repos_repository_collector = (
+            AzureReposCollectorRouter(
+                native_azure_repos_collector, configured_shared_connections_client
+            )
+            if configured_shared_connections_client
+            else native_azure_repos_collector
         )
         native_entra_collector = entra_connection_collector or (
             EntraConnectionCollector(configured_entra_client) if configured_entra_client else None
@@ -1418,10 +1540,13 @@ def create_app(
             request.url.path == prefix or request.url.path.startswith(prefix + "/")
             for prefix in (
                 "/v1/shared/connections/gcp",
+                "/v1/shared/connections/aws",
                 "/v1/shared/connections/github",
                 "/v1/shared/connections/google-workspace",
                 "/v1/shared/connections/azure",
                 "/v1/shared/connections/entra",
+                "/v1/shared/connections/azure-repos",
+                "/v1/connections/onboarding",
             )
         ):
             # Rejected JSON/URL values can contain accidental customer credentials.
@@ -2247,11 +2372,130 @@ def create_app(
             ) from error
         return {"user_id": user_id, "email": email, "role": account.role}
 
+    @app.get("/v1/connections/catalog")
+    def connection_provider_catalog(request: Request, response: Response) -> dict[str, Any]:
+        _context(request)
+        state = request.app.state
+        client = state.shared_connections_client
+        identity = getattr(request.state, "denali_auth", None)
+        reason = (
+            "hosting_required"
+            if state.auth_mode != "clerk"
+            else "bridge_not_configured"
+            if client is None
+            else "organization_not_admitted"
+            if not client.allows_org(identity.organization_id)
+            else None
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return provider_catalog(
+            native_available={
+                "aws": state.connection_validator is not None,
+                "azure": state.azure_connection_validator is not None,
+                "entra": state.entra_consent_client is not None,
+                "gcp": state.gcp_setup_launcher is not None,
+                "github": state.github_app_client is not None,
+                "google_workspace": state.google_workspace_operator is not None,
+                "azure_repos": state.azure_repos_client is not None,
+            },
+            shared_enabled={
+                "aws": True,
+                "github": shared_github_enabled(),
+                "gcp": shared_gcp_enabled(),
+                "azure": shared_microsoft_enabled("azure"),
+                "entra": shared_microsoft_enabled("entra"),
+                "google_workspace": shared_google_workspace_enabled(),
+                "azure_repos": shared_azure_repos_enabled(),
+            },
+            bridge_reason=reason,
+        )
+
+    @app.get("/v1/connections/onboarding")
+    def list_connection_onboarding(request: Request, response: Response) -> dict[str, Any]:
+        repo, tenant = _context(request)
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "items": [workflow_projection(row) for row in repo.list_connection_onboarding(tenant)]
+        }
+
+    @app.get("/v1/connections/onboarding/callback")
+    def connection_onboarding_callback(request: Request) -> RedirectResponse:
+        # This receipt restores navigation only. Platform/provider readiness must
+        # still be rechecked through authenticated inventory and exact selection.
+        params = request.query_params
+        if set(params) != {"state", "status"} or any(
+            len(params.getlist(key)) != 1 for key in params
+        ):
+            raise HTTPException(status_code=400, detail="invalid onboarding return")
+        if params["status"] not in {"succeeded", "failed"}:
+            raise HTTPException(status_code=400, detail="invalid onboarding return")
+        try:
+            digest = state_digest(params["state"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid onboarding return") from None
+        repo = request.app.state.repository
+        if repo is None:
+            raise HTTPException(status_code=503, detail="onboarding is unavailable")
+        workflow = repo.consume_connection_onboarding_return(
+            digest, succeeded=params["status"] == "succeeded"
+        )
+        if workflow is None:
+            raise HTTPException(
+                status_code=400, detail="onboarding return is expired or already used"
+            )
+        return RedirectResponse(
+            f"/connections?onboarding={workflow['id']}",
+            status_code=303,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
+
+    @app.get("/v1/connections/onboarding/{workflow_id}")
+    def connection_onboarding_detail(
+        request: Request, response: Response, workflow_id: UUID
+    ) -> dict[str, Any]:
+        repo, tenant = _context(request)
+        row = repo.get_connection_onboarding(tenant, str(workflow_id))
+        if row is None:
+            raise HTTPException(status_code=404, detail="onboarding workflow not found")
+        response.headers["Cache-Control"] = "no-store"
+        return workflow_projection(row)
+
+    def _present_connections(request: Request, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        identity = getattr(request.state, "denali_auth", None)
+        statuses = platform_statuses(
+            rows,
+            client=request.app.state.shared_connections_client,
+            org=identity.organization_id if identity is not None else None,
+            enabled={
+                "aws": True,
+                "github": shared_github_enabled(),
+                "gcp": shared_gcp_enabled(),
+                "azure": shared_microsoft_enabled("azure"),
+                "entra": shared_microsoft_enabled("entra"),
+                "google_workspace": shared_google_workspace_enabled(),
+                "azure_repos": shared_azure_repos_enabled(),
+            },
+        )
+        return [
+            connection_presentation(
+                row,
+                can_write=identity.can_write if identity is not None else True,
+                platform=statuses.get(
+                    str((row.get("credential_reference") or {}).get("platform_connection_id"))
+                ),
+            )
+            for row in rows
+        ]
+
     @app.get("/v1/connections")
     def list_connections(request: Request) -> dict[str, Any]:
         repo, current_tenant = _context(request)
         rows = repo.list_connections(current_tenant)
-        return {"items": [_with_validation_state(request, current_tenant, row) for row in rows]}
+        return {
+            "items": _present_connections(
+                request, [_with_validation_state(request, current_tenant, row) for row in rows]
+            )
+        }
 
     @app.get("/v1/connection-summaries")
     def list_connection_summaries(
@@ -2300,12 +2544,15 @@ def create_app(
         client, clerk_org_id = _shared_connections_context(request)
         try:
             options = (
-                {"max_response_bytes": max_response_bytes}
-                if max_response_bytes is not None else {}
+                {"max_response_bytes": max_response_bytes} if max_response_bytes is not None else {}
             )
             return client.request(
-                method, path, clerk_org_id=clerk_org_id, payload=payload,
-                expect_text=expect_text, **options,
+                method,
+                path,
+                clerk_org_id=clerk_org_id,
+                payload=payload,
+                expect_text=expect_text,
+                **options,
             )
         except SharedConnectionsError as error:
             status_code = error.status_code
@@ -2368,7 +2615,8 @@ def create_app(
         status = _shared_jira_status(request, connection_id)
         try:
             selected = shared_jira.selected_projects(
-                status, scope="jira.projects" if operation == "projects" else "jira.issues",
+                status,
+                scope="jira.projects" if operation == "projects" else "jira.issues",
                 project_id=project_id,
             )
         except PermissionError as error:
@@ -2386,7 +2634,9 @@ def create_app(
         if cursor is not None:
             payload["cursor"] = cursor
         value = _shared_jira_request(
-            request, "POST", f"/internal/v1/connections/jira/{connection_id}/read",
+            request,
+            "POST",
+            f"/internal/v1/connections/jira/{connection_id}/read",
             payload=payload,
         )
         try:
@@ -2404,8 +2654,12 @@ def create_app(
         cursor: str | None = Query(default=None, max_length=8192),
     ) -> dict[str, Any]:
         return _shared_jira_metadata(
-            request, connection_id, operation="projects", project_id=None,
-            limit=limit, cursor=cursor,
+            request,
+            connection_id,
+            operation="projects",
+            project_id=None,
+            limit=limit,
+            cursor=cursor,
         )
 
     @app.get("/internal/v1/shared/jira/connections/{connection_id}/issues")
@@ -2417,8 +2671,12 @@ def create_app(
         cursor: str | None = Query(default=None, max_length=8192),
     ) -> dict[str, Any]:
         return _shared_jira_metadata(
-            request, connection_id, operation="issues", project_id=project_id,
-            limit=limit, cursor=cursor,
+            request,
+            connection_id,
+            operation="issues",
+            project_id=project_id,
+            limit=limit,
+            cursor=cursor,
         )
 
     @app.get("/internal/v1/shared/jira/connections/{connection_id}/issue-detail")
@@ -2429,7 +2687,10 @@ def create_app(
         issue_id: str = Query(min_length=1, max_length=54),
     ) -> dict[str, Any]:
         return _shared_jira_metadata(
-            request, connection_id, operation="issue_detail", project_id=project_id,
+            request,
+            connection_id,
+            operation="issue_detail",
+            project_id=project_id,
             issue_id=issue_id,
         )
 
@@ -2442,13 +2703,21 @@ def create_app(
     def create_shared_aws_connection(
         request: Request, payload: SharedAwsConnectionCreate
     ) -> dict[str, Any]:
+        selected = payload.coverage_mode == "selected-resource"
+        if selected and not shared_aws_selected_resource_enabled():
+            raise HTTPException(
+                status_code=404, detail="shared selected-resource AWS is not enabled"
+            )
         return _shared_request(
             request,
             "POST",
             "/internal/v1/connections/aws",
             payload={
                 "external_account_id": payload.account_id,
-                **payload.model_dump(exclude={"account_id"}),
+                **payload.model_dump(
+                    exclude={"account_id", "role_name"} if selected else {"account_id"},
+                    exclude_none=True,
+                ),
             },
         )  # type: ignore[return-value]
 
@@ -2503,6 +2772,11 @@ def create_app(
         request: Request, connection_id: UUID, payload: SharedAwsUseInput
     ) -> dict[str, Any]:
         repo, current_tenant = _context(request)
+        selected = payload.coverage_mode == "selected-resource"
+        if selected and not shared_aws_selected_resource_enabled():
+            raise HTTPException(
+                status_code=404, detail="shared selected-resource AWS is not enabled"
+            )
         listing = _shared_request(request, "GET", "/v1/connections")
         if not isinstance(listing, dict) or not isinstance(listing.get("items"), list):
             raise HTTPException(status_code=502, detail="shared connection list is invalid")
@@ -2529,16 +2803,73 @@ def create_app(
             partition not in {"aws", "aws-us-gov", "aws-cn"}
             or not isinstance(account_id, str)
             or not re.fullmatch(r"[0-9]{12}", account_id)
-            or not _valid_aws_region(payload.region, partition=partition)
         ):
             raise HTTPException(status_code=502, detail="shared AWS boundary is invalid")
+        if not _valid_aws_region(payload.deployment_region, partition=partition) or any(
+            not _valid_aws_region(region, partition=partition) for region in payload.regions
+        ):
+            raise HTTPException(status_code=422, detail="invalid shared AWS Region boundary")
+        selected_resource = (
+            payload.selected_resource.model_dump() if payload.selected_resource else None
+        )
+        if selected != (shared.get("coverage_mode") == "selected-resource"):
+            raise HTTPException(status_code=409, detail="shared AWS coverage mode differs")
+        reference = {"platform_connection_id": str(connection_id)}
+        configuration = {
+            "account_id": account_id,
+            "partition": partition,
+            "deployment_region": payload.deployment_region,
+            "coverage_mode": payload.coverage_mode,
+            "regions": payload.regions,
+            "role_name": "TransilienceSecurityAuditRole",
+            "stack_scopes": [],
+        }
+        if selected:
+            from denali.connections.aws_selected_resource import connection_selection
+
+            if shared.get("selected_resource") != selected_resource:
+                raise HTTPException(
+                    status_code=409, detail="shared selected-resource boundary differs"
+                )
+            role_arn, role_name = shared.get("role_arn"), shared.get("role_name")
+            if not isinstance(role_arn, str) or not isinstance(role_name, str):
+                raise HTTPException(
+                    status_code=502, detail="shared selected-resource role is invalid"
+                )
+            reference["role_arn"] = role_arn
+            configuration.update(role_name=role_name, selected_resource=selected_resource)
+            try:
+                connection_selection(
+                    {
+                        "id": str(connection_id),
+                        "provider": "aws",
+                        "credential_type": "platform_shared_aws",
+                        "credential_reference": reference,
+                        "configuration": configuration,
+                        "declared_scopes": scopes,
+                        "clerk_organization_id": request.state.denali_auth.organization_id,
+                    }
+                )
+            except ValueError:
+                raise HTTPException(
+                    status_code=502, detail="shared selected-resource role binding is invalid"
+                ) from None
         existing = repo.get_connection(current_tenant, str(connection_id))
         if existing is not None:
             if existing.get("credential_reference", {}).get("type") != "platform_shared_aws":
                 raise HTTPException(status_code=409, detail="connection ID is already in use")
             if (
                 existing.get("lifecycle_state") != "active"
-                or existing.get("configuration", {}).get("regions") != [payload.region]
+                or existing.get("configuration", {}).get("regions") != payload.regions
+                or existing.get("configuration", {}).get("coverage_mode", AWS_COVERAGE_SELECTED)
+                != payload.coverage_mode
+                or existing.get("configuration", {}).get(
+                    "deployment_region", payload.deployment_region
+                )
+                != payload.deployment_region
+                or existing.get("configuration", {}).get("selected_resource") != selected_resource
+                or selected
+                and existing.get("configuration", {}).get("role_name") != configuration["role_name"]
                 or set(existing.get("declared_scopes") or []) != set(scopes)
             ):
                 raise HTTPException(
@@ -2548,17 +2879,45 @@ def create_app(
 
         # The broker independently checks current org, app, scope, and Region. The
         # short-lived lease is discarded here; workers obtain their own leases.
-        leased = _shared_request(
-            request,
-            "POST",
-            f"/internal/v1/connections/aws/{connection_id}/credentials",
-            payload={"scopes": scopes, "region": payload.region},
-        )
-        if not isinstance(leased, dict) or any(
-            not isinstance(leased.get(key), str) or not leased[key]
-            for key in ("access_key_id", "secret_access_key", "session_token")
-        ):
-            raise HTTPException(status_code=502, detail="shared AWS lease failed")
+        for region in payload.regions or [payload.deployment_region]:
+            leased = _shared_request(
+                request,
+                "POST",
+                f"/internal/v1/connections/aws/{connection_id}/credentials",
+                payload={
+                    "scopes": [scopes[0]],
+                    "region": region,
+                    **({"selected_resource": selected_resource} if selected else {}),
+                },
+            )
+            if not isinstance(leased, dict) or any(
+                not isinstance(leased.get(key), str) or not leased[key]
+                for key in ("access_key_id", "secret_access_key", "session_token")
+            ):
+                raise HTTPException(status_code=502, detail="shared AWS lease failed")
+            if selected and (
+                leased.get("selected_resource") != selected_resource
+                or leased.get("role_arn") != reference["role_arn"]
+            ):
+                raise HTTPException(
+                    status_code=502, detail="shared selected-resource lease binding changed"
+                )
+        if selected:
+            from denali.connections.aws_selected_resource import (
+                parse_selection,
+                selected_coverage_plan,
+            )
+
+            coverage_plan = selected_coverage_plan(parse_selection(selected_resource))
+        else:
+            coverage_plan = aws_connection_coverage_plan(
+                scopes,
+                payload.regions
+                if payload.coverage_mode == AWS_COVERAGE_SELECTED
+                else ["all-enabled"],
+                deployment_region=payload.deployment_region,
+                coverage_mode=payload.coverage_mode,
+            )
         try:
             created = repo.create_connection(
                 current_tenant,
@@ -2566,23 +2925,10 @@ def create_app(
                 provider="aws",
                 display_name=f"Shared AWS {account_id} {str(connection_id)[:8]}",
                 credential_type="platform_shared_aws",
-                credential_reference={"platform_connection_id": str(connection_id)},
+                credential_reference=reference,
                 declared_scopes=scopes,
-                coverage_plan=aws_connection_coverage_plan(
-                    scopes,
-                    [payload.region],
-                    deployment_region=payload.region,
-                    coverage_mode=AWS_COVERAGE_SELECTED,
-                ),
-                configuration={
-                    "account_id": account_id,
-                    "partition": partition,
-                    "deployment_region": payload.region,
-                    "coverage_mode": AWS_COVERAGE_SELECTED,
-                    "regions": [payload.region],
-                    "role_name": "TransilienceSecurityAuditRole",
-                    "stack_scopes": [],
-                },
+                coverage_plan=coverage_plan,
+                configuration=configuration,
             )
         except ValueError as error:
             # A concurrent attach may win the connection-ID insert. Preserve
@@ -2592,7 +2938,19 @@ def create_app(
                 existing is not None
                 and existing.get("credential_reference", {}).get("type") == "platform_shared_aws"
                 and existing.get("lifecycle_state") == "active"
-                and existing.get("configuration", {}).get("regions") == [payload.region]
+                and existing.get("configuration", {}).get("regions") == payload.regions
+                and existing.get("configuration", {}).get("coverage_mode", AWS_COVERAGE_SELECTED)
+                == payload.coverage_mode
+                and existing.get("configuration", {}).get(
+                    "deployment_region", payload.deployment_region
+                )
+                == payload.deployment_region
+                and existing.get("configuration", {}).get("selected_resource") == selected_resource
+                and (
+                    not selected
+                    or existing.get("configuration", {}).get("role_name")
+                    == configuration["role_name"]
+                )
                 and set(existing.get("declared_scopes") or []) == set(scopes)
             ):
                 return _with_validation_state(request, current_tenant, existing)
@@ -2706,21 +3064,49 @@ def create_app(
         return {"items": repositories}
 
     @app.post("/v1/shared/connections/github/setup", status_code=201)
-    def start_shared_github_setup(request: Request, response: Response) -> dict[str, str]:
+    def start_shared_github_setup(
+        request: Request, response: Response, payload: SharedGitHubSetupInput | None = None
+    ) -> dict[str, str]:
         _shared_github_context(request)
-        result = _shared_request(
-            request, "POST", "/internal/v1/connections/github/setup", payload={}
-        )
+        repo, tenant = _context(request)
+        payload = payload or SharedGitHubSetupInput()
+        if payload.connection_id is not None:
+            source = repo.get_connection(tenant, str(payload.connection_id))
+            if (
+                source is None
+                or source.get("provider") != "github"
+                or source.get("credential_reference", {}).get("type") != "platform_shared_github"
+            ):
+                raise HTTPException(status_code=404, detail="shared GitHub connection not found")
+        return_state, digest = new_return_state()
         try:
+            workflow = repo.begin_connection_onboarding(
+                tenant,
+                request_id=str(payload.request_id),
+                return_state_sha256=digest,
+                connection_id=str(payload.connection_id) if payload.connection_id else None,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=409, detail="onboarding request has different settings"
+            ) from None
+        try:
+            result = _shared_request(
+                request,
+                "POST",
+                "/internal/v1/connections/github/setup",
+                payload={"return_state": return_state},
+            )
             install_url = safe_install_url(
                 result.get("install_url") if isinstance(result, dict) else None
             )
-        except ValueError as error:
+        except (ValueError, HTTPException) as error:
+            repo.fail_connection_onboarding(tenant, str(workflow["id"]), return_state_sha256=digest)
             raise HTTPException(
-                status_code=502, detail="shared GitHub setup link is invalid"
+                status_code=502, detail="shared GitHub setup is unavailable"
             ) from error
         response.headers["Cache-Control"] = "no-store"
-        return {"install_url": install_url}
+        return {"install_url": install_url, "workflow_id": str(workflow["id"])}
 
     @app.post("/v1/shared/connections/github/{connection_id}/use-in-denali", status_code=201)
     def use_shared_github_in_denali(
@@ -2767,7 +3153,9 @@ def create_app(
                     for key, value in reference.items()
                 )
                 and set(row.get("declared_scopes") or []) == set(scopes)
-                and row.get("configuration") == configuration
+                and same_github_authorization_boundary(
+                    row.get("configuration") or {}, configuration
+                )
             )
 
         existing = repo.get_connection(tenant, local_connection_id)
@@ -3247,7 +3635,6 @@ def create_app(
                 ) from error
         return _with_validation_state(request, tenant, row)
 
-
     def _shared_microsoft_context(request: Request, provider: str) -> None:
         if not shared_microsoft_enabled(provider):
             raise HTTPException(status_code=404, detail="shared Microsoft provider is not enabled")
@@ -3266,6 +3653,16 @@ def create_app(
         )
         if not valid:
             raise HTTPException(status_code=422, detail="shared Microsoft scopes are invalid")
+
+    # Register concrete provider paths before the generic Microsoft routes.
+    # FastAPI does not retry routing after a Literal path validation failure.
+    register_shared_azure_repos_routes(
+        app,
+        context=_context,
+        shared_context=_shared_connections_context,
+        shared_request=_shared_request,
+        present=_with_validation_state,
+    )
 
     @app.get("/v1/shared/connections/{provider}/config")
     def shared_microsoft_config(
@@ -3952,7 +4349,9 @@ def create_app(
         row = repo.get_connection(current_tenant, str(connection_id))
         if row is None:
             raise HTTPException(status_code=404, detail="connection not found")
-        return _with_validation_state(request, current_tenant, row)
+        return _present_connections(
+            request, [_with_validation_state(request, current_tenant, row)]
+        )[0]
 
     @app.get("/v1/connections/{connection_id}/aws/cloudformation.yaml")
     def aws_connection_cloudformation(request: Request, connection_id: UUID) -> PlainTextResponse:
@@ -6759,6 +7158,8 @@ def _context_for_tenant(request: Request, tenant_id: str) -> tuple[InventoryRead
 
 def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
+    identity = getattr(request.state, "denali_auth", None)
+    can_write = identity.can_write if identity is not None else True
     connection_key = (tenant_id, str(result["id"]))
     result["validation_state"] = _connection_validation_state(request, tenant_id, str(result["id"]))
     result["source_collection_state"] = "idle"
@@ -6803,7 +7204,7 @@ def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]
             result["runtime_collection_state"] = runtime_status["state"]
             result["last_runtime_collection"] = runtime_status["last_result"]
         result["setup_capabilities"] = _connection_setup_capabilities(request, result)
-        return result
+        return connection_presentation(result, can_write=can_write)
 
     # Injected in-memory repositories used by local contract tests retain the
     # process-local status path. Hosted PostgreSQL always returns above.
@@ -6838,13 +7239,15 @@ def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]
         result["deployment_collection_state"] = "running" if aws_collecting else "idle"
         result["last_deployment_collection"] = aws_collection_result
     result["setup_capabilities"] = _connection_setup_capabilities(request, result)
-    return result
+    return connection_presentation(result, can_write=can_write)
 
 
 def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> dict[str, bool]:
     return {
         "cloudformation_quick_create": (
-            result["provider"] == "aws" and request.app.state.cloudformation_launcher is not None
+            result["provider"] == "aws"
+            and request.app.state.cloudformation_launcher is not None
+            and result.get("credential_reference", {}).get("type") != "platform_shared_aws"
         ),
         "azure_cloud_shell": (
             result["provider"] == "azure"
@@ -6862,7 +7265,9 @@ def _connection_setup_capabilities(request: Request, result: dict[str, Any]) -> 
             and request.app.state.github_app_client is not None
         ),
         "azure_repos_oauth": (
-            result["provider"] == "azure_repos" and request.app.state.azure_repos_client is not None
+            result["provider"] == "azure_repos"
+            and request.app.state.azure_repos_client is not None
+            and result.get("credential_reference", {}).get("type") != "platform_shared_azure_repos"
         ),
         "entra_admin_consent": (
             result["provider"] == "entra"
@@ -6903,6 +7308,7 @@ def _is_public_request(request: Request) -> bool:
         "/v1/connections/github/oauth/callback",
         "/v1/connections/azure-repos/oauth/callback",
         "/v1/connections/entra/setup/callback",
+        "/v1/connections/onboarding/callback",
     }:
         return True
     if re.fullmatch(

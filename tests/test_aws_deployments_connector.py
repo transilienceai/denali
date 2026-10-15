@@ -338,7 +338,7 @@ def test_shared_connection_collection_leases_scope_without_legacy_assume_role(mo
 
     leased: list[tuple[str, list[str]]] = []
 
-    def fake_lease(connection, *, region, scopes, session_factory):
+    def fake_lease(connection, *, region, scopes, session_factory, client=None):
         leased.append((region, scopes))
         return AssumedSession()
 
@@ -371,7 +371,8 @@ def test_shared_connection_collection_leases_scope_without_legacy_assume_role(mo
     )
 
     assert result["state"] == "complete"
-    assert leased == [("us-east-1", ["aws.code_to_cloud"])]
+    assert leased
+    assert all(lease == ("us-east-1", ["aws.code_to_cloud"]) for lease in leased)
     assert repository.inventory
 
 

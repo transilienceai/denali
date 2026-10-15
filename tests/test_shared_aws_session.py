@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from denali.integrations.shared_aws_session import leased_aws_session
+from denali.integrations.shared_aws_session import leased_aws_session, shared_aws_session
 
 PLATFORM_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -100,3 +100,96 @@ def test_shared_aws_session_rejects_incomplete_credential_response():
             session_factory=lambda **_kwargs: object(),
             client=bridge,  # type: ignore[arg-type]
         )
+
+
+def test_multiregion_clients_lease_only_declared_service_scope_and_verify_each_account():
+    connection = _connection()
+    connection["declared_scopes"] = ["aws.bedrock_agents", "aws.code_to_cloud"]
+    connection["configuration"].update(
+        account_id="123456789012", deployment_region="us-east-1", regions=["us-east-1", "us-west-2"]
+    )
+    bridge = FakeBridge()
+    clients = []
+
+    class Session:
+        def client(self, service, **kwargs):
+            clients.append((service, kwargs))
+            return self
+
+        def get_caller_identity(self):
+            return {"Account": "123456789012"}
+
+    session = shared_aws_session(
+        connection,
+        scopes=connection["declared_scopes"],
+        session_factory=lambda **_keys: Session(),
+        client=bridge,
+    )
+    session.client("lambda", region_name="us-west-2")
+    session.client("bedrock-agent", region_name="us-east-1")
+    assert [call[3] for call in bridge.calls] == [
+        {"scopes": ["aws.code_to_cloud"], "region": "us-west-2"},
+        {"scopes": ["aws.bedrock_agents"], "region": "us-east-1"},
+    ]
+    assert sum(service == "sts" for service, _kwargs in clients) == 2
+    for service, kwargs in (
+        ("lambda", {"region_name": "eu-west-1"}),
+        ("logs", {"region_name": "us-east-1"}),
+        ("lambda", {"region_name": "us-east-1", "endpoint_url": "https://unexpected.example"}),
+    ):
+        with pytest.raises(ValueError):
+            session.client(service, **kwargs)
+    assert len(bridge.calls) == 2
+
+
+def test_automatic_discovery_uses_one_narrow_scope_and_broker_revocation_fails_closed():
+    connection = _connection()
+    connection["configuration"].update(
+        coverage_mode="automatic",
+        regions=[],
+        deployment_region="us-east-1",
+        account_id="123456789012",
+    )
+    bridge = FakeBridge()
+
+    class Session:
+        def client(self, *_args, **_kwargs):
+            return self
+
+        def get_caller_identity(self):
+            return {"Account": "123456789012"}
+
+    session = shared_aws_session(
+        connection,
+        scopes=["aws.bedrock_agents"],
+        session_factory=lambda **_keys: Session(),
+        client=bridge,
+    )
+    session.client("ec2", region_name="us-east-1")
+    session.client("bedrock-agent", region_name="ap-south-1")
+    assert [call[3]["region"] for call in bridge.calls] == ["us-east-1", "ap-south-1"]
+    assert all(call[3]["scopes"] == ["aws.bedrock_agents"] for call in bridge.calls)
+    bridge.request = lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("revoked"))
+    with pytest.raises(ValueError):
+        session.client("bedrock-agent", region_name="ap-south-1")
+
+
+def test_each_region_lease_account_must_match_the_saved_account():
+    connection = _connection()
+    connection["configuration"].update(account_id="123456789012")
+
+    class Session:
+        def client(self, *_args, **_kwargs):
+            return self
+
+        def get_caller_identity(self):
+            return {"Account": "999999999999"}
+
+    session = shared_aws_session(
+        connection,
+        scopes=["aws.bedrock_agents"],
+        session_factory=lambda **_keys: Session(),
+        client=FakeBridge(),
+    )
+    with pytest.raises(ValueError, match="account"):
+        session.client("bedrock-agent", region_name="us-east-1")

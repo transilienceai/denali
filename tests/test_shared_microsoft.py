@@ -27,7 +27,12 @@ PRINCIPAL = "55555555-5555-4555-8555-555555555555"
 
 
 def connection(provider="azure"):
-    scopes = list(SHARED_AZURE_SCOPES if provider == "azure" else ENTRA_SCOPES)
+    # The established four-plane fixture remains independent of runtime admission.
+    scopes = list(
+        tuple(scope for scope in SHARED_AZURE_SCOPES if scope != "azure.agent_runtime_activity")
+        if provider == "azure"
+        else ENTRA_SCOPES
+    )
     subscriptions = [{"id": SUBSCRIPTION, "name": "Selected"}]
     return {
         "id": ID,
@@ -194,6 +199,24 @@ def test_entra_pagination_preserves_signed_cursor_and_never_forwards_graph_queri
 def audit_parameters():
     end = datetime.now(UTC)
     return {"window_start": end - timedelta(hours=24), "window_end": end}
+
+
+def test_entra_seven_day_window_preserves_azure_one_day_boundary():
+    end = datetime.now(UTC)
+    broker = Broker()
+    entra = SharedEntraReader(connection("entra"), client=broker)
+    entra.read("directory_audits", window_start=end - timedelta(hours=168), window_end=end)
+    assert broker.calls[-1][3]["window_start"] == (end - timedelta(hours=168)).isoformat()
+    with pytest.raises(ValueError, match="window"):
+        entra.read("directory_audits", window_start=end - timedelta(hours=169), window_end=end)
+    azure = SharedAzureReader(connection(), client=broker)
+    with pytest.raises(ValueError, match="window"):
+        azure.read(
+            "activity",
+            subscription_id=SUBSCRIPTION,
+            window_start=end - timedelta(hours=25),
+            window_end=end,
+        )
 
 
 def audit_items(count, *, offset=0):
@@ -368,7 +391,7 @@ def test_entra_known_native_queries_translate_into_fixed_operations():
     assert all("path" not in call[3] and "$filter" not in call[3] for call in broker.calls)
     with pytest.raises(ValueError):
         reader.read(
-            "sign_ins", app_ids=[APP], window_start=end - timedelta(hours=25), window_end=end
+            "sign_ins", app_ids=[APP], window_start=end - timedelta(hours=169), window_end=end
         )
     with pytest.raises(ValueError):
         reader.read("sign_ins", app_ids=[APP] * 11, window_start=start, window_end=end)
@@ -425,7 +448,7 @@ class Sink:
 
 
 @pytest.mark.parametrize("provider", ["azure", "entra"])
-def test_shared_collection_reuses_native_evidence_sink_and_24_hour_activity(provider):
+def test_shared_collection_reuses_native_evidence_sink_and_provider_activity_window(provider):
     broker = Broker()
     sink = Sink()
     result = MicrosoftCollectorRouter(provider, Native(), broker).collect(
@@ -440,9 +463,9 @@ def test_shared_collection_reuses_native_evidence_sink_and_24_hour_activity(prov
         if "window_start" in payload:
             assert datetime.fromisoformat(payload["window_end"]) - datetime.fromisoformat(
                 payload["window_start"]
-            ) <= timedelta(hours=24)
+            ) <= timedelta(hours=168 if provider == "entra" else 24)
     if provider == "entra":
-        assert result["lookback_hours"] == 24
+        assert result["lookback_hours"] == 168
 
 
 def test_entra_collector_completes_six_planes_with_103_non_ai_directory_audits():
@@ -463,7 +486,7 @@ def test_entra_collector_completes_six_planes_with_103_non_ai_directory_audits()
     assert result["state"] == "complete"
     assert result["coverage_complete"] == 6
     assert result["coverage_partial"] == result["coverage_failed"] == 0
-    assert result["lookback_hours"] == 24
+    assert result["lookback_hours"] == 168
     assert result["matched_ai_applications"] == result["activity_events"] == 0
     assert sink.inventory[0][1].assets == ()
     assert sink.activity[0][1].activities == ()
@@ -472,7 +495,7 @@ def test_entra_collector_completes_six_planes_with_103_non_ai_directory_audits()
     assert len(audits) == 1 and audits[0]["page_size"] == 100
     assert datetime.fromisoformat(audits[0]["window_end"]) - datetime.fromisoformat(
         audits[0]["window_start"]
-    ) == timedelta(hours=24)
+    ) == timedelta(hours=168)
 
 
 def test_no_native_fallback_when_shared_reader_is_disabled(monkeypatch):
@@ -503,7 +526,7 @@ def test_entra_can_validate_and_collect_without_azure_enablement(monkeypatch):
         tenant_id="local-tenant", connection=target, repository=sink
     )
     assert validated["health_state"] == "healthy"
-    assert collected["state"] == "complete" and collected["lookback_hours"] == 24
+    assert collected["state"] == "complete" and collected["lookback_hours"] == 168
     assert all(call[1] == f"/internal/v1/connections/entra/{ID}/read" for call in broker.calls)
     assert all("subscription_id" not in call[3] for call in broker.calls)
 
@@ -531,7 +554,9 @@ def test_entra_only_rollout_preserves_native_azure_and_entra_routing(monkeypatch
             tenant_id="local-tenant", connection=target, repository=Sink()
         ) == {"state": "native-result"}
     assert calls == [
-        ("validate", "azure"), ("collect", "azure"),
-        ("validate", "entra"), ("collect", "entra"),
+        ("validate", "azure"),
+        ("collect", "azure"),
+        ("validate", "entra"),
+        ("collect", "entra"),
     ]
     assert broker.calls == []

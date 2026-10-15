@@ -1,16 +1,17 @@
 {
   "schema_version": 1,
   "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
-  "public_operation_count": 123,
-  "explicit_public_operation_count": 119,
+  "public_operation_count": 137,
+  "explicit_public_operation_count": 133,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
   "release_named_read_count": 43,
   "release_named_write_count": 16,
   "release_named_resource_write_count": 4,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
-  "browser_operation_count": 103,
+  "browser_operation_count": 118,
   "exceptions": {
+    "connection_experience": "The provider catalog, durable onboarding receipts and fixed one-time navigation return are browser workflows. They expose rollout policy and safe lifecycle metadata without expanding connection scopes or provider permissions. Existing named validation, collection, job and result capabilities preserve their contracts; no new MCP tools or CLI release is required.",
     "shared_microsoft_pilot": "Default-off shared Azure and Entra plans, Microsoft consent, Azure Reader setup and attachment are organization-admin browser handoffs. Azure requires the tenant-specific v2 admin-consent endpoint with explicit openid only, selected-client binding and the server-projected registered callback; Entra's existing consent bundle is unchanged. Existing connection validation/collection/jobs and findings/inventory capabilities reuse attached references without new MCP tool names, login scopes or provider-write authority. GET setup also rotates one-time state and requires admin.",
     "shared_github_pilot": "Default-off shared GitHub installation consent and attachment are authenticated browser workflows. Existing named connection validation, collection, job polling and results capabilities reuse attached shared references; no new MCP lifecycle tools or customer repository writes are advertised.",
     "security_admin_user_creation": "Password-based Clerk user creation remains a secure browser workflow; passwords must never enter model/chat context.",
@@ -24,6 +25,52 @@
     "shared_google_workspace_pilot": "Default-off shared Workspace admission, external domain-wide delegation instructions, validation and attachment are authenticated browser workflows. Existing named connection validation, google_workspace_ai collection, durable job polling and results reuse the attached reference; no new CLI command, OAuth scope or MCP onboarding tool is added."
   },
   "operations": [
+    {"method":"GET","path":"/v1/shared/connections/azure-repos/config","handler":"configuration","browser_methods":["sharedAzureReposConfig"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"GET","path":"/v1/shared/connections/azure-repos","handler":"listing","browser_methods":["sharedAzureReposConnections"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"POST","path":"/v1/shared/connections/azure-repos/setup","handler":"create","browser_methods":["createSharedAzureRepos"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"GET","path":"/v1/shared/connections/azure-repos/{connection_id}/status","handler":"connection_status","browser_methods":["sharedAzureReposStatus"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"GET","path":"/v1/shared/connections/azure-repos/{connection_id}/repositories","handler":"repositories","browser_methods":["sharedAzureReposRepositories"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"POST","path":"/v1/shared/connections/azure-repos/{connection_id}/setup","handler":"launch","browser_methods":["startSharedAzureReposSetup"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"POST","path":"/v1/shared/connections/azure-repos/{connection_id}/validate","handler":"validate","browser_methods":["validateSharedAzureRepos"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"POST","path":"/v1/shared/connections/azure-repos/{connection_id}/use-in-denali","handler":"attach","browser_methods":["useSharedAzureRepos"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"POST","path":"/v1/shared/connections/azure-repos/{connection_id}/disable","handler":"disable","browser_methods":["disableSharedAzureRepos"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {"method":"DELETE","path":"/v1/shared/connections/azure-repos/{connection_id}","handler":"delete","browser_methods":["deleteSharedAzureRepos"],"class":"connector_product","disposition":"excluded_authenticated_browser_handoff","capability":null},
+    {
+      "method": "GET",
+      "path": "/v1/connections/catalog",
+      "handler": "connection_provider_catalog",
+      "browser_methods": ["connectionCatalog"],
+      "class": "connector_product",
+      "disposition": "excluded_authenticated_browser_handoff",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/onboarding",
+      "handler": "list_connection_onboarding",
+      "browser_methods": ["onboardingWorkflows"],
+      "class": "connector_product",
+      "disposition": "excluded_authenticated_browser_handoff",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/onboarding/{workflow_id}",
+      "handler": "connection_onboarding_detail",
+      "browser_methods": ["onboardingWorkflow"],
+      "class": "connector_product",
+      "disposition": "excluded_authenticated_browser_handoff",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/connections/onboarding/callback",
+      "handler": "connection_onboarding_callback",
+      "browser_methods": [],
+      "class": "provider_callback",
+      "disposition": "excluded_one_time_provider_protocol",
+      "capability": null
+    },
     {
       "method": "GET",
       "path": "/v1/shared/connections/{provider}/config",
@@ -519,7 +566,8 @@
       "path": "/v1/shared/connections/aws",
       "handler": "create_shared_aws_connection",
       "browser_methods": [
-        "createSharedAwsConnection"
+        "createSharedAwsConnection",
+        "createSharedAwsConfiguration"
       ],
       "class": "pilot_connector",
       "disposition": "excluded_dark_shared_connection_pilot",
@@ -574,7 +622,8 @@
       "path": "/v1/shared/connections/aws/{connection_id}/use-in-denali",
       "handler": "use_shared_aws_in_denali",
       "browser_methods": [
-        "useSharedAwsInDenali"
+        "useSharedAwsInDenali",
+        "useSharedAwsConfiguration"
       ],
       "class": "pilot_connector",
       "disposition": "excluded_dark_shared_connection_pilot",

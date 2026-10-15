@@ -15,9 +15,7 @@ from denali.worker_limits import (
 
 APP_NAME = os.environ.get("DENALI_MODAL_APP_NAME", "denali-production")
 SECRET_NAME = os.environ.get("DENALI_MODAL_SECRET_NAME", "denali-production")
-PROVIDER_SECRET_NAME = os.environ.get(
-    "DENALI_MODAL_PROVIDER_SECRET_NAME", "denali-github-provider"
-)
+PROVIDER_SECRET_NAME = os.environ.get("DENALI_MODAL_PROVIDER_SECRET_NAME", "denali-github-provider")
 SHASTA_BRIDGE_SECRET_NAME = "shasta-denali-bridge"
 
 # This public deployment selector is copied into every function's runtime
@@ -118,6 +116,7 @@ def _validators():
         GitHubConnectionValidator,
         GoogleWorkspaceConnectionValidator,
     )
+    from denali.integrations.shared_azure_repos import AzureReposValidatorRouter
     from denali.integrations.shared_connections_client import SharedConnectionsClient
     from denali.integrations.shared_github import GitHubValidatorRouter
     from denali.integrations.shared_google_workspace import WorkspaceValidatorRouter
@@ -134,13 +133,22 @@ def _validators():
         "azure": MicrosoftValidatorRouter("azure", AzureConnectionValidator(), platform),
         "entra": MicrosoftValidatorRouter(
             "entra", EntraConnectionValidator(entra_client) if entra_client else None, platform
-        ) if entra_client or platform else None,
+        )
+        if entra_client or platform
+        else None,
         "gcp": GcpConnectionValidator(),
         "github": GitHubValidatorRouter(github_validator, platform)
         if platform
         else github_validator,
         "azure_repos": (
-            AzureReposConnectionValidator(azure_repos_client) if azure_repos_client else None
+            AzureReposValidatorRouter(
+                AzureReposConnectionValidator(azure_repos_client) if azure_repos_client else None,
+                platform,
+            )
+            if platform
+            else AzureReposConnectionValidator(azure_repos_client)
+            if azure_repos_client
+            else None
         ),
         "google_workspace": (
             WorkspaceValidatorRouter(
@@ -276,6 +284,8 @@ def collection_worker(job_id: str) -> None:
     from denali.connectors.gcp_deployments import GcpConnectionDeploymentCollector
     from denali.connectors.github_repository import GitHubRepositoryCollector
     from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
+    from denali.integrations.shared_azure_repos import AzureReposCollectorRouter
+    from denali.integrations.shared_azure_runtime import AzureRuntimeCollectorRouter
     from denali.integrations.shared_connections_client import SharedConnectionsClient
     from denali.integrations.shared_github import GitHubCollectorRouter
     from denali.integrations.shared_google_workspace import WorkspaceCollectorRouter
@@ -298,16 +308,29 @@ def collection_worker(job_id: str) -> None:
             "azure_deployments": MicrosoftCollectorRouter(
                 "azure", AzureConnectionDeploymentCollector(), platform
             ),
-            "azure_agent_runtime": AzureConnectionAgentRuntimeCollector(),
+            "azure_agent_runtime": AzureRuntimeCollectorRouter(
+                AzureConnectionAgentRuntimeCollector(), platform
+            ),
             "entra_ai": MicrosoftCollectorRouter(
                 "entra", EntraConnectionCollector(entra_client) if entra_client else None, platform
-            ) if entra_client or platform else None,
+            )
+            if entra_client or platform
+            else None,
             "gcp_deployments": GcpConnectionDeploymentCollector(),
             "github_source": (
                 GitHubCollectorRouter(github_collector, platform) if platform else github_collector
             ),
             "azure_repos_source": (
-                AzureReposRepositoryCollector(azure_repos_client) if azure_repos_client else None
+                AzureReposCollectorRouter(
+                    AzureReposRepositoryCollector(azure_repos_client)
+                    if azure_repos_client
+                    else None,
+                    platform,
+                )
+                if platform
+                else AzureReposRepositoryCollector(azure_repos_client)
+                if azure_repos_client
+                else None
             ),
             "google_workspace_ai": (
                 WorkspaceCollectorRouter(
@@ -424,8 +447,7 @@ def vulnerability_import_worker(job_id: str) -> None:
     run_durable_vulnerability_import_job(
         PostgresInventoryRepository(os.environ["DENALI_DSN"]),
         S3EvidenceReportStore(
-            os.environ.get("DENALI_EVIDENCE_BUCKET")
-            or os.environ["DENALI_AWS_ONBOARDING_BUCKET"]
+            os.environ.get("DENALI_EVIDENCE_BUCKET") or os.environ["DENALI_AWS_ONBOARDING_BUCKET"]
         ),
         job_id,
     )
@@ -537,18 +559,12 @@ def active_connection_status(limit: int = 100) -> list[dict[str, str]]:
             "provider": provider,
             "health": str(row["health_state"]),
             "validation": str(validation["state"]),
-            "last_validation": str(
-                (validation["last_result"] or {}).get("state", "none")
-            ),
+            "last_validation": str((validation["last_result"] or {}).get("state", "none")),
             "collection": str(collection["state"]),
             "last_collection": str(last_result.get("state", "none")),
         }
         statuses.append(status)
-        print(
-            " ".join(
-                f"{key}={value}" for key, value in status.items()
-            )
-        )
+        print(" ".join(f"{key}={value}" for key, value in status.items()))
     return statuses
 
 

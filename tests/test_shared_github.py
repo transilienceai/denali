@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -83,6 +84,83 @@ class Platform:
 class Repository(FakeRepository):
     def __init__(self):
         self.created = []
+        self.workflows = {}
+
+    def begin_connection_onboarding(
+        self, tenant_id, *, request_id, return_state_sha256, connection_id=None
+    ):
+        key = (tenant_id, request_id)
+        previous = self.workflows.get(key)
+        if previous and previous.get("connection_id") != connection_id:
+            raise ValueError("different connection")
+        now = datetime.now(UTC)
+        row = {
+            "id": previous["id"] if previous else str(uuid4()),
+            "tenant_id": tenant_id,
+            "request_id": request_id,
+            "connection_id": connection_id,
+            "provider": "github",
+            "management_source": "platform",
+            "return_state_sha256": return_state_sha256,
+            "consumed_at": None,
+            "stage": "external_authorization",
+            "status": "in_progress",
+            "expires_at": now + timedelta(minutes=30),
+            "created_at": now,
+            "updated_at": now,
+            "error_code": None,
+        }
+        self.workflows[key] = row
+        return row
+
+    def fail_connection_onboarding(self, tenant_id, workflow_id, *, return_state_sha256):
+        row = next(
+            row
+            for row in self.workflows.values()
+            if row["tenant_id"] == tenant_id and row["id"] == workflow_id
+        )
+        if row["return_state_sha256"] != return_state_sha256:
+            return
+        row.update(
+            stage="attention_required",
+            status="failed",
+            error_code="setup_unavailable",
+            consumed_at=datetime.now(UTC),
+        )
+
+    def consume_connection_onboarding_return(self, digest, *, succeeded):
+        row = next(
+            (
+                row
+                for row in self.workflows.values()
+                if row["return_state_sha256"] == digest
+                and row["consumed_at"] is None
+                and row["expires_at"] > datetime.now(UTC)
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        row.update(
+            consumed_at=datetime.now(UTC),
+            stage="select_repositories" if succeeded else "attention_required",
+            status="returned" if succeeded else "failed",
+            error_code=None if succeeded else "authorization_failed",
+        )
+        return row
+
+    def get_connection_onboarding(self, tenant_id, workflow_id):
+        return next(
+            (
+                row
+                for row in self.workflows.values()
+                if row["tenant_id"] == tenant_id and row["id"] == workflow_id
+            ),
+            None,
+        )
+
+    def list_connection_onboarding(self, tenant_id):
+        return [row for row in self.workflows.values() if row["tenant_id"] == tenant_id]
 
     def get_connection(self, tenant_id, connection_id):
         return next(
@@ -174,7 +252,11 @@ def test_shared_github_setup_is_platform_owned_and_admin_only():
         )
         response = client.post(path, headers={"Authorization": "Bearer alpha-admin"})
     assert response.status_code == 201
-    assert platform.calls[-1] == ("POST", "/internal/v1/connections/github/setup", "org_alpha", {})
+    method, path, org, payload = platform.calls[-1]
+    assert (method, path, org) == ("POST", "/internal/v1/connections/github/setup", "org_alpha")
+    assert set(payload) == {"return_state"}
+    assert len(payload["return_state"]) == 43
+    assert response.json()["workflow_id"]
 
 
 def test_shared_member_reads_and_admin_disable_are_server_authorized():
@@ -183,8 +265,7 @@ def test_shared_member_reads_and_admin_disable_are_server_authorized():
         path = f"/v1/shared/connections/github/{CONNECTION_ID}/disable"
         assert client.post(path).status_code == 401
         assert (
-            client.post(path, headers={"Authorization": "Bearer alpha-member"}).status_code
-            == 403
+            client.post(path, headers={"Authorization": "Bearer alpha-member"}).status_code == 403
         )
         assert not platform.calls
         listing = client.get(
@@ -194,7 +275,10 @@ def test_shared_member_reads_and_admin_disable_are_server_authorized():
     assert listing.status_code == 200 and listing.headers["Cache-Control"] == "no-store"
     assert disabled.status_code == 200 and disabled.json() == {"status": "disabled"}
     assert platform.calls[-1] == (
-        "POST", f"/internal/v1/connections/github/{CONNECTION_ID}/disable", "org_alpha", None
+        "POST",
+        f"/internal/v1/connections/github/{CONNECTION_ID}/disable",
+        "org_alpha",
+        None,
     )
 
 

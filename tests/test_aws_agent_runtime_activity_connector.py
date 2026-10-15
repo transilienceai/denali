@@ -462,13 +462,13 @@ def test_shared_runtime_session_uses_platform_lease(monkeypatch) -> None:
             return {"Account": ACCOUNT}
 
     class LeasedSession:
-        def client(self, service):
+        def client(self, service, **_kwargs):
             assert service == "sts"
             return Sts()
 
     calls = []
 
-    def fake_lease(connection, *, region, scopes, session_factory):
+    def fake_lease(connection, *, region, scopes, session_factory, client=None):
         calls.append((region, scopes))
         return LeasedSession()
 
@@ -480,7 +480,8 @@ def test_shared_runtime_session_uses_platform_lease(monkeypatch) -> None:
     )
     connection = {
         "credential_type": "platform_shared_aws",
-        "configuration": {"regions": [REGION]},
+        "declared_scopes": ["aws.agent_runtime_activity"],
+        "configuration": {"regions": [REGION], "account_id": ACCOUNT, "coverage_mode": "selected"},
     }
     assert collector._assumed_session(connection, ACCOUNT) is not None
     assert calls == [(REGION, ["aws.agent_runtime_activity"])]

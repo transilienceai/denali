@@ -70,6 +70,11 @@ class SharedConnectionsClient:
     def allows_org(self, clerk_org_id: str) -> bool:
         return self._allowed_clerk_org_ids is None or clerk_org_id in self._allowed_clerk_org_ids
 
+    @property
+    def origin(self) -> str:
+        """Public, deployment-owned origin for validating provider callback metadata."""
+        return self._origin
+
     @classmethod
     def from_environment(cls) -> SharedConnectionsClient | None:
         origin = os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "")

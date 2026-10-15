@@ -678,13 +678,28 @@ def test_shared_microsoft_attachment_allows_durable_browser_and_gateway_jobs(
             test.post(f"/v1/connections/{connection_id}/validate", headers=AUTH).status_code == 202
         )
         assert test.post(collect_path, headers=AUTH).status_code == 202
+        authorized_dispatches = list(dispatched)
         assert test.post(collect_path, headers=MEMBER).status_code == 403
         assert (
             test.post(collect_path, headers={"Authorization": "Bearer beta-admin"}).status_code
             == 404
         )
         assert test.get(f"/v1/connections/{connection_id}", headers=MEMBER).status_code == 200
-    assert [kind for kind, _job in dispatched] == ["validation", "collection"]
+        assert dispatched == authorized_dispatches
+    expected_collection_kinds = (
+        {"azure_deployments", "azure_agent_runtime"} if provider == "azure" else {"entra_ai"}
+    )
+    assert [kind for kind, _job in dispatched] == ["validation"] + ["collection"] * len(
+        expected_collection_kinds
+    )
+    assert len({job for _kind, job in dispatched}) == len(dispatched)
+    with psycopg.connect(DSN) as db:
+        rows = db.execute(
+            """SELECT collection_kind FROM connection_collection_job
+               WHERE tenant_id = %s AND connection_id = %s""",
+            (local_tenant, connection_id),
+        ).fetchall()
+    assert {row[0] for row in rows} == expected_collection_kinds
     # A newly constructed repository sees the queued jobs from the same tenant.
     restarted = PostgresInventoryRepository(DSN)
     assert restarted.connection_validation_job_state(local_tenant, connection_id) == "running"

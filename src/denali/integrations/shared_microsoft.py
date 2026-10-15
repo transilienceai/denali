@@ -16,7 +16,7 @@ from denali.connections.azure import AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY, AZURE_S
 from denali.connections.entra import ENTRA_SCOPES
 from denali.integrations.shared_connections_client import SharedConnectionsClient
 
-SHARED_AZURE_SCOPES = tuple(s for s in AZURE_SCOPES if s != AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY)
+SHARED_AZURE_SCOPES = tuple(AZURE_SCOPES)
 RESOURCE_SCOPES = {
     "microsoft.cognitiveservices/accounts": "azure.ai_services",
     "microsoft.search/searchservices": "azure.ai_services",
@@ -76,13 +76,13 @@ def selected_subscriptions(value: Any) -> list[dict[str, str]]:
     return sorted(result, key=lambda item: item["id"])
 
 
-def _window(start: Any, end: Any) -> tuple[datetime, datetime]:
+def _window(start: Any, end: Any, *, maximum_hours: int = 24) -> tuple[datetime, datetime]:
     if not isinstance(start, datetime) or not isinstance(end, datetime):
         raise ValueError("shared Microsoft activity window is invalid")
     if (
         start.tzinfo is None
         or end.tzinfo is None
-        or not timedelta(0) < end - start <= timedelta(hours=24)
+        or not timedelta(0) < end - start <= timedelta(hours=maximum_hours)
         or end > datetime.now(UTC) + timedelta(minutes=5)
     ):
         raise ValueError("shared Microsoft activity window is invalid")
@@ -187,7 +187,9 @@ class SharedMicrosoftReader:
         elif app_ids is not None:
             raise ValueError("shared Microsoft application selection is invalid")
         if operation in {"activity", "sign_ins", "directory_audits"}:
-            start, end = _window(window_start, window_end)
+            start, end = _window(
+                window_start, window_end, maximum_hours=168 if self.provider == "entra" else 24
+            )
             payload.update(window_start=start.isoformat(), window_end=end.isoformat())
         elif window_start is not None or window_end is not None:
             raise ValueError("shared Microsoft activity selection is invalid")
@@ -377,7 +379,17 @@ class MicrosoftValidatorRouter:
                         scope=planned["declared_scope"],
                         page_size=1,
                     )
-                    if planned["declared_scope"] == "azure.ai_activity":
+                    if planned["declared_scope"] == AZURE_SCOPE_AGENT_RUNTIME_ACTIVITY:
+                        from denali.integrations.shared_azure_runtime import (
+                            SharedAzureRuntimeClient,
+                        )
+
+                        runtime = SharedAzureRuntimeClient(connection, client=self.platform)
+                        components = runtime.list_components(subscription_id=subscription)
+                        if not components:
+                            raise ValueError("Application Insights component not found")
+                        runtime.probe(components[0]["app_id"])
+                    elif planned["declared_scope"] == "azure.ai_activity":
                         reader.read(
                             "activity",
                             subscription_id=subscription,
@@ -480,5 +492,5 @@ class MicrosoftCollectorRouter:
                         raise ValueError("shared Entra tenant mismatch")
                     return reader
 
-            collector = EntraConnectionCollector(BrokerGraphFactory(), lookback_hours=24)
+            collector = EntraConnectionCollector(BrokerGraphFactory(), lookback_hours=168)
         return collector.collect(tenant_id=tenant_id, connection=connection, repository=repository)

@@ -1,0 +1,166 @@
+# Unified connector experience
+
+Denali has one provider picker, connection list, detail area and onboarding wizard.
+The server catalog chooses the available adapter; the browser never treats a
+Platform error as permission to create a native connection. The presentation is
+**Grant access → Verify access → Collect evidence**. These stages are separate:
+authorization is not validation, and successful validation is not collection or
+a safety verdict.
+
+## Ownership and compatibility
+
+The browser uses the authenticated same-origin `/api` contract. FastAPI resolves
+the active Clerk Organization to the Denali tenant UUID and enforces admin writes.
+Platform calls are server-to-server, bound to that verified Clerk Organization
+and the registered Denali machine application's exact entitlements.
+
+Existing native connections keep their IDs, credential references, selections,
+jobs, evidence and repair paths. There is no credential migration, bulk rewrite,
+automatic reactivation or automatic scope expansion. Shared references use the
+same validation/collection jobs and evidence pipeline through provider adapters;
+a broker failure never invokes native credentials instead.
+
+Connection responses preserve their existing fields and add `management_source`,
+`platform_availability`, `platform_status_freshness`, `platform_last_checked_at`,
+`platform_status_reason` and role-aware `actions`. The original health result is
+historical validation evidence; Platform availability is a separate execution
+gate. A `current` freshness value means the registry metadata was fetched for
+this response, **not** that live provider access was revalidated. Remote provider
+revocation is confirmed by the next bounded validation/read, not inferred from a
+previous healthy badge. Native rows remain usable when Platform is unavailable.
+
+The provider catalog is local policy, not an upstream availability probe. Shared
+connection metadata is fetched once per list/detail presentation rather than once
+per row. An unavailable shared source is visible and cannot validate/collect.
+
+## Setup, return and organization switching
+
+The React application and its request generation are keyed to the active
+organization. Organization changes abort pending requests; a token obtained after
+a change cannot dispatch the old organization's mutation. Status readers coalesce
+overlapping refreshes, ignore abandoned results, poll pending durable jobs and
+refresh on focus/visibility return. A newly attached local connection is selected
+automatically.
+
+GitHub and Azure Repos external returns have durable PostgreSQL onboarding
+receipts. Denali stores a hash of a random expiring return capability, provider,
+original tenant, request identity and optional original/local Platform source IDs.
+Platform stores the originating app/org and a snapshot of the operator-registered
+callback origin, never a browser-supplied URL. Its one-time provider callback
+returns to the fixed same-origin Denali callback, which consumes the Denali state
+once and redirects with an opaque workflow ID. Authenticated resume reads are
+tenant scoped: switching organizations cannot reveal or attach the original
+organization's source. Relaunch invalidates the previous return capability.
+Other provider setup/validation plans and durable jobs remain discoverable from
+their server-side source inventory after navigation or reload; browser polling
+does not own job correctness.
+
+## Repository access review
+
+GitHub has three distinct boundaries: provider installation access, Platform's
+last verified available repository catalog, and Denali's immutable saved selection.
+**Manage repository access** launches verified Platform setup and returns to this
+Denali workflow. Merely refreshing the saved catalog does not reconcile an
+external GitHub settings change. The verified list is also constrained by the
+installer user's visibility; it does not promise every repository in an account.
+
+The UI distinguishes available, saved, selected, added and removed repositories.
+Added repositories are unchecked. Changed immutable identity is removed from the
+review selection. Admin confirmation is explicit. A different selection creates
+a replacement attachment; the original is retained until separately disconnected.
+Repeated attachment of the same immutable selection is idempotent despite mutable
+metadata changes. Repository renames/transfers are not silently accepted as the
+same boundary. Disable does not become re-enable through attachment.
+
+Azure Repos similarly verifies an operator-admitted Microsoft tenant/application/
+Azure DevOps organization, retains only exact repository/project identities and
+requires explicit selection. OAuth PKCE user proof and independent application
+read validation are separate. Denali receives opaque mediated reads, never the
+provider access token. Every content read rechecks live repository identity;
+source chunks are bounded and their final Git blob digest is verified.
+
+## Local versus organization-wide lifecycle
+
+**Disconnect from Denali** calls only the existing local connection lifecycle API.
+It stops Denali use and retains collected evidence. Local delete is available
+only after disable and respects active-job protections. It does not revoke grants
+used by other applications.
+
+**Disable access for all applications** is in a separate collapsed organization-
+wide section, with confirmation and an impact explanation. Provider grants and
+already issued short-lived leases require their separately documented cleanup/
+expiration; a broker disable is not a promise of immediate credential revocation.
+
+## Paired capability work
+
+| Provider | Shared adapter coverage in this change | Important boundary |
+| --- | --- | --- |
+| AWS | All six native evidence scopes; selected (1–40) or automatic Regions; separate exact-resource path | Fresh per-service/per-Region leases; exact Lambda/IAM path cannot use broad leases |
+| Azure | Existing selected-subscription metadata plus Foundry runtime activity | Fixed metadata-only broker queries; live component identity check; 24-hour runtime bound |
+| Entra | Existing four evidence planes with native 168-hour activity lookback | Bounded pages, fixed projections and exact tenant binding |
+| GCP | Existing keyless selected-project adapter retained | Saved project selection and original native paths unchanged |
+| GitHub | Verified available catalog and explicit immutable selection review | No automatic repository expansion or webhook claim |
+| Google Workspace | Existing admitted domain-wide delegation adapter retained | Domain/customer/principal binding; distinct validation and collection |
+| Azure Repos | Verified setup, exact repository selection, validation and source collection | No PAT, persisted user token, arbitrary URL or provider write |
+
+Exact-resource AWS uses a separate Platform binding, reader role, validation job
+and audit record alongside broad account bindings. Its four pins are Zip Lambda
+ARN, execution-role ARN, expected model ID/ARN and kind. Only `aws.code_to_cloud`
+and the pinned Region are allowed. Platform verifies the role/account/selection
+again before issuing the narrow lease. Its two successful read proofs authorize
+selected evidence collection while account coverage remains partial. No account
+discovery, source download, invocation or account-wide healthy claim is made.
+
+These are implemented source contracts, not hosted acceptance evidence. Jira's
+existing bounded reads are not a Denali connector and are not in this catalog.
+
+## Migration, verification and rollout
+
+1. Review and merge the paired Denali/Platform PRs separately. Do not deploy feature
+   branches or Vercel previews to production. Review default-off provider flags,
+   exact org/app entitlements and callback/target admission before any activation.
+2. Apply forward-only Platform migrations 011–014 using its approved migration
+   process and schema-014 runtime privilege manifest. They add durable return/
+   semantic revisions, Azure runtime scope, Azure Repos, and exact-resource AWS.
+   Apply Denali migrations 027–028 under its existing advisory-lock migration
+   function. Do not run migrations at API startup or change old migration files.
+3. Configure environment-local provider identities only in Modal Secrets.
+   `DENALI_PLATFORM_AZURE_REPOS_ENABLED` and `PLATFORM_ENABLE_AZURE_REPOS` default
+   off; Azure Repos requires a separately approved target and operator application
+   credential. `DENALI_PLATFORM_AWS_SELECTED_RESOURCE_ENABLED` and
+   `PLATFORM_ENABLE_AWS_SELECTED_RESOURCE` default off. Existing pilot org allowlist
+   and per-provider flags remain in force; flags do not grant entitlements.
+4. Register the fixed callback origin through the approved Platform operator
+   process. Its production helper supports read-only preview plus reviewed
+   expected-state apply; this PR does not run it. Keep dev/prod machines, Clerk,
+   Modal Secrets, Neon branches and return origins isolated.
+5. Run all Python/Ruff/frontend gates and PostgreSQL integration tests. Test native
+   and shared side by side, repository add/remove/rename/transfer and pagination,
+   stale/duplicate/concurrent leases, callback replay, delayed responses, organization
+   switching, reload/focus recovery, remote disable and broker outages. Demonstrate
+   local disconnect does not call shared disable. Unit/mocked reads do not replace
+   hosted validation or actual collection.
+6. On exact merged revisions, record hosted create → grant/setup/callback → validate
+   → collect → local disconnect → delete for every enabled provider, and test
+   organization-wide disable separately on an isolated shared test source. Record
+   actual evidence/coverage results, not only healthy badges. Use consenting test
+   sources; never alter an existing customer's scope as an acceptance shortcut.
+7. Only after every offered native capability and reconfiguration workflow has
+   passed that acceptance should a reviewed policy change set Platform as the only
+   route for **all new** connections. The catalog intentionally still reports
+   `platform_only: false` and hosted/parity blockers. Existing organizations are
+   not exempt from the future new-creation policy; existing bindings remain exempt
+   from migration. No production activation is implied by merging this code.
+
+Rollback is a reviewed revert of application policy/code from merged main with
+the usual release process. Keep additive database migrations and existing native/
+shared bindings; do not delete source records or revoke customer grants to roll
+back a UI release. Disabling a new-creation flag must not rewrite old references.
+
+The surface map classifies the catalog, receipts and Azure Repos setup/selection
+APIs as authenticated browser handoffs. Existing validation, collection, job and
+result names, permission scopes and legacy request shapes remain compatible.
+The server's shared-AWS input additionally accepts exact-resource browser fields;
+the currently pinned public gateway does not expose those new parameters. No
+new CLI/MCP provider credential workflow or CLI release is introduced. Paired
+private broker contracts live in Platform; public results adapter pins are unchanged.

@@ -374,14 +374,10 @@ class AwsConnectionValidator:
             return _selected_validation(connection, started_at, credential_state="failed")
         try:
             if connection.get("credential_type") == "platform_shared_aws":
-                from denali.integrations.shared_aws_session import leased_aws_session
+                from denali.integrations.shared_aws_session import shared_aws_session
 
-                regions = configuration.get("regions") or []
-                if len(regions) != 1:
-                    raise ValueError("shared AWS validation requires one selected Region")
-                session = leased_aws_session(
+                session = shared_aws_session(
                     connection,
-                    region=regions[0],
                     scopes=list(connection.get("declared_scopes") or []),
                     session_factory=self._session_factory,
                 )
@@ -498,8 +494,8 @@ class AwsConnectionValidator:
             or self._max_workers == 1
             or len(regional_plan) < 2
         ):
-            # A platform lease stays inside this validation invocation. The
-            # parallel path creates per-thread sessions from legacy STS keys.
+            # The shared wrapper leases per service/Region. The parallel path
+            # below creates per-thread sessions only from native STS keys.
             regional_results = [
                 self._validate_plane(session, planned, configuration) for planned in regional_plan
             ]
