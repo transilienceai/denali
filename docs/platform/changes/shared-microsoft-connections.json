@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "update",
+  "reason": "Refresh default-off shared Azure and Entra onboarding onto current production for an independently enabled Entra-first rollout. Preserve native Microsoft, shared provider routing, Workspace binding and bounded pagination. Existing named Denali jobs and evidence tools reuse fixed Platform reads; only Entra activation is in scope and Azure Reader setup stays deferred.",
+  "capabilities": [
+    {
+      "name": "shared-microsoft-onboarding",
+      "kind": "not_externally_exposed",
+      "scopes": []
+    }
+  ],
+  "contract_files": [
+    "src/denali/api/connection_capabilities.py",
+    "docs/development/capability-surface.json"
+  ],
+  "documentation_files": ["docs/development/shared-microsoft-connections.md"],
+  "test_files": ["tests/test_shared_microsoft.py", "tests/test_shared_microsoft_api.py"],
+  "cli": {
+    "impact": "generic_tools",
+    "reason": "Existing connection, inventory, activity and findings tools operate on attached shared references with unchanged tool names and read schemas. No new login scope or typed command is introduced."
+  },
+  "gateway": {
+    "impact": "adapter_update",
+    "reason": "Paired Platform Microsoft broker routes and reviewed Denali source pin must ship together; Denali owns normalization, collection and findings. Setup and consent are not new MCP tools."
+  }
+}

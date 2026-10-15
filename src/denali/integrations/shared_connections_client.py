@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,10 +16,21 @@ import httpx
 from clerk_backend_api import Clerk
 from clerk_backend_api.models import ClerkBaseError
 
+_BOUNDED_RPC_SLOTS = threading.BoundedSemaphore(8)
+_BOUNDED_RPC_SECONDS = 60
+
 
 @dataclass(frozen=True)
 class SharedConnectionsError(Exception):
     status_code: int
+
+
+class _BoundedRPCFailure(Exception):
+    """Mutable exception for HTTP context managers; converted only after unwind."""
+
+    def __init__(self, status: int = 502):
+        self.status_code = status
+        super().__init__(status)
 
 
 class SharedConnectionsClient:
@@ -54,10 +68,7 @@ class SharedConnectionsClient:
         return org_ids
 
     def allows_org(self, clerk_org_id: str) -> bool:
-        return (
-            self._allowed_clerk_org_ids is None
-            or clerk_org_id in self._allowed_clerk_org_ids
-        )
+        return self._allowed_clerk_org_ids is None or clerk_org_id in self._allowed_clerk_org_ids
 
     @classmethod
     def from_environment(cls) -> SharedConnectionsClient | None:
@@ -90,47 +101,123 @@ class SharedConnectionsClient:
             raise SharedConnectionsError(404)
         if path != "/v1/connections" and not path.startswith("/internal/v1/connections/"):
             raise ValueError("unexpected shared connections path")
+        if max_response_bytes is not None:
+            if (
+                type(max_response_bytes) is not int
+                or not 1 <= max_response_bytes <= 2_097_152
+                or expect_text
+            ):
+                raise ValueError("invalid bounded shared response selection")
+            return self._bounded_request(method, path, clerk_org_id, payload, max_response_bytes)
         try:
             token = self._clerk.m2m.create_token(
                 seconds_until_expiration=60, min_remaining_ttl_seconds=20
             ).token
-            params = {"clerk_org_id": clerk_org_id} if method == "GET" or payload is None else None
-            body = {**payload, "clerk_org_id": clerk_org_id} if payload is not None else None
-            headers = {"Authorization": f"Bearer {token}"}
             with httpx.Client(timeout=20, follow_redirects=False) as client:
-                if max_response_bytes is None:
-                    response = client.request(
-                        method, f"{self._origin}{path}", params=params, json=body, headers=headers
-                    )
-                else:
-                    if not 1 <= max_response_bytes <= 2 * 1024 * 1024:
-                        raise ValueError("invalid shared connections response limit")
-                    with client.stream(
-                        method, f"{self._origin}{path}", params=params, json=body, headers=headers
-                    ) as response:
-                        if not 200 <= response.status_code < 300:
-                            safe = (
-                                response.status_code
-                                if response.status_code in {404, 409, 422} else 502
-                            )
-                            raise SharedConnectionsError(safe)
-                        chunks = bytearray()
-                        for chunk in response.iter_bytes():
-                            if len(chunks) + len(chunk) > max_response_bytes:
-                                raise SharedConnectionsError(502)
-                            chunks.extend(chunk)
-                    if expect_text:
-                        return chunks.decode("utf-8")
-                    try:
-                        result = json.loads(chunks)
-                    except (ValueError, UnicodeDecodeError, RecursionError) as error:
-                        raise SharedConnectionsError(502) from error
-                    if not isinstance(result, dict):
-                        raise SharedConnectionsError(502)
-                    return result
+                response = client.request(
+                    method,
+                    f"{self._origin}{path}",
+                    params=(
+                        {"clerk_org_id": clerk_org_id}
+                        if method == "GET" or payload is None
+                        else None
+                    ),
+                    json={**payload, "clerk_org_id": clerk_org_id} if payload is not None else None,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
         except (httpx.RequestError, ClerkBaseError) as error:
             raise SharedConnectionsError(502) from error
         if not 200 <= response.status_code < 300:
             safe_status = response.status_code if response.status_code in {404, 409, 422} else 502
             raise SharedConnectionsError(safe_status)
         return response.text if expect_text else response.json()
+
+    def _bounded_request(
+        self, method: str, path: str, org: str, payload: dict[str, Any] | None, limit: int
+    ) -> dict[str, Any]:
+        """Opt-in bounded JSON RPC; legacy providers retain their existing path.
+
+        The deadline includes M2M minting, transport and parsing. A bounded pool
+        also caps timed-out SDK calls which have not yet returned. No provider
+        token or raw transport/parser exception escapes this private boundary.
+        """
+        deadline = time.monotonic() + _BOUNDED_RPC_SECONDS
+        result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+        cancelled = threading.Event()
+        if not _BOUNDED_RPC_SLOTS.acquire(blocking=False):
+            raise SharedConnectionsError(502)
+
+        def check() -> None:
+            if cancelled.is_set() or time.monotonic() >= deadline:
+                raise _BoundedRPCFailure()
+
+        def perform() -> None:
+            try:
+                check()
+                token = self._clerk.m2m.create_token(
+                    seconds_until_expiration=120, min_remaining_ttl_seconds=90
+                ).token
+                check()
+                with httpx.Client(
+                    timeout=max(0.001, deadline - time.monotonic()),
+                    follow_redirects=False,
+                    trust_env=False,
+                    transport=httpx.HTTPTransport(retries=0),
+                ) as client:
+                    with client.stream(
+                        method,
+                        f"{self._origin}{path}",
+                        params={"clerk_org_id": org}
+                        if method == "GET" or payload is None
+                        else None,
+                        json={**payload, "clerk_org_id": org} if payload is not None else None,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/json",
+                            "Accept-Encoding": "identity",
+                        },
+                    ) as response:
+                        check()
+                        if not 200 <= response.status_code < 300:
+                            status = (
+                                response.status_code
+                                if response.status_code in {404, 409, 422}
+                                else 502
+                            )
+                            raise _BoundedRPCFailure(status)
+                        if response.headers.get("content-encoding", "identity") != "identity":
+                            raise _BoundedRPCFailure()
+                        length = response.headers.get("content-length")
+                        if length is not None and (not length.isdigit() or int(length) > limit):
+                            raise _BoundedRPCFailure()
+                        body = bytearray()
+                        for chunk in response.iter_bytes():
+                            check()
+                            if len(body) + len(chunk) > limit:
+                                raise _BoundedRPCFailure()
+                            body.extend(chunk)
+                        check()
+                        value = json.loads(body)
+                        check()
+                        if not isinstance(value, dict):
+                            raise _BoundedRPCFailure()
+                        result.put((True, value))
+            except Exception as error:  # noqa: BLE001 - no raw credential-owning exception escapes.
+                safe = SharedConnectionsError(
+                    error.status_code if isinstance(error, _BoundedRPCFailure) else 502
+                )
+                result.put((False, safe))
+            finally:
+                _BOUNDED_RPC_SLOTS.release()
+
+        threading.Thread(target=perform, name="shared-bounded-rpc", daemon=True).start()
+        try:
+            success, value = result.get(timeout=max(0.001, deadline - time.monotonic()))
+        except queue.Empty:
+            cancelled.set()
+            raise SharedConnectionsError(502) from None
+        if cancelled.is_set() or time.monotonic() >= deadline:
+            raise SharedConnectionsError(502)
+        if not success:
+            raise value from None
+        return value

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Reduce only shared Workspace broker request granularity from 1000 to at most 100 records per page and validate each returned page against that actual request. Preserve full cursor pagination, the same window/record/page/byte/deadline bounds, native Reports behavior, authorization, normalization and failed/partial coverage semantics. No public capability, contract, permission, endpoint or retry change.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "Existing CLI reads and collection commands retain the same inputs, outputs, login scopes and installation."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "No public tool schema, product receiver contract, Platform adapter or portal snapshot change; this is shared-only internal request batching."
+  }
+}

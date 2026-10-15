@@ -61,12 +61,9 @@ def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
     ]
     assert len(module["runtime_secrets"]) == 3
     assert len(module["shared_connections_secrets"]) == 3
-    assert "DENALI_PLATFORM_CONNECTIONS_ORIGIN" in repr(
-        module["shared_connections_secrets"][2]
-    )
-    assert "DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS" in repr(
-        module["shared_connections_secrets"][2]
-    )
+    assert "DENALI_PLATFORM_CONNECTIONS_ORIGIN" in repr(module["shared_connections_secrets"][2])
+
+    assert "DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS" in repr(module["shared_connections_secrets"][2])
     assert [secret.name for secret in module["shasta_bridge_secrets"][:2]] == [
         "test-core",
         "test-provider",
@@ -96,9 +93,24 @@ def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
         "shared_connections_config"
     ]
     assert len(module["shared_connections_secrets"]) == 3
-    assert "DENALI_PLATFORM_CONNECTIONS_ORIGIN" in repr(
-        module["shared_connections_secrets"][2]
+    assert "DENALI_PLATFORM_CONNECTIONS_ORIGIN" in repr(module["shared_connections_secrets"][2])
+
+
+def test_workspace_flag_reaches_every_worker_without_extra_secret(monkeypatch):
+    monkeypatch.setenv("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED", "true")
+    monkeypatch.setenv("DENALI_ENABLE_SHARED_JIRA_READS", "true")
+    module = runpy.run_path(str(MODAL_APP))
+    config = module["shared_connections_config"]
+    assert config["DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED"] == "true"
+    assert config["DENALI_ENABLE_SHARED_JIRA_READS"] == "true"
+    assert len(module["runtime_secrets"]) == 3
+    assert len(module["shasta_bridge_secrets"]) == 4
+    monkeypatch.delenv("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED")
+    module = runpy.run_path(str(MODAL_APP))
+    assert (
+        module["shared_connections_config"]["DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED"] == "false"
     )
+    assert module["shared_connections_config"]["DENALI_ENABLE_SHARED_JIRA_READS"] == "true"
 
 
 @pytest.mark.parametrize("invalid", ["TRUE", "1", "yes", " false ", "invalid"])
@@ -124,3 +136,9 @@ def test_deployment_workflows_carry_public_jira_selector_with_false_default(work
         "${{ vars.DENALI_ENABLE_SHARED_JIRA_READS || 'false' }}"
     ) in deploy
     assert "secrets.DENALI_ENABLE_SHARED_JIRA_READS" not in source
+
+
+def test_workspace_flag_rejects_nonliteral_values(monkeypatch):
+    monkeypatch.setenv("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED", "TRUE")
+    with pytest.raises(ValueError, match="true or false"):
+        runpy.run_path(str(MODAL_APP))

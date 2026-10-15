@@ -38,6 +38,12 @@ if [[ "${DENALI_ENABLE_SHARED_JIRA_READS}" != "true" && "${DENALI_ENABLE_SHARED_
   exit 2
 fi
 export DENALI_MODAL_REGION="${DENALI_MODAL_REGION:-us-east}"
+export DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED="${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED:-false}"
+if [[ "${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED}" != "true" \
+  && "${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED}" != "false" ]]; then
+  echo "Workspace flag must be literal true or false." >&2
+  exit 2
+fi
 development_modal_origin="${DENALI_DEVELOPMENT_MODAL_ORIGIN:-https://transilience-denali-dev--denali-dev-api.modal.run}"
 development_web_origin="${DENALI_DEVELOPMENT_WEB_ORIGIN:-https://denali-dev.transilience.cloud}"
 

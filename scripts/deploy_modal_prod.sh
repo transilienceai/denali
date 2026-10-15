@@ -55,6 +55,17 @@ production_web_origin="${DENALI_PRODUCTION_WEB_ORIGIN:-https://denali.transilien
 # enable only the reviewed Platform production origin and Clerk organization.
 shared_origin="${DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN:-}"
 allowed_orgs="${DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS:-}"
+export DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED="${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED:-false}"
+if [[ "${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED}" != "true" \
+  && "${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED}" != "false" ]]; then
+  echo "Workspace flag must be literal true or false." >&2
+  exit 2
+fi
+if [[ "${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED}" == "true" \
+  && ( -z "${shared_origin}" || -z "${allowed_orgs}" ) ]]; then
+  echo "Workspace activation requires the reviewed shared origin and organization." >&2
+  exit 2
+fi
 if [[ -n "${shared_origin}" || -n "${allowed_orgs}" ]]; then
   if [[ "${shared_origin}" != "https://transilience-transilience-platform-prod--transilience-pl-8a9ce7.modal.run" \
     || "${allowed_orgs}" != "org_3K8emWY2vMAQDvm9UaMlZBnrjVt" ]]; then

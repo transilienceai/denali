@@ -92,6 +92,26 @@ def test_production_deploy_requires_explicit_confirmation(tmp_path: Path) -> Non
     assert not (tmp_path / "calls.log").exists()
 
 
+def test_workspace_activation_requires_reviewed_bridge_and_literal_flag(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path,
+        "--confirm-production",
+        DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED="true",
+        DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN="",
+        DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS="",
+    )
+    assert result.returncode == 2
+    assert "reviewed shared origin" in result.stderr
+    assert not (tmp_path / "calls.log").exists()
+
+
+def test_workspace_nonliteral_production_flag_is_rejected(tmp_path: Path) -> None:
+    result = _run(tmp_path, "--confirm-production", DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED="TRUE")
+    assert result.returncode == 2
+    assert "literal true or false" in result.stderr
+    assert not (tmp_path / "calls.log").exists()
+
+
 def test_production_deploy_rejects_dirty_worktree(tmp_path: Path) -> None:
     result = _run(tmp_path, "--confirm-production", FAKE_GIT_STATUS="modified")
 

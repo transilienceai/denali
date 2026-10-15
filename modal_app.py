@@ -43,6 +43,10 @@ shared_connections_config = {
     "DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin,
     "DENALI_ENABLE_SHARED_JIRA_READS": shared_jira_reads_flag,
 }
+workspace_flag = os.environ.get("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED", "false")
+if workspace_flag not in {"true", "false"}:
+    raise ValueError("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED must be true or false")
+shared_connections_config["DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED"] = workspace_flag
 if shared_connections_allowed_org_ids:
     # Dev already carries its allowlist in the core Modal Secret. Do not shadow
     # that value with an empty deployment variable.
@@ -116,6 +120,8 @@ def _validators():
     )
     from denali.integrations.shared_connections_client import SharedConnectionsClient
     from denali.integrations.shared_github import GitHubValidatorRouter
+    from denali.integrations.shared_google_workspace import WorkspaceValidatorRouter
+    from denali.integrations.shared_microsoft import MicrosoftValidatorRouter
 
     github_app = _github_app_from_environment()
     platform = SharedConnectionsClient.from_environment()
@@ -125,8 +131,10 @@ def _validators():
     workspace_operator = _google_workspace_operator_from_environment()
     return {
         "aws": AwsConnectionValidator(),
-        "azure": AzureConnectionValidator(),
-        "entra": EntraConnectionValidator(entra_client) if entra_client else None,
+        "azure": MicrosoftValidatorRouter("azure", AzureConnectionValidator(), platform),
+        "entra": MicrosoftValidatorRouter(
+            "entra", EntraConnectionValidator(entra_client) if entra_client else None, platform
+        ) if entra_client or platform else None,
         "gcp": GcpConnectionValidator(),
         "github": GitHubValidatorRouter(github_validator, platform)
         if platform
@@ -135,7 +143,16 @@ def _validators():
             AzureReposConnectionValidator(azure_repos_client) if azure_repos_client else None
         ),
         "google_workspace": (
-            GoogleWorkspaceConnectionValidator(workspace_operator) if workspace_operator else None
+            WorkspaceValidatorRouter(
+                GoogleWorkspaceConnectionValidator(workspace_operator)
+                if workspace_operator
+                else None,
+                platform,
+            )
+            if platform
+            else GoogleWorkspaceConnectionValidator(workspace_operator)
+            if workspace_operator
+            else None
         ),
     }
 
@@ -261,6 +278,8 @@ def collection_worker(job_id: str) -> None:
     from denali.connectors.google_workspace import GoogleWorkspaceConnectionCollector
     from denali.integrations.shared_connections_client import SharedConnectionsClient
     from denali.integrations.shared_github import GitHubCollectorRouter
+    from denali.integrations.shared_google_workspace import WorkspaceCollectorRouter
+    from denali.integrations.shared_microsoft import MicrosoftCollectorRouter
     from denali.store.repository import PostgresInventoryRepository
 
     _configure_aws_oidc()
@@ -276,9 +295,13 @@ def collection_worker(job_id: str) -> None:
         {
             "aws_deployments": AwsConnectionDeploymentCollector(),
             "aws_agent_runtime": AwsConnectionAgentRuntimeCollector(),
-            "azure_deployments": AzureConnectionDeploymentCollector(),
+            "azure_deployments": MicrosoftCollectorRouter(
+                "azure", AzureConnectionDeploymentCollector(), platform
+            ),
             "azure_agent_runtime": AzureConnectionAgentRuntimeCollector(),
-            "entra_ai": EntraConnectionCollector(entra_client) if entra_client else None,
+            "entra_ai": MicrosoftCollectorRouter(
+                "entra", EntraConnectionCollector(entra_client) if entra_client else None, platform
+            ) if entra_client or platform else None,
             "gcp_deployments": GcpConnectionDeploymentCollector(),
             "github_source": (
                 GitHubCollectorRouter(github_collector, platform) if platform else github_collector
@@ -287,7 +310,14 @@ def collection_worker(job_id: str) -> None:
                 AzureReposRepositoryCollector(azure_repos_client) if azure_repos_client else None
             ),
             "google_workspace_ai": (
-                GoogleWorkspaceConnectionCollector(workspace_operator)
+                WorkspaceCollectorRouter(
+                    GoogleWorkspaceConnectionCollector(workspace_operator)
+                    if workspace_operator
+                    else None,
+                    platform,
+                )
+                if platform
+                else GoogleWorkspaceConnectionCollector(workspace_operator)
                 if workspace_operator
                 else None
             ),

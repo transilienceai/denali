@@ -78,6 +78,7 @@ jobs:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       DENALI_ENABLE_SHARED_JIRA_READS: ${{ vars.DENALI_ENABLE_SHARED_JIRA_READS || 'false' }}
+      DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED: ${{ vars.DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED }}
     steps:
       - uses: actions/checkout@v4
         with:
