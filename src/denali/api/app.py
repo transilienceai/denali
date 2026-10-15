@@ -917,6 +917,7 @@ class SharedGitHubSetupInput(BaseModel):
 
     request_id: UUID = Field(default_factory=uuid4)
     connection_id: UUID | None = None
+    platform_connection_id: UUID | None = None
 
 
 class SharedGcpProject(BaseModel):
@@ -3070,6 +3071,7 @@ def create_app(
         _shared_github_context(request)
         repo, tenant = _context(request)
         payload = payload or SharedGitHubSetupInput()
+        platform_connection_id = payload.platform_connection_id
         if payload.connection_id is not None:
             source = repo.get_connection(tenant, str(payload.connection_id))
             if (
@@ -3078,6 +3080,17 @@ def create_app(
                 or source.get("credential_reference", {}).get("type") != "platform_shared_github"
             ):
                 raise HTTPException(status_code=404, detail="shared GitHub connection not found")
+            try:
+                saved_platform_id = UUID(source["credential_reference"]["platform_connection_id"])
+            except (KeyError, TypeError, ValueError, AttributeError):
+                raise HTTPException(
+                    status_code=409, detail="shared GitHub reference is invalid"
+                ) from None
+            if platform_connection_id is not None and platform_connection_id != saved_platform_id:
+                raise HTTPException(
+                    status_code=409, detail="shared GitHub reference does not match"
+                )
+            platform_connection_id = saved_platform_id
         return_state, digest = new_return_state()
         try:
             workflow = repo.begin_connection_onboarding(
@@ -3085,6 +3098,9 @@ def create_app(
                 request_id=str(payload.request_id),
                 return_state_sha256=digest,
                 connection_id=str(payload.connection_id) if payload.connection_id else None,
+                platform_connection_id=str(platform_connection_id)
+                if platform_connection_id
+                else None,
             )
         except ValueError:
             raise HTTPException(
@@ -3095,10 +3111,20 @@ def create_app(
                 request,
                 "POST",
                 "/internal/v1/connections/github/setup",
-                payload={"return_state": return_state},
+                payload={
+                    "return_state": return_state,
+                    **(
+                        {"existing_connection_id": str(platform_connection_id)}
+                        if platform_connection_id
+                        else {}
+                    ),
+                },
             )
             install_url = safe_install_url(
-                result.get("install_url") if isinstance(result, dict) else None
+                result.get("authorize_url" if platform_connection_id else "install_url")
+                if isinstance(result, dict)
+                else None,
+                existing_installation=platform_connection_id is not None,
             )
         except (ValueError, HTTPException) as error:
             repo.fail_connection_onboarding(tenant, str(workflow["id"]), return_state_sha256=digest)

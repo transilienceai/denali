@@ -374,7 +374,7 @@ export const api = {
     }),
   sharedGithubConnections: () => request<{ items: SharedGitHubConnection[] }>("/v1/shared/connections/github"),
   sharedGithubRepositories: (id: string) => request<{ items: SharedGitHubRepository[] }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/repositories`),
-  startSharedGithubSetup: (input?: { request_id?: string; connection_id?: string }) => request<{ install_url: string; workflow_id?: string }>("/v1/shared/connections/github/setup", { method: "POST", body: JSON.stringify(input ?? {}) }),
+  startSharedGithubSetup: (input?: { request_id?: string; connection_id?: string; platform_connection_id?: string }) => request<{ install_url: string; workflow_id?: string }>("/v1/shared/connections/github/setup", { method: "POST", body: JSON.stringify(input ?? {}) }),
   useSharedGithubInDenali: (id: string, repositoryIds?: number[], declaredScopes?: string[]) => request<Connection>(`/v1/shared/connections/github/${encodeURIComponent(id)}/use-in-denali`, { method: "POST", body: JSON.stringify({ ...(repositoryIds === undefined ? {} : { repository_ids: repositoryIds }), ...(declaredScopes === undefined ? {} : { declared_scopes: declaredScopes }) }) }),
   disableSharedGithub: (id: string) => request<{ status: string }>(`/v1/shared/connections/github/${encodeURIComponent(id)}/disable`, { method: "POST" }),
   sharedAzureReposConfig: () => request<{ items: SharedAzureReposTarget[] }>("/v1/shared/connections/azure-repos/config"),

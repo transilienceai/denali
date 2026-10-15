@@ -46,22 +46,23 @@ from Denali as described below. This creates the required Platform one-time stat
 do not manually install early and attempt to import that installation afterward.
 Selected-repository consent and hosted acceptance happen after this enablement.
 
-No Denali schema migration is added. The shared reference, exact repository
-metadata, validation jobs and collection jobs use the existing tenant tables.
+Shared references, exact repository metadata, validation jobs and collection
+jobs use the existing tenant tables. Unified setup additionally uses the durable
+onboarding receipts introduced by migrations 027–028.
 Neither enabling the feature nor adding entitlement imports an old installation.
 
 ## Install and attach
 
 1. Sign in to Denali as the intended Organization admin and open Connections.
-2. Choose **Connect GitHub** in the reusable GitHub section. Install the
+2. Choose **Add connection → GitHub** in the unified Connections view. Install the
    separate Platform App on only the repositories selected for this pilot.
 3. Complete GitHub user authorization. Platform verifies the installer can
    access the installation, checks the App identity and consumes one-time
-   state. Its success page asks you to return to Denali.
-4. Return to the original Denali tab, refresh and explicitly select repository
+   state. Platform returns to the exact registered Denali callback.
+4. Review the verified available catalog and explicitly select repository
    IDs for this Denali connection. Choose **Use selected repositories in Denali**.
-   Selection starts empty and resets on refresh; newly available repositories
-   are never automatically selected. The backend rechecks account, installation,
+   New selection starts empty; refresh preserves reviewed matching identities,
+   but newly available repositories are never automatically selected. The backend rechecks account, installation,
    scopes and live token issuance before storing a shared reference.
 5. Validate the attached connection, then collect source. Health proves access;
    collection and resulting evidence are separate acceptance checks.
@@ -71,6 +72,21 @@ OAuth callback ends in `/v1/connections/github/oauth/callback`. Both belong
 to the stable Platform production API origin, not Denali's old callbacks.
 GitHub's installation redirect ID is untrusted until installer OAuth verifies
 it. See [GitHub's setup warning](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url).
+
+For an already registered shared installation, **Manage repository access in
+GitHub** starts a fresh PKCE user authorization directly for the stored Platform
+connection. An already-installed GitHub settings link drops installation setup
+state and cannot synchronize an unchanged installation. Do not toggle access,
+uninstall or reinstall to manufacture a callback. Denali accepts the broker's
+exact GitHub OAuth endpoint only for the explicit existing-source branch, and
+keeps the legacy installation URL contract for new installations. The durable
+receipt pins both the tenant and Platform source. Reviewing an existing disabled
+attachment never enables it or changes its saved repository boundary.
+OAuth launch validation requires the broker's six singleton query fields,
+bounded opaque state, S256 PKCE and the fixed HTTPS GitHub callback path, without
+credentials or extra callback query/fragment. The callback hostname belongs to
+the authenticated broker's configured GitHub App; its public origin is not
+assumed to equal Denali's server-to-server broker transport origin.
 
 Repeated explicit attachment is idempotent for the same organization, Platform
 connection, repository IDs and scopes, regardless of selection ordering. Each

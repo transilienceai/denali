@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "update",
+  "reason": "Repair authenticated browser re-verification for already installed shared GitHub sources without changing installation access, saved attachment selection, lifecycle or public job/result operations. Platform owns the generic durable PKCE installation proof; Denali resolves local references within the authenticated tenant and pins existing Platform context in its durable receipt.",
+  "capabilities": [{"name": "shared-github-installation-reverification", "kind": "not_externally_exposed", "scopes": []}],
+  "contract_files": ["docs/development/capability-surface.json"],
+  "documentation_files": ["docs/development/unified-connections.md", "docs/development/shared-github-connections-pilot.md"],
+  "test_files": ["tests/test_shared_github.py", "tests/test_connection_onboarding_postgres.py"],
+  "cli": {"impact": "none", "reason": "Existing provider authorization remains a private authenticated browser handoff; named CLI/MCP validation, collection, job and result contracts and scopes are unchanged."},
+  "gateway": {"impact": "none", "reason": "The paired Platform change extends the private provider setup broker with existing_connection_id and authorize_url; it does not change Denali public gateway schemas or adapter pins."}
+}
