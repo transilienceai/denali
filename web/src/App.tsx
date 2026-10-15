@@ -54,6 +54,7 @@ import { api } from "./api";
 import { SharedAwsPilot } from "./SharedAwsPilot";
 import { SharedGcpPilot } from "./SharedGcpPilot";
 import { SharedGoogleWorkspacePilot } from "./SharedGoogleWorkspacePilot";
+import { SharedMicrosoftPilot } from "./SharedMicrosoftPilot";
 import { SharedGitHubPilot } from "./SharedGitHubPilot";
 import { GOOGLE_WORKSPACE_AUDIT_SCOPE } from "./sharedGoogleWorkspaceOnboarding";
 import { GitHubSetupStep } from "./GitHubSetupStep";
@@ -3411,6 +3412,8 @@ function ConnectionsPage({
     <SharedAwsPilot canWrite={canWrite} onChanged={onChanged} onAvailabilityChange={setSharedAwsAvailability} />
     <SharedGcpPilot canWrite={canWrite} onChanged={onChanged} />
     <SharedGoogleWorkspacePilot canWrite={canWrite} onChanged={onChanged} />
+    <SharedMicrosoftPilot provider="azure" canWrite={canWrite} onChanged={onChanged} />
+    <SharedMicrosoftPilot provider="entra" canWrite={canWrite} onChanged={onChanged} />
     <SharedGitHubPilot canWrite={canWrite} onChanged={onChanged} />
     {entraSetupReturn && <div className={`connection-consent-return ${entraSetupReturn.state}`}>
       {entraSetupReturn.state === "succeeded" ? <CircleCheck /> : <CircleAlert />}
@@ -3587,6 +3590,14 @@ function CopyableSetupValue({ value, ariaLabel, copyLabel, copiedMessage, placeh
 }
 
 function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareAzureRepos, onCompleteAzureRepos, onCollectAzureRepos, onPrepareEntra, onCollectEntra, onCompleteGoogleWorkspace, onCollectGoogleWorkspace, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareAzureRepos: () => void; onCompleteAzureRepos: (repositoryIds: string[]) => void; onCollectAzureRepos: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; onCompleteGoogleWorkspace: () => void; onCollectGoogleWorkspace: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
+  if (connection.credential_reference.type === "platform_shared_azure" || connection.credential_reference.type === "platform_shared_entra") return <section className="panel connection-detail" aria-label="Platform shared Microsoft connection">
+    <div className="connection-detail-head"><div><span>SHARED {connection.provider.toUpperCase()}</span><h3>{connection.display_name}</h3><code>Platform connection {connection.credential_reference.platform_connection_id}</code></div><ConnectionHealth connection={connection} /></div>
+    <p>Platform owns Microsoft consent and access. Denali reads bounded metadata through its existing evidence pipeline.</p>
+    <p>Tenant {connection.configuration.tenant_id} · {connection.declared_scopes.join(", ")}. Activity collection covers the latest 24 hours.</p>
+    {connection.lifecycle_state === "active" && <div className="connection-launch-actions"><button disabled={busy !== null} onClick={onValidate}>Validate metadata access</button><button disabled={busy !== null || connection.health_state !== "healthy"} onClick={connection.provider === "azure" ? onCollectAzure : onCollectEntra}>Collect Microsoft evidence</button><button disabled={busy !== null} onClick={onDisable}>Disable Denali use</button></div>}
+    {connection.lifecycle_state === "disabled" && <button disabled={busy !== null} onClick={onDelete}>Delete Denali configuration</button>}
+    <p>Validation and collection use durable jobs. Global disconnect belongs to Platform; removing Denali configuration does not revoke Microsoft consent, Azure Reader assignments, or collected evidence.</p>
+  </section>;
   if (connection.credential_reference.type === "platform_shared_gcp") return <section className="panel connection-detail" aria-label="Platform shared Google Cloud connection">
     <div className="connection-detail-head"><div><span>SHARED GOOGLE CLOUD</span><h3>{connection.display_name}</h3><code>Platform connection {connection.credential_reference.platform_connection_id}</code></div><ConnectionHealth connection={connection} /></div>
     <p>Platform holds the keyless principal and selected project grants. Denali receives only bounded metadata reads; no Google token or service-account key. Existing Denali-managed Google Cloud connections are separate.</p>

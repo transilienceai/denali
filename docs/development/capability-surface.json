@@ -1,16 +1,17 @@
 {
   "schema_version": 1,
   "baseline_revision": "a7c74e5915b5d079500788192e69d821fa900f4d",
-  "public_operation_count": 112,
-  "explicit_public_operation_count": 108,
+  "public_operation_count": 123,
+  "explicit_public_operation_count": 119,
   "existing_named_read_count": 28,
   "existing_named_write_count": 3,
   "release_named_read_count": 38,
   "release_named_write_count": 16,
   "release_named_resource_write_count": 4,
   "scope_statement": "Product feature parity through named guarded capabilities; deliberately not literal public API parity.",
-  "browser_operation_count": 93,
+  "browser_operation_count": 103,
   "exceptions": {
+    "shared_microsoft_pilot": "Default-off shared Azure and Entra plans, Microsoft consent, Azure Reader setup and attachment are organization-admin browser handoffs. Existing connection validation/collection/jobs and findings/inventory capabilities reuse attached references without new MCP tool names, login scopes or provider-write authority. GET setup also rotates one-time state and requires admin.",
     "shared_github_pilot": "Default-off shared GitHub installation consent and attachment are authenticated browser workflows. Existing named connection validation, collection, job polling and results capabilities reuse attached shared references; no new MCP lifecycle tools or customer repository writes are advertised.",
     "security_admin_user_creation": "Password-based Clerk user creation remains a secure browser workflow; passwords must never enter model/chat context.",
     "security_admin_invitations": "Bulk invitations affect shared Clerk Organization membership across applications. A future capability requires separate per-action, recipient-role, confirmation, and audit design; not included in this rollout.",
@@ -22,6 +23,125 @@
     "shared_google_workspace_pilot": "Default-off shared Workspace admission, external domain-wide delegation instructions, validation and attachment are authenticated browser workflows. Existing named connection validation, google_workspace_ai collection, durable job polling and results reuse the attached reference; no new CLI command, OAuth scope or MCP onboarding tool is added."
   },
   "operations": [
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/{provider}/config",
+      "handler": "shared_microsoft_config",
+      "browser_methods": [
+        "sharedMicrosoftConfig"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/{provider}",
+      "handler": "list_shared_microsoft",
+      "browser_methods": [
+        "sharedMicrosoftConnections"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/{provider}",
+      "handler": "create_shared_microsoft",
+      "browser_methods": [
+        "createSharedMicrosoft"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/{provider}/{connection_id}/validation",
+      "handler": "shared_microsoft_status",
+      "browser_methods": [
+        "sharedMicrosoftStatus"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/{provider}/{connection_id}/setup",
+      "handler": "shared_microsoft_setup",
+      "browser_methods": [],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/{provider}/{connection_id}/setup",
+      "handler": "shared_microsoft_setup",
+      "browser_methods": [
+        "startSharedMicrosoftSetup"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "GET",
+      "path": "/v1/shared/connections/azure/{connection_id}/setup.sh",
+      "handler": "shared_azure_script",
+      "browser_methods": [
+        "sharedAzureScript"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/{provider}/{connection_id}/validate",
+      "handler": "validate_shared_microsoft",
+      "browser_methods": [
+        "validateSharedMicrosoft"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/{provider}/{connection_id}/use-in-denali",
+      "handler": "use_shared_microsoft",
+      "browser_methods": [
+        "useSharedMicrosoft"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared/connections/{provider}/{connection_id}/disable",
+      "handler": "disable_shared_microsoft",
+      "browser_methods": [
+        "disableSharedMicrosoft"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/shared/connections/{provider}/{connection_id}",
+      "handler": "delete_shared_microsoft",
+      "browser_methods": [
+        "deleteSharedMicrosoft"
+      ],
+      "class": "pilot_connector",
+      "disposition": "excluded_dark_shared_connection_pilot",
+      "capability": null
+    },
     {
       "method": "GET",
       "path": "/v1/shared/connections/google-workspace/config",
