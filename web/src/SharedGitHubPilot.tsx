@@ -66,6 +66,7 @@ export function SharedGitHubPilot({ canWrite, onChanged, connection, onAttached,
     let cancelled = false;
     void api.onboardingWorkflow(workflowId).then((workflow) => {
       if (cancelled) return;
+      if (workflow.platform_connection_id) setSelectedId(workflow.platform_connection_id);
       setMessage(workflow.error_code ? "GitHub setup did not complete. Review access and retry."
         : "You returned from GitHub. Review the verified available repositories before saving Denali’s selection.");
       onProgress?.("verify", "Review the repositories included in Denali");
@@ -104,7 +105,10 @@ export function SharedGitHubPilot({ canWrite, onChanged, connection, onAttached,
   function startSetup() {
     void perform(async () => {
       requestId.current ??= crypto.randomUUID();
-      const result = await api.startSharedGithubSetup({ request_id: requestId.current, ...(connection ? { connection_id: connection.id } : {}) });
+      const result = await api.startSharedGithubSetup({ request_id: requestId.current,
+        ...(connection ? { connection_id: connection.id } : {}),
+        ...(selected ? { platform_connection_id: selected.id } : {}),
+      });
       const url = verifiedInstallUrl(result.install_url);
       setInstallUrl(url);
       onProgress?.("grant", "Review GitHub access and complete authorization");
@@ -135,7 +139,7 @@ export function SharedGitHubPilot({ canWrite, onChanged, connection, onAttached,
     {selectedId && !selected && !error && <p role="alert">The original GitHub installation is unavailable. Review its organization access before continuing.</p>}
     {items.length === 0 && !error && <p>Authorize GitHub to discover the repositories available to this organization.</p>}
     {selected && <div className="shared-aws-pilot-detail">
-      <label>GitHub account<select value={selected.id} disabled={busy || !!connection} onChange={(event) => setSelectedId(event.target.value)}>{items.map((item) => <option key={item.id} value={item.id}>{item.account_login} · {item.repository_count} available · {item.availability}</option>)}</select></label>
+      <label>GitHub account<select value={selected.id} disabled={busy || !!connection} onChange={(event) => { requestId.current = null; setSelectedId(event.target.value); }}>{items.map((item) => <option key={item.id} value={item.id}>{item.account_login} · {item.repository_count} available · {item.availability}</option>)}</select></label>
       <div className="connection-repository-summary"><p><strong>Available through Platform:</strong> {selected.repository_count} repositories. Saved GitHub access: {selected.repository_selection === "all" ? "all repositories" : "selected repositories"}.</p><p><strong>Selected for this Denali connection:</strong> {connection ? savedRepositories.length : 0} saved · {repositoryIds.length} in this review.</p><p>Last verified by Platform: {selected.last_validated_at ? new Date(selected.last_validated_at).toLocaleString() : "Not recorded"}. Reloading saved access does not synchronize changes made directly in GitHub.</p></div>
       {connection && !loadingRepositories && <div className="connection-repository-changes" role="status">
         <p>{changes.added.length} available beyond the saved selection · {changes.removed.length} no longer available · {changes.changed.length} changed identity.</p>

@@ -51,6 +51,7 @@ let root: Root;
 let container: HTMLDivElement;
 let calls: { github: number; gcp: number; aws: number; azure: number; native: number; disable: number; localDisable: string[]; attaches: Array<{ id: string; ids?: number[]; scopes?: string[] }>; azureAttaches: Array<{ id: string; ids: string[]; scopes: string[] }> };
 let nextAttachment: Connection;
+let acceptedOperations: Array<{ id: string; kind: string }>;
 const originalGlobals = new Map<string, PropertyDescriptor | undefined>();
 
 before(async () => {
@@ -68,6 +69,7 @@ before(async () => {
 beforeEach(() => {
   calls = { github: 0, gcp: 0, aws: 0, azure: 0, native: 0, disable: 0, localDisable: [], attaches: [], azureAttaches: [] };
   nextAttachment = attached;
+  acceptedOperations = [];
   dom.window.confirm = () => true;
   Object.assign(pageApi, {
     connectionCatalog: async () => catalog,
@@ -121,7 +123,7 @@ function Harness({ initialConnections = [], initialQuery = { new: "1", provider:
     navigation: { values: query, set: (key, value, defaultValue = "") => update({ [key]: value === defaultValue ? null : value }), clear: (keys) => update(Object.fromEntries(keys.map((key) => [key, null]))), update },
     onSelect: (id) => setQuery(id ? { connection: id } : {}),
     onShowCreate: (visible) => update({ new: visible ? "1" : null, manage: null, onboarding: null }),
-    onChanged: async () => { setRows([...initialConnections.filter((row) => row.id !== nextAttachment.id), nextAttachment]); }, onOperationAccepted: () => {},
+    onChanged: async () => { setRows([...initialConnections.filter((row) => row.id !== nextAttachment.id), nextAttachment]); }, onOperationAccepted: (id, kind) => { acceptedOperations.push({ id, kind }); },
     entraSetupReturn: null, githubSetupReturn: null, azureReposSetupReturn: null,
   });
 }
@@ -202,6 +204,28 @@ test("reviewing GitHub repositories never silently adds newly granted evidence s
   await click(button("Save reviewed repository selection"));
   assert.deepEqual(calls.attaches, [{ id: installation.id, ids: [42, 43], scopes: ["github.repository_metadata"] }]);
   assert.deepEqual(attached.declared_scopes, ["github.repository_metadata"]);
+});
+
+test("managing disabled GitHub access starts an exact reverify without reattaching or reactivating Denali", async () => {
+  const existing: Connection = { ...attached, lifecycle_state: "disabled" };
+  const setupRequests: Array<NonNullable<Parameters<typeof api.startSharedGithubSetup>[0]>> = [];
+  pageApi.sharedGithubConnections = async () => ({ items: [{ ...installation, availability: "disabled" as const }] });
+  pageApi.startSharedGithubSetup = async (input) => {
+    setupRequests.push(input!);
+    return { install_url: "https://invalid.example/setup" };
+  };
+  await mount({ initialConnections: [existing], initialQuery: { new: "1", provider: "github", manage: existing.id } });
+  await click(button("Manage repository access in GitHub"));
+  assert.equal(setupRequests.length, 1);
+  assert.equal(setupRequests[0]?.connection_id, existing.id);
+  assert.equal(setupRequests[0]?.platform_connection_id, installation.id);
+  assert.match(setupRequests[0]?.request_id ?? "", /^[a-f0-9-]{36}$/);
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /setup link is invalid/);
+  assert.equal(calls.attaches.length, 0);
+  assert.equal(calls.native, 0);
+  assert.equal(calls.disable, 0);
+  assert.equal(existing.lifecycle_state, "disabled");
+  assert.match(container.textContent ?? "", /Reviewing GitHub access does not reactivate it/);
 });
 
 test("a shared upstream error remains visible without creating or selecting a native fallback", async () => {
@@ -317,4 +341,189 @@ test("the admitted AWS exact-resource option reveals exact pins and removes disc
   assert.equal(container.querySelectorAll('input[type="checkbox"]').length, 0);
   assert.equal(container.querySelectorAll('input[maxlength="300"]').length, 3);
   assert.equal(calls.native, 0);
+});
+
+function runtimeConnection(provider: "aws" | "azure", shared = true): Connection {
+  return {
+    ...attached, id: `${provider}-runtime`, provider, display_name: `${provider} runtime`, health_state: "healthy",
+    declared_scopes: [`${provider}.agent_runtime_activity`],
+    credential_reference: shared
+      ? { type: provider === "aws" ? "platform_shared_aws" : "platform_shared_azure", platform_connection_id: `${provider}-shared` }
+      : provider === "aws" ? { type: "aws_assume_role", role_arn: "arn:aws:iam::123456789012:role/Reader" }
+        : { type: "azure_multitenant_app", client_id: "10000000-0000-0000-0000-000000000001" },
+    configuration: { account_id: "123456789012", regions: ["us-east-1"], subscriptions: [{ id: "10000000-0000-0000-0000-000000000002", name: "Fixture" }] },
+    validation_state: "idle", deployment_collection_state: "idle", runtime_collection_state: "idle",
+    last_deployment_collection: null, last_runtime_collection: null,
+  };
+}
+
+for (const provider of ["aws", "azure"] as const) {
+  for (const shared of [true, false]) {
+    test(`${provider} ${shared ? "shared" : "native"}: a reloaded runtime job shows Collecting and a later failed result needs attention`, async () => {
+      const running = { ...runtimeConnection(provider, shared), runtime_collection_state: "running" as const };
+      await mount({ initialConnections: [running], initialQuery: { connection: running.id } });
+      const badges = [...container.querySelectorAll(".connection-health")];
+      assert.ok(badges.length > 0);
+      assert.ok(badges.every((badge) => badge.textContent === "Collecting"));
+      assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /evidence is being collected/);
+      assert.equal(container.querySelector('[aria-label="Connection progress"] li:last-child')?.className, "current");
+
+      const failed = { ...running, runtime_collection_state: "idle" as const, last_runtime_collection: { state: "failed" as const, completed_at: "2026-10-16T00:01:00Z" } };
+      // Recreate the page to model leaving and returning with a durable terminal result.
+      await act(async () => root.render(createElement(Harness, { key: "returned", initialConnections: [failed], initialQuery: { connection: failed.id } })));
+      assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Needs attention"));
+      assert.equal(container.querySelector('[aria-label="Connection progress"] li:last-child')?.className, "attention");
+    });
+  }
+
+  test(`${provider}: accepting runtime-only collection marks runtime and waits for its actual result`, async () => {
+    const previous = runtimeConnection(provider);
+    const running = { ...previous, runtime_collection_state: "running" as const };
+    const done = { ...previous, last_runtime_collection: { state: "complete" as const, completed_at: "2026-10-16T00:01:00Z" } };
+    const states = [running, done];
+    let reads = 0;
+    pageApi.collectAzureDeployments = async () => ({ status: "started", connection_id: previous.id });
+    pageApi.collectAwsDeployments = async () => ({ status: "started", connection_id: previous.id });
+    pageApi.connection = async () => { reads += 1; nextAttachment = done; return states.shift()!; };
+    const originalTimeout = dom.window.setTimeout;
+    dom.window.setTimeout = ((handler: TimerHandler, timeout?: number) => {
+      if (timeout === 2000 && typeof handler === "function") { queueMicrotask(() => handler()); return 0; }
+      return originalTimeout.call(dom.window, handler, timeout);
+    }) as typeof dom.window.setTimeout;
+    try {
+      await mount({ initialConnections: [previous], initialQuery: { connection: previous.id } });
+      await click(button(provider === "aws" ? "Collect AWS evidence" : "Collect Microsoft evidence"));
+      assert.equal(reads, 2);
+      assert.deepEqual(acceptedOperations, [{ id: previous.id, kind: "runtime" }]);
+      assert.match(container.textContent ?? "", new RegExp(`${provider === "aws" ? "AWS" : "Azure"} evidence collection completed\\.`));
+      assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Ready"));
+      assert.equal(container.querySelector('[aria-label="Connection progress"] li:last-child')?.className, "complete");
+    } finally {
+      dom.window.setTimeout = originalTimeout;
+    }
+  });
+
+  test(`${provider}: shared detail exposes validation proof and every selected collection outcome`, async () => {
+    const completedAt = "2026-10-16T00:01:00Z";
+    const row: Connection = {
+      ...runtimeConnection(provider), declared_scopes: [`${provider}.agent_runtime_activity`, provider === "aws" ? "aws.bedrock" : "azure.ai_services"],
+      last_validation: {
+        started_at: "2026-10-16T00:00:00Z", completed_at: completedAt, health_state: "healthy", credential_state: "passed", account_id_observed: "fixture-identity",
+        summary: "Selected access verified", results: [{ scope: "fixture-scope", plane: "runtime", label: "Runtime read proof", region: "fixture-region", state: "passed", detail: "Declared read-only runtime access responded" }],
+      },
+      last_deployment_collection: provider === "aws"
+        ? { connection_id: "aws-runtime", state: "complete", completed_at: completedAt, region_count: 1, partial_count: 0, failed_count: 0, regions: [] }
+        : { connection_id: "azure-runtime", state: "complete", completed_at: completedAt, subscription_count: 1, partial_count: 0, failed_count: 0, subscriptions: [] },
+      last_runtime_collection: { state: "partial", completed_at: completedAt, activities: 4, detail: "One runtime boundary was unavailable", partial_regions: 1 },
+    };
+    await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+    const validation = container.querySelector('[aria-label="Connection validation results"]');
+    assert.match(validation?.textContent ?? "", /Selected access verified/);
+    assert.match(validation?.textContent ?? "", /Runtime read proof/);
+    assert.match(validation?.textContent ?? "", /Declared read-only runtime access responded/);
+    assert.equal(validation?.querySelector("time")?.dateTime, completedAt);
+    const collections = container.querySelector('[aria-label="Connection collection results"]');
+    assert.equal(collections?.querySelectorAll("section").length, 2);
+    assert.match(collections?.textContent ?? "", /Deployment evidence/);
+    assert.match(collections?.textContent ?? "", /Latest result: Complete/);
+    assert.match(collections?.textContent ?? "", /Latest result: Partial/);
+    assert.match(collections?.textContent ?? "", /4 activity events/);
+    assert.match(collections?.textContent ?? "", /One runtime boundary was unavailable/);
+    assert.deepEqual([...collections!.querySelectorAll("time")].map((time) => time.dateTime), [completedAt, completedAt]);
+    assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Needs attention"));
+  });
+}
+
+test("shared Microsoft Entra shows its audit outcome without inventing deployment or runtime coverage", async () => {
+  const row: Connection = {
+    ...runtimeConnection("azure"), id: "entra-audit", provider: "entra", credential_reference: { type: "platform_shared_entra", platform_connection_id: "shared-entra" },
+    declared_scopes: ["entra.enterprise_applications"], last_evidence_collection: { state: "complete", completed_at: "2026-10-16T00:01:00Z", activity_events: 5, coverage_complete: 2, detail: "Bounded audit metadata collected" },
+  };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  const results = container.querySelector('[aria-label="Connection collection results"]');
+  assert.equal(results?.querySelectorAll("section").length, 1);
+  assert.match(results?.textContent ?? "", /Audit evidence/);
+  assert.match(results?.textContent ?? "", /5 activity events/);
+  assert.match(results?.textContent ?? "", /Bounded audit metadata collected/);
+  assert.doesNotMatch(results?.textContent ?? "", /Deployment evidence|runtime activity/);
+});
+
+test("shared runtime detail labels an older result while a new collection runs", async () => {
+  const row: Connection = { ...runtimeConnection("azure"), runtime_collection_state: "running", last_runtime_collection: { state: "complete", completed_at: "2026-10-16T00:01:00Z" } };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  const results = container.querySelector('[aria-label="Connection collection results"]');
+  assert.match(results?.textContent ?? "", /Collection in progress. The result below is from the previous run/);
+  assert.equal(results?.querySelectorAll("section").length, 1);
+  assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Collecting"));
+});
+
+test("shared exact AWS result never implies Region discovery or account inventory", async () => {
+  const row: Connection = {
+    ...runtimeConnection("aws"), health_state: "partial", declared_scopes: ["aws.code_to_cloud"], configuration: { coverage_mode: "selected-resource" },
+    last_deployment_collection: { connection_id: "aws-runtime", state: "complete", completed_at: "2026-10-16T00:01:00Z", region_count: 0, partial_count: 0, failed_count: 0, regions: [], resource_coverage_state: "complete", account_coverage: "not_assessed" },
+  };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  const results = container.querySelector('[aria-label="Connection collection results"]');
+  assert.match(results?.textContent ?? "", /Selected-resource evidence/);
+  assert.match(results?.textContent ?? "", /Account inventory: not assessed/);
+  assert.doesNotMatch(results?.textContent ?? "", /0 Regions/);
+  assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Partial"));
+});
+
+for (const shared of [true, false]) {
+  for (const state of ["complete", "partial", "failed"] as const) {
+    test(`Azure Repos ${shared ? "shared" : "native"}: terminal ${state} source result and finish time remain inspectable`, async () => {
+      const completedAt = "2026-10-16T00:02:00Z";
+      const row: Connection = {
+        ...azureAttached, health_state: "healthy", source_collection_state: "idle",
+        credential_reference: shared ? azureAttached.credential_reference : { type: "azure_repos_service_principal", client_id: azureSource.application_client_id },
+        last_validation: {
+          started_at: "2026-10-16T00:00:00Z", completed_at: "2026-10-16T00:01:00Z", health_state: "healthy", credential_state: "passed", account_id_observed: "fixture",
+          summary: "Exact repository metadata verified", results: [{ scope: "azure_repos.repository_metadata", plane: "repository_metadata", label: "Repository metadata", region: "global", state: "passed", detail: "Saved project and repository identities matched", repository_id: azureRepositories[0]!.id, repository_full_name: azureRepositories[0]!.full_name }],
+        },
+        last_source_collection: { connection_id: azureAttached.id, state, completed_at: completedAt, repository_count: 2, failed_count: state === "failed" ? 2 : 0, partial_count: state === "partial" ? 1 : 0, repositories: [], detail: `Recorded ${state} source analysis outcome` },
+      };
+      await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+      const results = container.querySelector('[aria-label="Connection collection results"]');
+      assert.equal(results?.querySelectorAll("section").length, 1);
+      assert.match(results?.textContent ?? "", /Repository source evidence/);
+      assert.match(results?.textContent ?? "", new RegExp(`Latest result: ${state[0]!.toUpperCase()}${state.slice(1)}`));
+      assert.match(results?.textContent ?? "", /2 repositories/);
+      assert.match(results?.textContent ?? "", new RegExp(`Recorded ${state} source analysis outcome`));
+      assert.equal(results?.querySelector("time")?.dateTime, completedAt);
+      if (shared) {
+        const validation = container.querySelector('[aria-label="Connection validation results"]');
+        assert.match(validation?.textContent ?? "", /Exact repository metadata verified/);
+        assert.match(validation?.textContent ?? "", /Saved project and repository identities matched/);
+      }
+      assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === (state === "complete" ? "Ready" : "Needs attention")));
+      assert.equal(calls.azure, 0);
+      assert.equal(calls.native, 0);
+    });
+  }
+}
+
+test("shared GCP shows validation proof and the recorded partial project collection outcome", async () => {
+  const completedAt = "2026-10-16T00:02:00Z";
+  const row: Connection = {
+    ...attached, id: "gcp-shared-result", provider: "gcp", health_state: "healthy", declared_scopes: ["gcp.ai_services"],
+    credential_reference: { type: "platform_shared_gcp", platform_connection_id: "gcp-shared" }, configuration: { projects: [{ id: "fixture-project", number: "123456789012", name: "Fixture" }] },
+    last_validation: {
+      started_at: "2026-10-16T00:00:00Z", completed_at: "2026-10-16T00:01:00Z", health_state: "healthy", credential_state: "passed", account_id_observed: "fixture-project",
+      summary: "Selected project access verified", results: [{ scope: "gcp.ai_services", plane: "ai_services", label: "AI service metadata", region: "global", state: "passed", detail: "Selected project read returned", project_id: "fixture-project", project_name: "Fixture" }],
+    },
+    last_deployment_collection: { connection_id: "gcp-shared-result", state: "partial", completed_at: completedAt, project_count: 1, failed_count: 0, partial_count: 1, projects: [], detail: "Project collection has incomplete coverage" },
+  };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  assert.match(container.querySelector('[aria-label="Connection validation results"]')?.textContent ?? "", /Selected project access verified/);
+  assert.match(container.querySelector('[aria-label="Connection validation results"]')?.textContent ?? "", /Selected project read returned/);
+  const results = container.querySelector('[aria-label="Connection collection results"]');
+  assert.equal(results?.querySelectorAll("section").length, 1);
+  assert.match(results?.textContent ?? "", /Deployment evidence/);
+  assert.match(results?.textContent ?? "", /Latest result: Partial/);
+  assert.match(results?.textContent ?? "", /1 projects · 1 partial · 0 failed/);
+  assert.match(results?.textContent ?? "", /Project collection has incomplete coverage/);
+  assert.equal(results?.querySelector("time")?.dateTime, completedAt);
+  assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Needs attention"));
+  assert.equal(calls.gcp, 0);
 });

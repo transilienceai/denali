@@ -70,6 +70,7 @@ import {
   type RunningConnectionOperation,
 } from "./connectionMonitoring";
 import { waitForAcceptedOperation } from "./connectionPolling";
+import { collectionResult, collectionResultsChanged, connectionCollectionStatus, selectedCollectionKinds, type ConnectionCollectionKind } from "./connectionCollections";
 import { getConnectionProgress, type ConnectionProgressStepState } from "./connectionProgress";
 import { collectionDiagnostic, noDeploymentExplanation } from "./collectionDiagnostics";
 import {
@@ -3078,15 +3079,13 @@ export function ConnectionsPage({
 
   async function waitForCollection(
     connection: Connection,
-    kind: "deployment" | "evidence" | "source",
+    kind: ConnectionCollectionKind,
   ) {
     const stateField = `${kind}_collection_state` as const;
-    const resultField = `last_${kind}_collection` as const;
-    const previousCompletion = connection[resultField]?.completed_at ?? null;
     await waitForAcceptedOperation({
       fetchCurrent: () => api.connection(connection.id),
       isRunning: (current) => current[stateField] === "running",
-      isComplete: (current) => current[resultField]?.completed_at !== previousCompletion,
+      isComplete: (current) => collectionResultsChanged(connection, current, [kind]),
       stoppedMessage: `${kind === "source" ? "Source" : kind === "evidence" ? "Evidence" : "Deployment"} collection stopped before a result was recorded.`,
       timeoutMessage: `${kind === "source" ? "Source" : kind === "evidence" ? "Evidence" : "Deployment"} collection is still running. Refresh shortly to see its result.`,
     });
@@ -3296,54 +3295,34 @@ export function ConnectionsPage({
   }
 
   async function collectAzureDeployments(connection: Connection) {
-    if (!connectionActionAvailable(connection, "collect")) { setActionError("Verify current connection access before collecting evidence."); return; }
-    setBusy(`collect-azure:${connection.id}`);
-    setActionError(null);
-    setActionNotice(null);
-    try {
-      const accepted = await api.collectAzureDeployments(connection.id);
-      onOperationAccepted(connection.id, "deployment");
-      setActionNotice(accepted.status === "already_running" ? "Azure evidence collection is already running." : "Azure evidence collection accepted. It continues safely in the background.");
-      await waitForCollection(connection, "deployment");
-      setActionNotice("Azure evidence collection completed.");
-    } catch (cause) {
-      setActionError(cause instanceof Error ? cause.message : "Unable to collect Azure deployments");
-    } finally {
-      setBusy(null);
-    }
+    await collectCloudEvidence(connection, "Azure", () => api.collectAzureDeployments(connection.id));
   }
 
   async function collectAwsDeployments(connection: Connection) {
+    await collectCloudEvidence(connection, "AWS", () => api.collectAwsDeployments(connection.id));
+  }
+
+  async function collectCloudEvidence(connection: Connection, label: string, collect: () => Promise<{ status: string }>) {
     if (!connectionActionAvailable(connection, "collect")) { setActionError("Verify current connection access before collecting evidence."); return; }
-    setBusy(`collect-aws:${connection.id}`);
+    setBusy(`collect-${connection.provider}:${connection.id}`);
     setActionError(null);
     setActionNotice(null);
     try {
-      const accepted = await api.collectAwsDeployments(connection.id);
-      const runtimeSelected = connection.declared_scopes.includes("aws.agent_runtime_activity");
-      const deploymentSelected = connection.declared_scopes.some(
-        (scope) => scope !== "aws.agent_runtime_activity",
-      );
-      if (deploymentSelected) onOperationAccepted(connection.id, "deployment");
-      if (runtimeSelected) onOperationAccepted(connection.id, "runtime");
-      setActionNotice(accepted.status === "already_running" ? "AWS evidence collection is already running." : "AWS evidence collection accepted. It continues safely in the background.");
-      const previousDeployment = connection.last_deployment_collection?.completed_at ?? null;
-      const previousRuntime = connection.last_runtime_collection?.completed_at ?? null;
-      await waitForAcceptedOperation({
+      const accepted = await collect();
+      const kinds = selectedCollectionKinds(connection);
+      for (const kind of kinds) onOperationAccepted(connection.id, kind);
+      setActionNotice(accepted.status === "already_running" ? `${label} evidence collection is already running.` : `${label} evidence collection accepted. It continues safely in the background.`);
+      const current = await waitForAcceptedOperation({
         fetchCurrent: () => api.connection(connection.id),
-        isRunning: (current) =>
-          (deploymentSelected && current.deployment_collection_state === "running")
-          || (runtimeSelected && current.runtime_collection_state === "running"),
-        isComplete: (current) =>
-          (!deploymentSelected || current.last_deployment_collection?.completed_at !== previousDeployment)
-          && (!runtimeSelected || current.last_runtime_collection?.completed_at !== previousRuntime),
-        stoppedMessage: "AWS evidence collection stopped before every selected plane recorded a result.",
-        timeoutMessage: "AWS evidence collection is still running. Refresh shortly to see its result.",
+        isRunning: (current) => connectionCollectionStatus(current, kinds).running,
+        isComplete: (current) => collectionResultsChanged(connection, current, kinds),
+        stoppedMessage: `${label} evidence collection stopped before every selected plane recorded a result.`,
+        timeoutMessage: `${label} evidence collection is still running. Refresh shortly to see its result.`,
       });
       await onChanged();
-      setActionNotice("AWS evidence collection completed.");
+      setActionNotice(connectionCollectionStatus(current).complete ? `${label} evidence collection completed.` : `${label} evidence collection finished with incomplete coverage. Review the collection results.`);
     } catch (cause) {
-      setActionError(cause instanceof Error ? cause.message : "Unable to collect AWS deployments");
+      setActionError(cause instanceof Error ? cause.message : `Unable to collect ${label} evidence`);
     } finally {
       setBusy(null);
     }
@@ -3588,15 +3567,10 @@ function ConnectionHealth({ connection, state }: { connection?: Connection; stat
     const Icon = connection.health_state === "partial" || connection.health_state === "unknown" ? CircleHelp : CircleAlert;
     return <span className={`connection-health ${connection.health_state}`}><Icon />{titleCase(connection.health_state)}</span>;
   }
-  const collectionState = connection.provider === "github" || connection.provider === "azure_repos" ? connection.source_collection_state
-    : connection.provider === "entra" || connection.provider === "google_workspace" ? connection.evidence_collection_state
-      : connection.deployment_collection_state;
-  const collection = connection.provider === "github" || connection.provider === "azure_repos" ? connection.last_source_collection
-    : connection.provider === "entra" || connection.provider === "google_workspace" ? connection.last_evidence_collection
-      : connection.last_deployment_collection;
-  if (collectionState === "running") return <span className="connection-health unknown"><RefreshCw className="spin" />Collecting</span>;
-  if (!collection) return <span className="connection-health unknown"><CircleHelp />Collection needed</span>;
-  if (collection.state !== "complete") return <span className="connection-health partial"><CircleAlert />Needs attention</span>;
+  const collection = connectionCollectionStatus(connection);
+  if (collection.running) return <span className="connection-health unknown"><RefreshCw className="spin" />Collecting</span>;
+  if (collection.attention) return <span className="connection-health partial"><CircleAlert />Needs attention</span>;
+  if (!collection.complete) return <span className="connection-health unknown"><CircleHelp />Collection needed</span>;
   return <span className="connection-health healthy"><CircleCheck />Ready</span>;
 }
 
@@ -3655,6 +3629,38 @@ function CopyableSetupValue({ value, ariaLabel, copyLabel, copiedMessage, placeh
   </div>;
 }
 
+function ConnectionValidationCoverage({ connection }: { connection: Connection }) {
+  const validation = connection.last_validation;
+  return <div className="connection-section" aria-label="Connection validation results"><h4>Validation coverage</h4>{validation ? <>
+    <div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked <time dateTime={validation.completed_at}>{formatTime(validation.completed_at)}</time>{validation.account_id_observed && ` · observed identity ${validation.account_id_observed}`}</small></div>
+    <div className="validation-grid">{validation.results.map((result, index) => <div key={`${result.scope}:${result.plane}:${index}`} className={result.state}>
+      <span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.subscription_name || result.repository_full_name || result.project_name || result.domain || result.tenant_id || result.region || result.scope} · {titleCase(result.plane)} · {result.state}</small><p>{result.detail}</p></div>
+    </div>)}</div>
+  </> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>No access conclusion is available until Denali verifies the selected evidence planes.</small></span></div>}</div>;
+}
+
+function ConnectionCollectionResults({ connection }: { connection: Connection }) {
+  return <div className="connection-section" aria-label="Connection collection results"><h4>Collection results</h4><p>Access validation and evidence collection are separate. Results apply only to the selected evidence planes, not complete account or tenant coverage.</p>{selectedCollectionKinds(connection).map((kind) => {
+    const result = collectionResult(connection, kind);
+    const running = connection[`${kind}_collection_state`] === "running";
+    const exactResource = kind === "deployment" && connection.configuration.coverage_mode === "selected-resource";
+    const label = kind === "runtime" ? `${connection.provider === "aws" ? "AgentCore" : "Foundry"} runtime activity` : kind === "deployment" ? exactResource ? "Selected-resource evidence" : "Deployment evidence" : kind === "evidence" ? "Audit evidence" : "Repository source evidence";
+    return <section key={kind} aria-label={`${label} collection result`}>
+      <h5>{label}</h5>
+      {running && <p>{result ? "Collection in progress. The result below is from the previous run." : "Collection in progress; no result has been recorded yet."}</p>}
+      {result ? <><p>Latest result: {titleCase(result.state)} · finished <time dateTime={result.completed_at}>{formatTime(result.completed_at)}</time></p>
+        {"region_count" in result && (exactResource ? <p>Selected-resource coverage: {result.resource_coverage_state ?? result.state}. Account inventory: not assessed.</p> : <p>{result.region_count} Regions · {result.partial_count} partial · {result.failed_count} failed</p>)}
+        {"subscription_count" in result && <p>{result.subscription_count} subscriptions · {result.partial_count} partial · {result.failed_count} failed</p>}
+        {"project_count" in result && <p>{result.project_count} projects · {result.partial_count} partial · {result.failed_count} failed</p>}
+        {"repository_count" in result && <p>{result.repository_count} repositories · {result.partial_count} partial · {result.failed_count} failed</p>}
+        {"activities" in result && <p>{result.activities} activity events{(result.partial_regions ?? result.partial_subscriptions) !== undefined && ` · ${result.partial_regions ?? result.partial_subscriptions} partial boundaries`}{(result.failed_regions ?? result.failed_subscriptions) !== undefined && ` · ${result.failed_regions ?? result.failed_subscriptions} failed boundaries`} · metadata only</p>}
+        {"activity_events" in result && <p>{result.activity_events} activity events{result.coverage_complete !== undefined && ` · ${result.coverage_complete} complete planes`}{result.coverage_partial !== undefined && ` · ${result.coverage_partial} partial planes`}{result.coverage_failed !== undefined && ` · ${result.coverage_failed} failed planes`}</p>}
+        {result.detail && <p>{result.detail}</p>}
+      </> : !running && <p>No collection result recorded for this plane.</p>}
+    </section>;
+  })}</div>;
+}
+
 function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureCompletionCode, onAzureCompletionCode, onPrepareAzure, onCompleteAzure, onCollectAzure, onPrepareAzureRepos, onCompleteAzureRepos, onCollectAzureRepos, onPrepareEntra, onCollectEntra, onCompleteGoogleWorkspace, onCollectGoogleWorkspace, gcpLaunch, gcpCompletionCode, onGcpCompletionCode, onPrepareGcp, onCompleteGcp, onCollectGcp, onCollectAws, onPrepareGitHub, onCollectGitHub, onLaunch, onDownload, onValidate, onDisable, onDelete }: { connection: Connection; busy: string | null; navigation: FilterNavigation; azureLaunch?: AzureSetupLaunch; azureCompletionCode: string; onAzureCompletionCode: (value: string) => void; onPrepareAzure: () => void; onCompleteAzure: () => void; onCollectAzure: () => void; onPrepareAzureRepos: () => void; onCompleteAzureRepos: (repositoryIds: string[]) => void; onCollectAzureRepos: () => void; onPrepareEntra: () => void; onCollectEntra: () => void; onCompleteGoogleWorkspace: () => void; onCollectGoogleWorkspace: () => void; gcpLaunch?: GcpSetupLaunch; gcpCompletionCode: string; onGcpCompletionCode: (value: string) => void; onPrepareGcp: () => void; onCompleteGcp: () => void; onCollectGcp: () => void; onCollectAws: () => void; onPrepareGitHub: () => void; onCollectGitHub: () => void; onLaunch: () => void; onDownload: () => void; onValidate: () => void; onDisable: () => void; onDelete: () => void }) {
   if (connection.credential_reference.type === "platform_shared_azure" || connection.credential_reference.type === "platform_shared_entra") return <section className="panel connection-detail" aria-label="Platform shared Microsoft connection">
     <div className="connection-detail-head"><div><span>SHARED {connection.provider.toUpperCase()}</span><h3>{connection.display_name}</h3><code>Platform connection {connection.credential_reference.platform_connection_id}</code></div><ConnectionHealth connection={connection} /></div>
@@ -3662,6 +3668,8 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
     <p>Tenant {connection.configuration.tenant_id} · {connection.declared_scopes.join(", ")}. Activity collection covers the latest {connection.provider === "entra" ? "7 days" : "24 hours"}.</p>
     {connection.lifecycle_state === "active" && <div className="connection-launch-actions"><button disabled={busy !== null || !connectionActionAvailable(connection, "validate")} onClick={onValidate}>Validate metadata access</button><button disabled={busy !== null || !connectionActionAvailable(connection, "collect")} onClick={connection.provider === "azure" ? onCollectAzure : onCollectEntra}>Collect Microsoft evidence</button><button disabled={busy !== null} onClick={onDisable}>Disconnect from Denali</button></div>}
     {connection.lifecycle_state === "disabled" && <button disabled={busy !== null} onClick={onDelete}>Delete Denali configuration</button>}
+    <ConnectionValidationCoverage connection={connection} />
+    <ConnectionCollectionResults connection={connection} />
     <p>Validation and collection use durable jobs. Global disconnect belongs to Platform; removing Denali configuration does not revoke Microsoft consent, Azure Reader assignments, or collected evidence.</p>
   </section>;
   if (connection.credential_reference.type === "platform_shared_gcp") return <section className="panel connection-detail" aria-label="Platform shared Google Cloud connection">
@@ -3670,6 +3678,8 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
     <p>{connection.configuration.projects?.map((project) => `${project.id} (${project.number})`).join(" · ")}</p>
     {connection.lifecycle_state === "active" && <div className="connection-launch-actions"><button disabled={busy !== null || !connectionActionAvailable(connection, "validate")} onClick={onValidate}>Validate metadata access</button><button disabled={busy !== null || !connectionActionAvailable(connection, "collect")} onClick={onCollectGcp}>Collect Google Cloud evidence</button><button disabled={busy !== null} onClick={onDisable}>Disconnect from Denali</button></div>}
     {connection.lifecycle_state === "disabled" && <button disabled={busy !== null} onClick={onDelete}>Delete Denali configuration</button>}
+    <ConnectionValidationCoverage connection={connection} />
+    <ConnectionCollectionResults connection={connection} />
     <p>Validation and collection use existing durable jobs. Global disconnect is managed separately in Platform; deleting configuration does not remove customer IAM bindings or collected evidence.</p>
   </section>;
   if (connection.provider === "azure") return <AzureConnectionDetail connection={connection} busy={busy} launch={azureLaunch} completionCode={azureCompletionCode} onCompletionCode={onAzureCompletionCode} onPrepare={onPrepareAzure} onComplete={onCompleteAzure} onCollect={onCollectAzure} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
@@ -3684,12 +3694,14 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
     <ul>{connection.configuration.repositories?.map((repo) => <li key={String(repo.id)}>{repo.full_name}</li>)}</ul>
     {connection.lifecycle_state === "active" && <div className="connection-launch-actions"><button disabled={busy !== null || !connectionActionAvailable(connection, "validate")} onClick={onValidate}>Verify repository access</button><button disabled={busy !== null || !connectionActionAvailable(connection, "collect")} onClick={onCollectAzureRepos}>Collect source evidence</button><button disabled={busy !== null} onClick={onDisable}>Disconnect from Denali</button></div>}
     {connection.lifecycle_state === "disabled" && <button disabled={busy !== null} onClick={onDelete}>Delete Denali configuration</button>}
+    <ConnectionValidationCoverage connection={connection} />
+    <ConnectionCollectionResults connection={connection} />
     <p>Disconnecting here affects only Denali. Organization-wide access is managed separately. Previously collected evidence remains.</p>
   </section>;
   if (connection.provider === "azure_repos") return <AzureReposConnectionDetail connection={connection} busy={busy} onPrepare={onPrepareAzureRepos} onComplete={onCompleteAzureRepos} onCollect={onCollectAzureRepos} onValidate={onValidate} onDisable={onDisable} onDelete={onDelete} />;
   if (connection.credential_reference.type === "platform_shared_aws") {
     const validating = connection.validation_state === "running" || busy === `validate:${connection.id}`;
-    const collecting = connection.deployment_collection_state === "running" || busy === `collect-aws:${connection.id}`;
+    const collecting = connectionCollectionStatus(connection).running || busy === `collect-aws:${connection.id}`;
     return <section className="panel connection-detail" aria-label="Platform shared AWS connection">
       <div className="connection-detail-head"><div><span>PLATFORM SHARED AWS</span><h3>{connection.display_name}</h3><small>Account {connection.configuration.account_id} · {(connection.configuration.regions ?? []).join(", ")} · {connection.declared_scopes.join(", ")}</small></div><ConnectionHealth connection={connection} /></div>
       <p>The read-only role is managed by the shared platform. Denali requests a fresh, scope-limited lease for validation and collection; it does not hold the role trust or AWS keys.</p>
@@ -3697,7 +3709,8 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
         {connection.lifecycle_state === "active" && <button className="primary-action" disabled={validating || collecting || !connectionActionAvailable(connection, "validate")} onClick={onValidate}>{validating ? "Validating…" : "Validate in Denali"}</button>}
         {connection.lifecycle_state === "active" && <button className="primary-action" disabled={validating || collecting || !connectionActionAvailable(connection, "collect")} onClick={onCollectAws}>{collecting ? "Collecting…" : "Collect AWS evidence"}</button>}
       </div>
-      {connection.last_validation && <p role="status">Validation: {connection.last_validation.health_state} · {connection.last_validation.summary}</p>}
+      <ConnectionValidationCoverage connection={connection} />
+      <ConnectionCollectionResults connection={connection} />
       <p>Connection health proves read access only. Collection creates separate evidence and coverage records.</p>
       <div className="connection-safeguards"><div><strong>Denali use of this connection</strong><span>Disabling here stops Denali collection. Global disconnect remains in the shared platform and may leave already issued sessions valid for up to 15 minutes.</span></div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disconnect from Denali</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete Denali configuration</button>}</div>
     </section>;
@@ -3716,10 +3729,9 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
   const runtimeScopeSelected = connection.declared_scopes.includes("aws.agent_runtime_activity");
   const deploymentScopeSelected = connection.declared_scopes.some((scope) => scope !== "aws.agent_runtime_activity");
   const collectionScopeSelected = deploymentScopeSelected || runtimeScopeSelected;
-  const collectionComplete = deploymentScopeSelected
-    ? Boolean(collection && collection.failed_count === 0 && collection.partial_count === 0)
-    : runtimeCollection?.state === "complete";
-  const collectionAvailable = deploymentScopeSelected ? Boolean(collection) : Boolean(runtimeCollection);
+  const collectionStatus = connectionCollectionStatus(connection);
+  const collectionComplete = collectionStatus.complete;
+  const collectionAvailable = collectionStatus.hasResults;
   const exactResource = connection.configuration.coverage_mode === "selected-resource";
   const permissions = [...new Set([...(exactResource ? [] : ["ec2:DescribeRegions"]), ...connection.coverage_plan.flatMap((item) => item.permissions)])].sort();
   const regionDiscovery = validation?.results.find((result) => result.plane === "aws_region_discovery");
@@ -3748,7 +3760,7 @@ function ConnectionDetail({ connection, busy, navigation, azureLaunch, azureComp
       <div className="complete"><span><Check /></span><div><strong>1. Connection plan created</strong><small>Account, scopes, role ARN, and {exactResource ? "the exact Lambda, execution role and expected model pins" : coverageMode === "automatic" ? "automatic enabled-region coverage" : "the selected-region boundary"} are recorded.</small></div></div>
       <div className={validatedRole ? "complete" : "current"}><span>{validatedRole ? <Check /> : "2"}</span><div><strong>2. Deploy the CloudFormation stack</strong><small>The stack is managed in {connection.configuration.deployment_region ?? "us-east-1"}; its account-wide IAM role does not restrict inventory to that Region. If this account already has a Denali stack, delete that stack and wait for its role to be removed before launching the replacement. AWS lets you inspect the exact template and permissions before creating it.</small><div className="connection-launch-actions"><button className="primary-action" aria-busy={waitingForAwsRole} disabled={validating || !connection.setup_capabilities.cloudformation_quick_create} onClick={onLaunch}>{waitingForAwsRole ? <RefreshCw className="spin" /> : <ExternalLink />}{waitingForAwsRole ? "Waiting for AWS role…" : "Launch in AWS"}</button><button className="secondary-action" aria-busy={busy === `download:${connection.id}`} disabled={busy === `download:${connection.id}`} onClick={onDownload}>{busy === `download:${connection.id}` ? <RefreshCw className="spin" /> : <Download />}{busy === `download:${connection.id}` ? "Downloading…" : "Download template"}</button></div>{waitingForAwsRole && <small className="connection-inline-progress"><RefreshCw className="spin" />CloudFormation may need several minutes. Denali is continuing the role check in the background.</small>}{!connection.setup_capabilities.cloudformation_quick_create && <small className="launch-unavailable">One-click launch requires the Denali onboarding bucket and runtime principal configuration. Manual template download remains available.</small>}{connection.configuration.onboarding?.template_sha256 && connection.configuration.onboarding.published_at && <small className="launch-record">Last launch prepared {formatTime(connection.configuration.onboarding.published_at)} · template {connection.configuration.onboarding.template_sha256.slice(0, 12)}</small>}</div></div>
       <div className={validating ? "current" : validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Discover Regions and validate every plane</strong><small>Role assumption and account binding run first. Enabled Regions are observed next; each applicable regional plane then succeeds or fails independently.</small>{connection.lifecycle_state === "active" && <button className="primary-action" disabled={validating || !connectionActionAvailable(connection, "validate")} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating across AWS…" : validation ? "Validate again" : "Validate connection"}</button>}{validating && <small className="validation-progress-note">For a new launch, Denali retries role assumption every 10 seconds for up to 15 minutes while CloudFormation creates the role. If AWS reports a rollback, review the stack Events; the final failure appears here when the validation window ends.</small>}</div></div>
-      <div className={collectionAvailable ? (collectionComplete ? "complete" : "attention") : "pending"}><span>{collectionComplete ? <Check /> : "4"}</span><div><strong>4. Collect declared AWS evidence</strong><small>Denali collects the selected Bedrock, AgentCore, activity, logging-configuration, and deployment planes across the declared Region boundary without reading code, prompts, responses, or environment values.</small>{connection.lifecycle_state === "active" && collectionScopeSelected && <button className="primary-action" disabled={collecting || validating || !validatedRole} onClick={onCollectAws}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting AWS evidence…" : collectionAvailable ? "Collect evidence again" : "Collect AWS evidence"}</button>}{!collectionScopeSelected && <small className="launch-unavailable">This connection has no supported AWS evidence scope. Create a new plan and select at least one collection plane.</small>}{collection && <small className="validation-progress-note">{collection.region_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}{runtimeCollection && <small className="validation-progress-note">AgentCore sensor: {runtimeCollection.activities ?? 0} new spans · {runtimeCollection.partial_regions ?? 0} partial Regions · {runtimeCollection.failed_regions ?? 0} failed Regions · metadata only · finished {formatTime(runtimeCollection.completed_at)}</small>}</div></div>
+      <div className={collecting ? "current" : collectionAvailable ? (collectionComplete ? "complete" : "attention") : "pending"}><span>{collectionComplete ? <Check /> : "4"}</span><div><strong>4. Collect declared AWS evidence</strong><small>Denali collects the selected Bedrock, AgentCore, activity, logging-configuration, and deployment planes across the declared Region boundary without reading code, prompts, responses, or environment values.</small>{connection.lifecycle_state === "active" && collectionScopeSelected && <button className="primary-action" disabled={collecting || validating || !validatedRole} onClick={onCollectAws}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting AWS evidence…" : collectionAvailable ? "Collect evidence again" : "Collect AWS evidence"}</button>}{!collectionScopeSelected && <small className="launch-unavailable">This connection has no supported AWS evidence scope. Create a new plan and select at least one collection plane.</small>}{collection && <small className="validation-progress-note">{collection.region_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}{runtimeCollection && <small className="validation-progress-note">AgentCore sensor: {runtimeCollection.activities ?? 0} new spans · {runtimeCollection.partial_regions ?? 0} partial Regions · {runtimeCollection.failed_regions ?? 0} failed Regions · metadata only · finished {formatTime(runtimeCollection.completed_at)}</small>}</div></div>
     </div>
     </>}
     <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed account {validation.account_id_observed ?? "not established"}</small></div>{regionDiscovery && <div className={`region-discovery ${regionDiscovery.state}`}><span>{regionDiscovery.state === "passed" ? <CircleCheck /> : regionDiscovery.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{coverageMode === "automatic" ? "Automatic enabled-region coverage" : "Selected-region coverage"}</strong><p>{regionDiscovery.detail}</p>{regionDiscovery.discovered_regions && regionDiscovery.discovered_regions.length > 0 && <small>{regionDiscovery.discovered_regions.join(", ")}</small>}{regionDiscovery.excluded_enabled_regions && regionDiscovery.excluded_enabled_regions.length > 0 && <small className="excluded-regions">Outside declared scope: {regionDiscovery.excluded_enabled_regions.join(", ")}</small>}</div></div>}<div className="validation-plane-rollup">{planeSummaries.map((summary) => <div className={summary.failed || summary.unknown ? "attention" : "complete"} key={summary.label}><span>{summary.failed || summary.unknown ? <CircleAlert /> : <CircleCheck />}</span><div><strong>{summary.label}</strong><small>{summary.total} Region checks</small></div><div className="rollup-counts"><b className="passed">{summary.passed} passed</b>{summary.notApplicable > 0 && <b>{summary.notApplicable} not applicable</b>}{summary.failed > 0 && <b className="failed">{summary.failed} failed</b>}{summary.unknown > 0 && <b className="failed">{summary.unknown} unknown</b>}</div></div>)}</div><details className="plane-validation-results"><summary>View all {planeResults.length} raw plane/Region results</summary><div className="validation-grid">{planeResults.map((result) => <div key={`${result.scope}:${result.plane}:${result.region}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.region} · {result.state === "not_applicable" ? "Not applicable" : titleCase(result.plane)}</small><p>{result.detail}</p></div></div>)}</div></details></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>No coverage conclusion is available until the stack is deployed and validation runs.</small></span></div>}</div>
@@ -3845,8 +3857,10 @@ function AzureConnectionDetail({ connection, busy, launch, completionCode, onCom
   const preparing = busy === `launch:${connection.id}`;
   const completing = busy === `complete:${connection.id}`;
   const validating = connection.validation_state === "running" || busy === `validate:${connection.id}` || completing;
-  const collecting = connection.deployment_collection_state === "running" || busy === `collect-azure:${connection.id}`;
+  const collectionStatus = connectionCollectionStatus(connection);
+  const collecting = collectionStatus.running || busy === `collect-azure:${connection.id}`;
   const collection = connection.last_deployment_collection && "subscription_count" in connection.last_deployment_collection ? connection.last_deployment_collection : null;
+  const runtimeCollection = connection.last_runtime_collection;
   const credential = connection.credential_reference.type === "azure_multitenant_app" ? connection.credential_reference : null;
   const permissions = [...new Set(connection.coverage_plan.flatMap((item) => item.permissions))].sort();
   return <section className="panel connection-detail">
@@ -3879,7 +3893,7 @@ function AzureConnectionDetail({ connection, busy, launch, completionCode, onCom
         </div>
       </div>
       <div className={validation ? (connection.health_state === "healthy" ? "complete" : "attention") : "pending"}><span>{connection.health_state === "healthy" ? <Check /> : "3"}</span><div><strong>3. Validate every selected subscription</strong><small>Denali binds the customer tenant and each exact subscription first, then validates every declared subscription-wide plane independently.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={validating || !connectionActionAvailable(connection, "validate")} onClick={onValidate}><RefreshCw className={validating ? "spin" : undefined} />{validating ? "Validating Azure…" : validation ? "Validate again" : "Validate connection"}</button>}</div></div>
-      <div className={collection ? (collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{collection?.state === "complete" ? <Check /> : "4"}</span><div><strong>4. Collect declared Azure evidence</strong><small>Read selected AI services, AI platform, management activity, and deployment planes through Azure control-plane APIs without storing app-setting values or caller identities.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={collecting || validating || !connectionActionAvailable(connection, "collect")} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting Azure evidence…" : collection ? "Collect evidence again" : "Collect Azure evidence"}</button>}{collection && <small className="validation-progress-note">{collection.subscription_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}</div></div>
+      <div className={collecting ? "current" : collectionStatus.complete ? "complete" : collectionStatus.hasResults ? "attention" : "pending"}><span>{collectionStatus.complete ? <Check /> : "4"}</span><div><strong>4. Collect declared Azure evidence</strong><small>Read the selected Azure control-plane evidence and opt-in Foundry runtime metadata without storing app-setting values, prompts, responses, or caller identities. Each selected collection plane has its own result.</small>{connection.lifecycle_state === "active" && setupComplete && <button className="primary-action" disabled={collecting || validating || !connectionActionAvailable(connection, "collect")} onClick={onCollect}><CloudCog className={collecting ? "spin" : undefined} />{collecting ? "Collecting Azure evidence…" : collectionStatus.hasResults ? "Collect evidence again" : "Collect Azure evidence"}</button>}{collection && <small className="validation-progress-note">Deployment evidence: {collection.subscription_count - collection.failed_count - collection.partial_count} complete · {collection.partial_count} partial · {collection.failed_count} failed · finished {formatTime(collection.completed_at)}</small>}{runtimeCollection && connection.declared_scopes.includes("azure.agent_runtime_activity") && <small className="validation-progress-note">Foundry runtime: {runtimeCollection.state} · {runtimeCollection.activities ?? 0} activity events · finished {formatTime(runtimeCollection.completed_at)}</small>}</div></div>
     </div>
     <div className="connection-section"><h4>Validation coverage</h4>{validation ? <><div className={`validation-summary ${validation.health_state}`}><strong>{validation.summary}</strong><small>Checked {formatTime(validation.completed_at)} · observed subscriptions {validation.account_id_observed ?? "not established"}</small></div><div className="validation-grid">{validation.results.map((result) => <div key={`${result.subscription_id}:${result.plane}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.subscription_name ?? result.subscription_id} · all resource locations</small><p>{result.detail}</p></div></div>)}</div></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>Run the Cloud Shell setup, select subscriptions, and paste its completion code first.</small></span></div>}</div>
     <details className="connection-permissions"><summary>Review {permissions.length || 2} declared Azure permissions</summary><div>{(permissions.length ? permissions : ["Microsoft.Resources/subscriptions/read", "Microsoft.Authorization/roleAssignments/read"]).map((permission) => <code key={permission}>{permission}</code>)}</div><p>The customer grants Azure Reader only at selected subscription scopes. This does not grant Microsoft Graph/Entra directory reads, data-plane access, secret access, prompt access, response access, or remediation.</p></details>
@@ -3955,6 +3969,7 @@ function AzureReposConnectionDetail({ connection, busy, onPrepare, onComplete, o
       <div className={connection.last_source_collection ? (connection.last_source_collection.state === "complete" ? "complete" : "attention") : "pending"}><span>{connection.last_source_collection?.state === "complete" ? <Check /> : "5"}</span><div><strong>5. Collect source and correlate</strong><small>Each default branch is resolved to an immutable commit. Bounded files are analyzed transiently for inventory, posture, and exact code-to-cloud evidence.</small>{setupComplete && <button className="primary-action" disabled={connection.source_collection_state === "running" || validating} onClick={onCollect}><GitBranch />{connection.source_collection_state === "running" ? "Collecting…" : "Collect source & correlate"}</button>}</div></div>
     </div>
     <div className="connection-section"><h4>Validation coverage</h4>{connection.last_validation ? <><div className={`validation-summary ${connection.last_validation.health_state}`}><strong>{connection.last_validation.summary}</strong><small>Checked {formatTime(connection.last_validation.completed_at)} · observed organization {connection.last_validation.account_id_observed ?? "not established"}</small></div><div className="validation-grid">{connection.last_validation.results.map((result) => <div key={`${result.repository_id}:${result.plane}`} className={result.state}><span>{result.state === "passed" ? <CircleCheck /> : result.state === "failed" ? <CircleAlert /> : <CircleHelp />}</span><div><strong>{result.label}</strong><small>{result.repository_full_name}</small><p>{result.detail}</p></div></div>)}</div></> : <div className="connection-unknown"><CircleHelp /><span><strong>Not validated</strong><small>Authorize, select repositories, and verify Denali’s app access first.</small></span></div>}</div>
+    <ConnectionCollectionResults connection={connection} />
     <details className="connection-permissions"><summary>Review Azure Repos permission boundary</summary><div><code>vso.code</code></div><p>Read source code, branches, commits, and repository metadata only. This connection cannot push code, create pull requests, administer projects, read pipeline secrets, or retain Microsoft user tokens.</p></details>
     <div className="connection-safeguards"><div><strong>Connection lifecycle</strong><span>Disabling stops validation and collection. Deleting removes Denali’s configuration; remove the enterprise application from Azure DevOps separately. Previously collected evidence remains.</span>{connection.credential_reference.type === "azure_repos_service_principal" && <code>Application ID {connection.credential_reference.client_id}</code>}</div>{connection.lifecycle_state === "active" ? <button disabled={busy === `disable:${connection.id}`} onClick={onDisable}><Power /> Disable</button> : <button className="danger-action" disabled={busy === `delete:${connection.id}`} onClick={onDelete}><Trash2 /> Delete configuration</button>}</div>
   </section>;

@@ -20,6 +20,11 @@ from denali.integrations.shared_github import (
 )
 
 CONNECTION_ID = "11111111-1111-1111-1111-111111111111"
+OAUTH_URL = (
+    "https://github.com/login/oauth/authorize?client_id=Iv1.test&"
+    "redirect_uri=https%3A%2F%2Fplatform.example%2Fv1%2Fconnections%2Fgithub%2Foauth%2Fcallback"
+    f"&state={'s' * 64}&code_challenge={'c' * 43}&code_challenge_method=S256&allow_signup=false"
+)
 SCOPES = ["github.repository_metadata", "github.repository_contents", "github.actions_workflows"]
 REPOSITORY = {
     "id": 42,
@@ -73,6 +78,8 @@ class Platform:
                 "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
             }
         if path.endswith("/setup"):
+            if payload and payload.get("existing_connection_id"):
+                return {"authorize_url": OAUTH_URL}
             return {
                 "install_url": "https://github.com/apps/transilience-platform-dev/installations/new"
             }
@@ -87,11 +94,20 @@ class Repository(FakeRepository):
         self.workflows = {}
 
     def begin_connection_onboarding(
-        self, tenant_id, *, request_id, return_state_sha256, connection_id=None
+        self,
+        tenant_id,
+        *,
+        request_id,
+        return_state_sha256,
+        connection_id=None,
+        platform_connection_id=None,
     ):
         key = (tenant_id, request_id)
         previous = self.workflows.get(key)
-        if previous and previous.get("connection_id") != connection_id:
+        if previous and (
+            previous.get("connection_id") != connection_id
+            or previous.get("platform_connection_id") != platform_connection_id
+        ):
             raise ValueError("different connection")
         now = datetime.now(UTC)
         row = {
@@ -99,6 +115,7 @@ class Repository(FakeRepository):
             "tenant_id": tenant_id,
             "request_id": request_id,
             "connection_id": connection_id,
+            "platform_connection_id": platform_connection_id,
             "provider": "github",
             "management_source": "platform",
             "return_state_sha256": return_state_sha256,
@@ -257,6 +274,126 @@ def test_shared_github_setup_is_platform_owned_and_admin_only():
     assert set(payload) == {"return_state"}
     assert len(payload["return_state"]) == 43
     assert response.json()["workflow_id"]
+
+
+def test_existing_shared_github_reverification_resolves_tenant_owned_reference():
+    repository, platform = Repository(), Platform()
+    local_id = str(uuid4())
+    row = {
+        "tenant_id": repository.resolve_tenant("org_alpha"),
+        "id": local_id,
+        "provider": "github",
+        "lifecycle_state": "disabled",
+        "credential_reference": {
+            "type": "platform_shared_github",
+            "platform_connection_id": CONNECTION_ID,
+            "installation_id": 99,
+        },
+        "configuration": {"repositories": [dict(REPOSITORY)]},
+    }
+    repository.created.append(row)
+    before = repr(repository.created)
+    with _client(platform, repository) as client:
+        path = "/v1/shared/connections/github/setup"
+        body = {"connection_id": local_id, "request_id": str(uuid4())}
+        assert (
+            client.post(
+                path, json=body, headers={"Authorization": "Bearer alpha-member"}
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(path, json=body, headers={"Authorization": "Bearer beta-admin"}).status_code
+            == 404
+        )
+        assert not platform.calls and not repository.workflows
+        response = client.post(path, json=body, headers={"Authorization": "Bearer alpha-admin"})
+        assert response.status_code == 201
+        assert response.json()["install_url"].startswith(
+            "https://github.com/login/oauth/authorize?"
+        )
+        assert platform.calls[-1][2] == "org_alpha"
+        assert platform.calls[-1][3]["existing_connection_id"] == CONNECTION_ID
+        receipt = next(iter(repository.workflows.values()))
+        assert receipt["connection_id"] == local_id
+        assert receipt["platform_connection_id"] == CONNECTION_ID
+        mismatch = client.post(
+            path,
+            json={**body, "platform_connection_id": str(uuid4())},
+            headers={"Authorization": "Bearer alpha-admin"},
+        )
+        assert mismatch.status_code == 409
+    assert repr(repository.created) == before  # Reviewing never reactivates or rebinds.
+
+
+def test_existing_catalog_reverification_pins_platform_context_and_rejects_legacy_url():
+    class WrongSetupUrl(Platform):
+        def request(self, method, path, **kwargs):
+            result = super().request(method, path, **kwargs)
+            if path.endswith("/setup"):
+                return {"install_url": "https://github.com/apps/app/installations/new"}
+            return result
+
+    repository, platform = Repository(), Platform()
+    body = {"request_id": str(uuid4()), "platform_connection_id": CONNECTION_ID}
+    with _client(platform, repository) as client:
+        path = "/v1/shared/connections/github/setup"
+        response = client.post(path, json=body, headers={"Authorization": "Bearer alpha-admin"})
+        assert response.status_code == 201
+        assert platform.calls[-1][3]["existing_connection_id"] == CONNECTION_ID
+        assert next(iter(repository.workflows.values()))["platform_connection_id"] == CONNECTION_ID
+        assert (
+            client.post(
+                path,
+                json={**body, "platform_connection_id": str(uuid4())},
+                headers={"Authorization": "Bearer alpha-admin"},
+            ).status_code
+            == 409
+        )
+        for field in ("installation_id", "clerk_org_id", "authorize_url"):
+            assert (
+                client.post(
+                    path,
+                    json={**body, field: "untrusted"},
+                    headers={"Authorization": "Bearer alpha-admin"},
+                ).status_code
+                == 422
+            )
+    with _client(WrongSetupUrl(), Repository()) as client:
+        failed = client.post(
+            "/v1/shared/connections/github/setup",
+            json=body,
+            headers={"Authorization": "Bearer alpha-admin"},
+        )
+        assert failed.status_code == 502
+
+
+def test_oauth_link_is_accepted_only_for_explicit_existing_installation():
+    oauth = OAUTH_URL
+    assert safe_install_url(oauth, existing_installation=True) == oauth
+    with pytest.raises(ValueError):
+        safe_install_url(oauth)
+    for url in (
+        "https://github.com/apps/app/installations/new",
+        "https://github.com/organizations/example/settings/installations/99",
+        "https://github.com.evil/login/oauth/authorize",
+        "https://user:secret@github.com/login/oauth/authorize",
+        "https://github.com/login/oauth/authorize#fragment",
+        "http://github.com/login/oauth/authorize",
+        OAUTH_URL + "&state=duplicate",
+        OAUTH_URL.replace("code_challenge_method=S256", "code_challenge_method=plain"),
+        OAUTH_URL.replace(f"code_challenge={'c' * 43}", "code_challenge=short"),
+        OAUTH_URL.replace(f"state={'s' * 64}", "state=short"),
+        OAUTH_URL.replace("allow_signup=false", "allow_signup=true"),
+        OAUTH_URL.replace("oauth%2Fcallback", "other%2Fcallback"),
+        OAUTH_URL.replace("https%3A%2F%2Fplatform.example", "http%3A%2F%2Fplatform.example"),
+        OAUTH_URL.replace(
+            "https%3A%2F%2Fplatform.example", "https%3A%2F%2Fuser%3Asecret%40platform.example"
+        ),
+        OAUTH_URL.replace("Iv1.test", ""),
+    ):
+        with pytest.raises(ValueError):
+            safe_install_url(url, existing_installation=True)
 
 
 def test_shared_member_reads_and_admin_disable_are_server_authorized():

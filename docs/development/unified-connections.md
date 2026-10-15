@@ -66,6 +66,15 @@ Denali workflow. Merely refreshing the saved catalog does not reconcile an
 external GitHub settings change. The verified list is also constrained by the
 installer user's visibility; it does not promise every repository in an account.
 
+For an existing shared source, setup sends Platform its existing connection UUID,
+not a browser-supplied installation ID. Platform starts a fresh durable PKCE user
+authorization directly against that stored installation; GitHub's already-installed
+settings page is not a verified return path. Denali resolves a local attachment's
+Platform UUID in the current tenant and rejects mismatched local/Platform IDs.
+The onboarding receipt pins that Platform source and the original organization.
+An existing disabled Denali attachment may be reviewed, but is never reactivated.
+New-installation setup retains the original installation-then-OAuth sequence.
+
 The UI distinguishes available, saved, selected, added and removed repositories.
 Added repositories are unchecked. Changed immutable identity is removed from the
 review selection. Admin confirmation is explicit. A different selection creates
@@ -123,10 +132,11 @@ existing bounded reads are not a Denali connector and are not in this catalog.
    exact org/app entitlements and callback/target admission before any activation.
 2. Merge and deploy Platform before Denali: the new shared Entra 168-hour window
    and optional repository return context require the compatible broker first.
-   Apply forward-only Platform migrations 011–015 using its approved migration
-   process and schema-015 runtime privilege manifest. They add durable return/
+   Apply forward-only Platform migrations 011–016 using its approved migration
+   process and schema-016 runtime privilege manifest. They add durable return/
    semantic revisions, Azure runtime scope, Azure Repos, exact-resource AWS and
-   app-independent exact callback registrations. Preserve the live provider flags
+   app-independent exact callback registrations and existing-installation
+   re-verification fences. Preserve the live provider flags
    and Secret names; omitted deployment-shell flags can disable existing pilots.
    Apply Denali migrations 027–028 under its existing advisory-lock migration
    function. Do not run migrations at API startup or change old migration files.

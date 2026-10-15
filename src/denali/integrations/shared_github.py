@@ -8,7 +8,7 @@ import os
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
@@ -29,7 +29,7 @@ def shared_github_enabled() -> bool:
     return os.environ.get("DENALI_PLATFORM_GITHUB_ENABLED", "false").lower() == "true"
 
 
-def safe_install_url(value: Any) -> str:
+def safe_install_url(value: Any, *, existing_installation: bool = False) -> str:
     if not isinstance(value, str) or len(value) > 2048:
         raise ValueError("shared GitHub installation URL is invalid")
     parsed = urlsplit(value)
@@ -37,9 +37,48 @@ def safe_install_url(value: Any) -> str:
         parsed.scheme != "https"
         or parsed.netloc != "github.com"
         or parsed.fragment
-        or not re.fullmatch(r"/apps/[a-z0-9-]+/installations/new", parsed.path)
+        or not (
+            parsed.path == "/login/oauth/authorize"
+            if existing_installation
+            else re.fullmatch(r"/apps/[a-z0-9-]+/installations/new", parsed.path)
+        )
     ):
         raise ValueError("shared GitHub installation URL is invalid")
+    if existing_installation:
+        try:
+            pairs = parse_qsl(
+                parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=6
+            )
+            params = dict(pairs)
+            callback = urlsplit(params.get("redirect_uri", ""))
+            if (
+                len(pairs) != 6
+                or set(params)
+                != {
+                    "client_id",
+                    "redirect_uri",
+                    "state",
+                    "code_challenge",
+                    "code_challenge_method",
+                    "allow_signup",
+                }
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", params["client_id"])
+                or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", params["state"])
+                or not re.fullmatch(r"[A-Za-z0-9_-]{43}", params["code_challenge"])
+                or params["code_challenge_method"] != "S256"
+                or params["allow_signup"] != "false"
+                or callback.scheme != "https"
+                or not callback.hostname
+                or callback.username
+                or callback.password
+                or callback.port is not None
+                or callback.query
+                or callback.fragment
+                or callback.path != "/v1/connections/github/oauth/callback"
+            ):
+                raise ValueError("invalid OAuth contract")
+        except ValueError:
+            raise ValueError("shared GitHub authorization URL is invalid") from None
     return value
 
 

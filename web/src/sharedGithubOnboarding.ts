@@ -5,8 +5,21 @@ export function sharedGithubNotEnabled(error: unknown): boolean {
 export function verifiedInstallUrl(value: string): string {
   const url = new URL(value);
   if (value.length > 2048 || url.protocol !== "https:" || url.host !== "github.com" ||
-      url.username || url.password || url.hash || !/^\/apps\/[a-z0-9-]+\/installations\/new$/.test(url.pathname)) {
+      url.username || url.password || url.hash ||
+      (!/^\/apps\/[a-z0-9-]+\/installations\/new$/.test(url.pathname) && url.pathname !== "/login/oauth/authorize")) {
     throw new Error("GitHub setup link is invalid");
+  }
+  if (url.pathname === "/login/oauth/authorize") {
+    const params = url.searchParams;
+    const keys = ["client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "allow_signup"];
+    const callback = new URL(params.get("redirect_uri") ?? "");
+    if ([...params].length !== keys.length || keys.some((key) => params.getAll(key).length !== 1) ||
+        !/^[A-Za-z0-9_.-]{1,200}$/.test(params.get("client_id") ?? "") ||
+        !/^[A-Za-z0-9_-]{43,128}$/.test(params.get("state") ?? "") ||
+        !/^[A-Za-z0-9_-]{43}$/.test(params.get("code_challenge") ?? "") ||
+        params.get("code_challenge_method") !== "S256" || params.get("allow_signup") !== "false" ||
+        callback.protocol !== "https:" || callback.username || callback.password || callback.port || callback.search || callback.hash ||
+        callback.pathname !== "/v1/connections/github/oauth/callback") throw new Error("GitHub authorization link is invalid");
   }
   return url.toString();
 }

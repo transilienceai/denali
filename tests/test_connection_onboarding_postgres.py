@@ -134,3 +134,35 @@ def test_expired_return_and_cross_tenant_source_are_rejected():
             return_state_sha256=new_return_state()[1],
             connection_id=local_id,
         )
+
+
+def test_github_reverification_receipt_pins_platform_source_across_replacement():
+    assert DSN
+    migrate(DSN)
+    repo = PostgresInventoryRepository(DSN)
+    marker = uuid4().hex
+    tenant = repo.resolve_tenant(f"org_GithubReverify{marker}")
+    other = repo.resolve_tenant(f"org_GithubOther{marker}")
+    request_id, platform_id = str(uuid4()), str(uuid4())
+    _, digest = new_return_state()
+    workflow = repo.begin_connection_onboarding(
+        tenant,
+        request_id=request_id,
+        return_state_sha256=digest,
+        platform_connection_id=platform_id,
+    )
+    for different in (None, str(uuid4())):
+        with pytest.raises(ValueError):
+            repo.begin_connection_onboarding(
+                tenant,
+                request_id=request_id,
+                return_state_sha256=new_return_state()[1],
+                platform_connection_id=different,
+            )
+    replacement = PostgresInventoryRepository(DSN)
+    assert replacement.get_connection_onboarding(other, str(workflow["id"])) is None
+    assert replacement.consume_connection_onboarding_return(digest, succeeded=True)
+    resumed = replacement.get_connection_onboarding(tenant, str(workflow["id"]))
+    assert str(resumed["platform_connection_id"]) == platform_id
+    assert resumed["connection_id"] is None and resumed["status"] == "returned"
+    assert replacement.consume_connection_onboarding_return(digest, succeeded=True) is None

@@ -50,6 +50,13 @@ test("shared GitHub installs use the exact GitHub origin and installation path",
   for (const url of ["http://github.com/apps/app/installations/new", "https://github.com.evil/apps/app/installations/new", "https://user:secret@github.com/apps/app/installations/new", "javascript:alert(1)", "https://github.com/apps/app/installations/new#secret"]) assert.throws(() => verifiedInstallUrl(url));
 });
 
+test("existing installation verification accepts only the exact GitHub OAuth endpoint", () => {
+  const oauth = `https://github.com/login/oauth/authorize?client_id=Iv1.test&redirect_uri=https%3A%2F%2Fplatform.example%2Fv1%2Fconnections%2Fgithub%2Foauth%2Fcallback&state=${"s".repeat(64)}&code_challenge=${"c".repeat(43)}&code_challenge_method=S256&allow_signup=false`;
+  assert.equal(verifiedInstallUrl(oauth), oauth);
+  for (const url of ["https://github.com/login/oauth/authorize/other", "https://github.com/login/oauth/authorize#fragment", "https://github.com.evil/login/oauth/authorize", "https://user:secret@github.com/login/oauth/authorize", "https://github.com/organizations/example/settings/installations/99"]) assert.throws(() => verifiedInstallUrl(url));
+  for (const url of [oauth + "&state=duplicate", oauth.replace("S256", "plain"), oauth.replace("state=" + "s".repeat(64), "state=short"), oauth.replace("allow_signup=false", "allow_signup=true"), oauth.replace("oauth%2Fcallback", "wrong%2Fcallback"), oauth.replace("https%3A%2F%2Fplatform.example", "http%3A%2F%2Fplatform.example")]) assert.throws(() => verifiedInstallUrl(url));
+});
+
 test("only default-off and non-pilot 404 hides shared GitHub; errors never choose native", () => {
   assert.equal(sharedGithubNotEnabled(Object.assign(new Error("disabled"), { status: 404 })), true);
   for (const status of [401, 403, 409, 422, 502, 503]) assert.equal(sharedGithubNotEnabled(Object.assign(new Error("failure"), { status })), false);
