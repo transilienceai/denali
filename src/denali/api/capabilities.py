@@ -82,6 +82,24 @@ READ_CAPABILITIES: dict[str, ReadCapability] = {
     "shared-aws-template": ReadCapability(
         "/v1/shared/connection-setup-templates/aws/{id}", identifier="uuid"
     ),
+    "shared-jira-connections": ReadCapability(
+        "/internal/v1/shared/jira/connections", frozenset({"limit", "offset"})
+    ),
+    "shared-jira-status": ReadCapability(
+        "/internal/v1/shared/jira/connections/{id}/status", identifier="uuid"
+    ),
+    "shared-jira-projects": ReadCapability(
+        "/internal/v1/shared/jira/connections/{id}/projects",
+        frozenset({"limit", "cursor"}), identifier="uuid",
+    ),
+    "shared-jira-issues": ReadCapability(
+        "/internal/v1/shared/jira/connections/{id}/issues",
+        frozenset({"project_id", "limit", "cursor"}), identifier="uuid",
+    ),
+    "shared-jira-issue-detail": ReadCapability(
+        "/internal/v1/shared/jira/connections/{id}/issue-detail",
+        frozenset({"project_id", "issue_id"}), identifier="uuid",
+    ),
     "inventory-summary": ReadCapability("/v1/inventory/summary"),
     "assets": ReadCapability(
         "/v1/inventory/assets",
@@ -181,8 +199,15 @@ def read_route(operation: str, query: QueryParams) -> tuple[str, bytes]:
         if asset_id != values["asset_id"].lower():
             raise HTTPException(status_code=422, detail="invalid asset_id")
         values["asset_id"] = asset_id
-    for name, minimum, maximum in (("limit", 1, 100), ("offset", 0, 100000)):
+    for name, minimum, maximum in (
+        ("limit", 1, 50 if operation in {"shared-jira-projects", "shared-jira-issues"} else 100),
+        ("offset", 0, 100000),
+    ):
         if name in values:
+            if operation.startswith("shared-jira-") and re.fullmatch(
+                r"(?:0|[1-9][0-9]*)", values[name]
+            ) is None:
+                raise HTTPException(status_code=422, detail=f"invalid {name}")
             try:
                 number = int(values[name])
             except ValueError as error:
@@ -190,6 +215,20 @@ def read_route(operation: str, query: QueryParams) -> tuple[str, bytes]:
             if not minimum <= number <= maximum:
                 raise HTTPException(status_code=422, detail=f"invalid {name}")
             values[name] = str(number)
+    if operation.startswith("shared-jira-"):
+        if operation in {"shared-jira-projects", "shared-jira-issues"}:
+            values.setdefault("limit", "20")
+        if operation in {"shared-jira-issues", "shared-jira-issue-detail"}:
+            project_id = values.get("project_id", "")
+            if re.fullmatch(r"[1-9][0-9]{0,18}", project_id) is None or int(project_id) >= 2**63:
+                raise HTTPException(status_code=422, detail="invalid project_id")
+        if operation == "shared-jira-issue-detail" and re.fullmatch(
+            r"(?:[1-9][0-9]{0,19}|[A-Z][A-Z0-9_]{0,31}-[1-9][0-9]{0,19})",
+            values.get("issue_id", ""),
+        ) is None:
+            raise HTTPException(status_code=422, detail="invalid issue_id")
+        if "cursor" in values and re.fullmatch(r"[A-Za-z0-9_-]{1,8192}", values["cursor"]) is None:
+            raise HTTPException(status_code=422, detail="invalid cursor")
     if "q" in values and len(values["q"]) > 200:
         raise HTTPException(status_code=422, detail="search query is too long")
     if "kind" in values and len(values["kind"]) > 100:

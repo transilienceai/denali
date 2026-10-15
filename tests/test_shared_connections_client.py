@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+import httpx
 import pytest
 
 from denali.integrations import shared_connections_client
@@ -89,3 +92,56 @@ def test_environment_allowlist_is_exact_and_rejects_invalid_ids(monkeypatch):
     monkeypatch.setenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "org_pilot,not-an-org")
     with pytest.raises(ValueError, match="invalid Clerk org ID"):
         shared_connections_client.SharedConnectionsClient.from_environment()
+
+
+def test_bounded_jira_broker_response_uses_existing_machine_and_rejects_oversize(monkeypatch):
+    calls = []
+    response_body = [b'{"projects":[]}']
+
+    class FakeClerk:
+        def __init__(self, bearer_auth):
+            assert bearer_auth == "operator-test-machine"
+            self.m2m = self
+
+        def create_token(self, **options):
+            assert options == {"seconds_until_expiration": 120, "min_remaining_ttl_seconds": 90}
+            return type("Token", (), {"token": "ephemeral-test-token"})()
+
+    def transport(**options):
+        assert options == {"retries": 0}
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(200, content=response_body[0])
+
+        return httpx.MockTransport(handler)
+
+    monkeypatch.setattr(shared_connections_client, "Clerk", FakeClerk)
+    monkeypatch.setattr(shared_connections_client.httpx, "HTTPTransport", transport)
+    client = shared_connections_client.SharedConnectionsClient(
+        "https://platform.example", "operator-test-machine",
+        allowed_clerk_org_ids=frozenset({"org_server"}),
+    )
+    path = "/internal/v1/connections/jira/11111111-1111-4111-8111-111111111111/read"
+    result = client.request(
+        "POST", path, clerk_org_id="org_server",
+        payload={"clerk_org_id": "org_other", "operation": "projects"},
+        max_response_bytes=20,
+    )
+    assert result == {"projects": []}
+    assert calls[0].method == "POST"
+    assert str(calls[0].url) == "https://platform.example" + path
+    assert json.loads(calls[0].content) == {
+        "clerk_org_id": "org_server", "operation": "projects",
+    }
+    assert calls[0].headers["Authorization"] == "Bearer ephemeral-test-token"
+    with pytest.raises(shared_connections_client.SharedConnectionsError) as error:
+        client.request("POST", path, clerk_org_id="org_server", payload={}, max_response_bytes=5)
+    assert error.value.status_code == 502
+    response_body[0] = b"[" * 10_000 + b"0" + b"]" * 10_000
+    with pytest.raises(shared_connections_client.SharedConnectionsError) as error:
+        client.request("POST", path, clerk_org_id="org_server", payload={},
+                       max_response_bytes=25_000)
+    assert error.value.status_code == 502
+    with pytest.raises(ValueError, match="unexpected shared connections path"):
+        client.request("GET", "/arbitrary-url", clerk_org_id="org_server")

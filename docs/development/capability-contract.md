@@ -1,5 +1,18 @@
 # Denali capability contract v1
 
+## Additive shared Jira read operations
+
+Five optional `results:read` operations now appear in the product-owned
+`READ_CAPABILITIES` registry: `shared-jira-connections`, `shared-jira-status`,
+`shared-jira-projects`, `shared-jira-issues`, and `shared-jira-issue-detail`.
+They retain the fixed `/internal/v1/capabilities/{operation}` receiver and add
+no OAuth scope or typed CLI command. The exact input schema, bounded outputs,
+default-off flag and independent Platform admission gate are documented in
+[shared Jira read capabilities](shared-jira-read-capabilities.md). These read
+only Platform-brokered selected Jira metadata and do not transform it into
+Denali findings, scans or local connections. The existing 38 read operation
+names and their semantics remain unchanged; the additive registry has 43.
+
 ## Durable connection job polling (additive follow-up)
 
 `connection-validation-job` and `connection-collection-job` each require

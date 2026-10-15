@@ -37,6 +37,7 @@ esac
         """#!/usr/bin/env bash
 set -euo pipefail
 printf 'modal %s\n' "$*" >>"${FAKE_CALL_LOG}"
+printf 'jira-flag %s\n' "${DENALI_ENABLE_SHARED_JIRA_READS:-unset}" >>"${FAKE_CALL_LOG}"
 """,
     )
     _executable(
@@ -64,6 +65,7 @@ fi
     environment.pop("GITHUB_ACTIONS", None)
     environment.pop("GITHUB_REF", None)
     environment.pop("GITHUB_SHA", None)
+    environment.pop("DENALI_ENABLE_SHARED_JIRA_READS", None)
     environment.update(overrides)
     return environment
 
@@ -132,6 +134,7 @@ def test_development_deploy_runs_checks_migration_deploy_and_smoke_tests(
     assert "modal run --env denali-dev modal_app.py::migrate_database" in calls
     assert "modal run --env denali-dev modal_app.py::database_status" in calls
     assert "modal deploy --env denali-dev modal_app.py" in calls
+    assert calls.count("jira-flag false\n") == 4
     assert "https://transilience-denali-dev--denali-dev-api.modal.run/healthz" in calls
     assert "https://transilience-denali-dev--denali-dev-api.modal.run/openapi.json" in calls
     assert "https://denali-dev.transilience.cloud/api/healthz" in calls
@@ -143,3 +146,22 @@ def test_development_deploy_rejects_stale_backend_without_shared_route(tmp_path:
 
     assert result.returncode == 1
     assert "shared-connections route is absent" in result.stderr
+
+
+def test_development_deploy_carries_true_jira_selector(tmp_path: Path) -> None:
+    result = _run(tmp_path, DENALI_ENABLE_SHARED_JIRA_READS="true")
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "calls.log").read_text().count("jira-flag true\n") == 4
+
+
+def test_development_deploy_rejects_invalid_jira_selector_before_modal(tmp_path: Path) -> None:
+    result = _run(tmp_path, DENALI_ENABLE_SHARED_JIRA_READS="yes")
+    assert result.returncode == 2
+    assert "DENALI_ENABLE_SHARED_JIRA_READS must be true or false" in result.stderr
+    assert not (tmp_path / "calls.log").exists()
+
+
+def test_development_deploy_rejects_empty_jira_selector_before_modal(tmp_path: Path) -> None:
+    result = _run(tmp_path, DENALI_ENABLE_SHARED_JIRA_READS="")
+    assert result.returncode == 2
+    assert not (tmp_path / "calls.log").exists()

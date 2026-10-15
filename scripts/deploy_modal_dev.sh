@@ -32,6 +32,11 @@ export DENALI_MODAL_APP_NAME="denali-dev"
 export DENALI_MODAL_SECRET_NAME="denali-dev"
 export DENALI_MODAL_PROVIDER_SECRET_NAME="denali-github-provider"
 export DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN="${DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN:-https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run}"
+export DENALI_ENABLE_SHARED_JIRA_READS="${DENALI_ENABLE_SHARED_JIRA_READS-false}"
+if [[ "${DENALI_ENABLE_SHARED_JIRA_READS}" != "true" && "${DENALI_ENABLE_SHARED_JIRA_READS}" != "false" ]]; then
+  echo "Refusing development deployment: DENALI_ENABLE_SHARED_JIRA_READS must be true or false." >&2
+  exit 2
+fi
 export DENALI_MODAL_REGION="${DENALI_MODAL_REGION:-us-east}"
 export DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED="${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED:-false}"
 if [[ "${DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED}" != "true" \

@@ -17,6 +17,11 @@ from denali.api.capabilities import (
 from denali.api.connection_capabilities import CONNECTION_READS
 from denali.api.gateway_auth import ClerkGatewayVerifier, ClerkMembershipChecker, GatewayPrincipal
 
+SHARED_JIRA_READS = {
+    "shared-jira-connections", "shared-jira-status", "shared-jira-projects",
+    "shared-jira-issues", "shared-jira-issue-detail",
+}
+
 
 def test_product_owned_read_contract_is_versioned_and_allowlisted():
     assert CAPABILITY_CONTRACT_VERSION == 1
@@ -26,8 +31,11 @@ def test_product_owned_read_contract_is_versioned_and_allowlisted():
         "context",
         "runtime-session-export",
     } <= READ_CAPABILITIES.keys()
-    assert len(READ_CAPABILITIES) == 38
-    assert all(spec.path.startswith("/v1/") for spec in READ_CAPABILITIES.values())
+    assert len(READ_CAPABILITIES) == 43
+    assert all(
+        spec.path.startswith("/v1/") or operation in SHARED_JIRA_READS
+        for operation, spec in READ_CAPABILITIES.items()
+    )
     assert set(JOB_WRITE_CAPABILITIES) == {"connection-validate", "connection-collect"}
     assert all(spec.method == "POST" for spec in JOB_WRITE_CAPABILITIES.values())
     assert len(GATEWAY_COLLECTION_KINDS) == 9
@@ -260,13 +268,14 @@ def test_read_catalog_is_explicit_org_scoped_and_never_creates_tenant():
             ).status_code
             == 422
         )
-    assert len(READ_CAPABILITIES) == 38
+    assert len(READ_CAPABILITIES) == 43
     assert all(call[1] in {"tenant-alpha", "tenant-beta"} for call in repo.calls)
 
 
 @pytest.mark.parametrize("operation", sorted(
     set(READ_CAPABILITIES) - CONNECTION_READS
     - {"connection-validation-job", "connection-collection-job", "resource-write-status"}
+    - SHARED_JIRA_READS
 ))
 def test_every_named_read_resolves_to_an_existing_tenant_scoped_handler(operation):
     repo = Repository()
