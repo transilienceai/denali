@@ -580,7 +580,9 @@ def test_real_platform_oauth_route_and_denali_return_contract_without_provider_n
                 "tenant_id": PROVIDER_TENANT,
                 "organization": "example",
                 "pkce_verifier": verifier,
-                "return_origin": "https://denali.example.test",
+                "return_callback_url": (
+                    "https://denali.example.test/api/v1/connections/onboarding/callback"
+                ),
                 "return_state": return_state,
             }
             return self.binding
@@ -600,7 +602,7 @@ def test_real_platform_oauth_route_and_denali_return_contract_without_provider_n
             self.failure_recorded = True
 
         def azure_repos_return_context(self, binding):
-            return binding
+            return {key: binding[key] for key in ("return_callback_url", "return_state")}
 
     class Broker(connector.AzureReposBroker):
         def exchange_code(self, tenant, code, verifier):
