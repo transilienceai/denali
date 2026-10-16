@@ -14,7 +14,8 @@ test("native exact-resource form exposes all pins and only the code-to-cloud pla
   assert.match(ui, /One exact Zip Lambda · partial account coverage/);
   assert.match(ui, /coverageMode === "selected-resource" \? \[deploymentRegion\]/);
   assert.match(ui, /declared_scopes: coverageMode === "selected-resource" \? \["aws.code_to_cloud"\]/);
-  assert.match(ui, /provider === "aws" && coverageMode === "selected-resource"\)\}/);
+  assert.match(ui, /nativeEvidenceOptions = provider === "aws" && coverageMode === "selected-resource" \? connectionScopes\(provider\)\.filter\(\(scope\) => scope.id === "aws.code_to_cloud"\)/);
+  assert.match(ui, /requiredScopes=\{provider === "entra" \|\| provider === "google_workspace" \|\| \(provider === "aws" && coverageMode === "selected-resource"\) \? nativeEvidenceOptions\.map/);
   assert.match(ui, /Exact Zip Lambda ARN/);
   assert.match(ui, /Exact Lambda execution-role ARN/);
   assert.match(ui, /Approved expected Bedrock model ID or ARN/);

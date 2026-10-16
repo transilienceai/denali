@@ -108,7 +108,8 @@ app-sidebar {
 .auth-card, .auth-status { min-width: min(420px, 100%); padding: 28px; border: 1px solid rgba(255,255,255,.12); border-radius: 18px; background: rgba(255,255,255,.96); box-shadow: 0 24px 70px rgba(0,0,0,.28); }
 .auth-card { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }.auth-card h1 { margin: 0; font: 700 24px "Inter"; }.auth-card p { margin: 0 0 4px; color: var(--muted); }.auth-status { min-width: 0; color: #dce9ef; background: rgba(255,255,255,.08); text-align: center; }
 .read-only-banner { padding: 14px 18px; border: 1px solid #d8e3ed; border-radius: 12px; background: #f5f8fb; display: flex; align-items: center; gap: 12px; color: #49647b; }.read-only-banner svg { flex: none; }.read-only-banner div { display: flex; flex-direction: column; }.read-only-banner strong { color: var(--ink); font-size: 12px; }.read-only-banner span { margin-top: 3px; font-size: 11px; }
-.read-only-detail button, .read-only-detail a, .read-only-detail input, .read-only-detail textarea, .read-only-detail select { pointer-events: none; opacity: .55; }
+.read-only-detail :is(button, input, textarea, select):disabled { opacity: .55; cursor: not-allowed; }
+.read-only-detail .connection-launch-actions a { display: none; }
 .drawer-read-only { padding: 13px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }.drawer-read-only svg { width: 16px; color: var(--blue); }
 .page-stack { display: flex; flex-direction: column; gap: 20px; }
 
@@ -619,10 +620,12 @@ body { font-size: 14px; }
 .connection-wizard-adapter .shared-aws-pilot { border: 0; box-shadow: none; padding: 0; }
 .connection-wizard-adapter .shared-aws-pilot-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .connection-wizard-adapter .shared-aws-pilot-form > button, .connection-wizard-adapter .shared-aws-pilot-form > fieldset { grid-column: 1 / -1; }
-.connection-wizard-adapter textarea, .connection-wizard-adapter select, .connection-wizard-adapter input:not([type="checkbox"]) { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; }
+.connection-wizard-adapter textarea, .connection-wizard-adapter select, .connection-wizard-adapter input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])) { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; }
 .connection-wizard-adapter textarea { min-height: 100px; resize: vertical; }
 .connection-wizard-adapter .shared-aws-pilot-detail { border-top: 1px solid var(--line); padding-top: 20px; }
 .connection-detail-stack { display: grid; align-content: start; gap: 14px; min-width: 0; }
+.connection-detail-access { display: grid; align-content: start; gap: 14px; width: 100%; min-inline-size: 0; min-width: 0; margin: 0; padding: 0; border: 0; }
+.connector-read-only-note { margin: 0; color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.5; }
 .connection-detail-stack > .secondary-action { margin-top: 0; }
 @media (max-width: 767px) {
   .connection-onboarding-wizard { padding: 18px; }
@@ -636,7 +639,7 @@ body { font-size: 14px; }
 .shared-aws-pilot-heading p, .shared-aws-pilot-detail p { margin: 0; color: var(--muted); }
 .shared-aws-pilot-form, .shared-aws-pilot-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .shared-aws-pilot-form label, .shared-aws-pilot-detail label { display: grid; gap: 5px; font-size: 12px; }
-.shared-aws-pilot-form input, .shared-aws-pilot-detail select { min-height: 38px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); }
+.shared-aws-pilot-form input:where(:not([type="checkbox"], [type="radio"], [type="hidden"])), .shared-aws-pilot-detail select { min-height: 38px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--ink); }
 .shared-aws-pilot-actions button, .shared-aws-pilot-heading button { min-height: 36px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); cursor: pointer; }
 .shared-aws-pilot-detail { display: grid; gap: 12px; }
 .shared-aws-pilot-detail .shared-github-repository-choice { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
@@ -1541,4 +1544,348 @@ textarea::placeholder { color: var(--color-role-text-content-placeholder); }
   .topbar { height: 72px; padding: 0 var(--spacing-md); }
   .workspace { padding: var(--spacing-md) var(--spacing-sm) var(--spacing-2xl); }
   .panel, .metric-card, .finding-metric, .vulnerability-metric, .profile-card, .profile-stat, .connection-detail, .connection-create { border-radius: var(--border-radius-sm); }
+}
+
+/* Connections component layer: shared and native forms use the same compact,
+ * theme-aware controls. Never apply these layout rules to unrelated app forms. */
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) {
+  --connector-control-height: 40px;
+  min-width: 0;
+  color: var(--color-role-text-content-body);
+}
+.connection-onboarding-wizard { width: 100%; max-width: 1120px; align-self: flex-start; justify-self: start; margin-inline: 0; padding: 22px; gap: 18px; }
+.connections-page .connection-intro { min-height: 96px; gap: 18px; }
+.connections-page .connection-intro h2 { max-width: 36ch; font-size: 25px; line-height: 1.25; letter-spacing: -.035em; }
+.connections-page .connection-intro p { max-width: 76ch; font-size: 13px; line-height: 1.55; }
+.connections-page .connection-boundary { min-height: 0; padding: 13px 16px; }
+.connections-page .connection-boundary span { font-size: 12px; line-height: 1.5; }
+.connections-page :is(.connection-error, .connection-notice) { font-size: 12px; line-height: 1.5; }
+.connections-page .connection-list button small { font-size: 11px; line-height: 1.45; }
+.connections-page .connection-health { font-size: 10px; font-weight: 600; }
+.connection-wizard-heading { gap: 16px; }
+.connection-wizard-heading h3 { margin: 4px 0 6px; font-size: 20px; line-height: 1.3; letter-spacing: -.025em; }
+.connection-wizard-heading p { max-width: 68ch; font-size: 13px; line-height: 1.55; }
+.connection-wizard-adapter .shared-aws-pilot { gap: 16px; }
+.shared-aws-pilot-heading h3 { font-size: 16px; line-height: 1.35; letter-spacing: -.015em; }
+.shared-aws-pilot-heading p, .shared-aws-pilot-detail p { font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.shared-aws-pilot-heading > div, .connection-provider-panel { min-width: 0; }
+.connection-provider-panel { min-height: 176px; }
+.connection-provider-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)); gap: 7px; margin: 0; }
+.connection-provider-picker button, .connection-provider-tab {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-role-border-default);
+  border-radius: 9px;
+  background: var(--color-role-surface-component-default);
+  color: var(--color-role-text-content-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
+  white-space: normal;
+}
+.connection-provider-picker button.active, .connection-provider-picker button[aria-pressed="true"] {
+  border-color: var(--color-role-border-brand);
+  background: var(--color-role-surface-component-selected);
+  color: var(--color-role-text-content-heading);
+  box-shadow: inset 0 -2px 0 var(--denali-brand-primary);
+}
+.connection-provider-icon { flex: 0 0 auto; }
+.connection-provider-tab-icon { order: -1; width: 20px; height: 20px; display: block; object-fit: contain; flex: 0 0 auto; }
+.connection-provider-tab-icon img { width: 24px; height: 24px; object-fit: contain; }
+.connection-provider-tab-copy { min-width: 0; overflow-wrap: anywhere; }
+.connection-journey { padding: 12px 14px; gap: 10px; border-radius: 9px; }
+.connection-journey li { font-size: 12px; line-height: 1.4; }
+.connection-journey li > span { width: 25px; height: 25px; }
+.connection-method-note { padding: 12px 14px; gap: 10px; }
+.connection-method-note > div { flex: 1 1 auto; min-width: 0; }
+.connection-method-note > button { align-self: center; flex: 0 0 auto; max-width: 100%; }
+.connector-security-note { display: flex; align-items: flex-start; gap: 7px; min-width: 0; margin: 0; color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.5; }
+.connector-security-note > svg { width: 16px; height: 16px; flex: 0 0 16px; margin-top: 1px; }
+.connection-method-summary { padding: 0; color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.5; }
+.connection-method-summary > summary { min-height: 36px; padding: 8px 0; color: var(--color-role-text-content-heading); cursor: pointer; font-weight: 600; }
+.connection-method-summary p { margin: 4px 0 8px; }
+
+:is(.connection-wizard-adapter .shared-aws-pilot-form, .connector-form, .connection-form-grid) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 14px 16px;
+  min-width: 0;
+}
+.connection-form-grid { margin-top: 18px; }
+.connection-form-grid label > span { color: var(--color-role-text-content-subtle); font-size: 12px; font-weight: 600; }
+.connection-form-grid small { color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.5; }
+.connector-field, .connector-form > label:not(.connector-choice), .shared-aws-pilot-form > label:not(:has(input[type="checkbox"])), .shared-aws-pilot-detail > label:not(:has(input[type="checkbox"])) {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 0;
+  color: var(--color-role-text-content-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.connector-field-wide, .connector-field--wide,
+.connector-form > :not(label), .connector-form > label:only-of-type,
+.connector-form > :is(fieldset, p, .connector-form-section, .connector-actions, .connector-panel-state, .connector-loading),
+.shared-aws-pilot-form > :is(fieldset, p, button),
+.connection-wizard-adapter .shared-aws-pilot-form > .connector-field-wide { grid-column: 1 / -1; }
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) :is(input, select, textarea):not(:where([type="checkbox"], [type="radio"], [type="hidden"])) {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--connector-control-height, 40px);
+  padding: 9px 11px;
+  border: 1px solid var(--color-role-border-default);
+  border-radius: 8px;
+  background: var(--color-role-surface-component-default);
+  color: var(--color-role-text-content-body);
+  font: 400 13px/1.45 "Inter", system-ui, sans-serif;
+  box-shadow: none;
+}
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) textarea {
+  min-height: 86px;
+  max-height: 260px;
+  resize: vertical;
+}
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) :is(input, select, textarea):disabled {
+  border-color: var(--color-role-border-disabled);
+  background: var(--color-role-surface-component-disabled);
+  color: var(--color-role-foreground-disabled);
+  cursor: not-allowed;
+}
+.connector-field-hint, .connector-choice-copy small, .connector-field > small {
+  margin: 0;
+  color: var(--color-role-text-content-subtle);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.connector-required { margin-left: 4px; color: var(--color-role-text-content-subtle); font-size: 11px; font-weight: 400; }
+.connection-wizard-adapter fieldset, .connector-form-section, .connector-evidence-picker {
+  min-width: 0;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--color-role-border-subtle);
+  border-radius: 10px;
+  background: var(--color-role-surface-container-default);
+}
+.connection-wizard-adapter fieldset legend, .connector-form-section > legend, .connector-evidence-picker > legend {
+  max-width: 100%;
+  padding: 0 6px;
+  color: var(--color-role-text-content-heading);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.connector-form-section > .connector-field-hint, .connector-evidence-picker > .connector-field-hint { margin-bottom: 10px; }
+:is(.connection-create, .connection-create-lock) > .connector-evidence-picker { margin-top: 18px; }
+.connector-access-options { display: grid; gap: 14px; min-width: 0; }
+fieldset.connector-access-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+fieldset.connector-access-options > :is(legend, p, .connector-evidence-picker) { grid-column: 1 / -1; }
+fieldset.connector-access-options > .connector-evidence-picker { margin-top: 4px; padding: 0; border: 0; }
+.connector-access-options > button.connector-access-expander { justify-self: start; }
+.connector-choice-grid, .connection-wizard-adapter fieldset:has(> label > input[type="checkbox"]) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 8px;
+}
+.connection-wizard-adapter fieldset:has(> label > input[type="checkbox"]) > :is(legend, p, button) { grid-column: 1 / -1; }
+.connector-choice, .connection-wizard-adapter fieldset label:has(> input[type="checkbox"]), .connection-selection-fieldset label:has(> input[type="checkbox"]) {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+  min-height: 44px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--color-role-border-subtle);
+  border-radius: 8px;
+  background: var(--color-role-surface-component-default);
+  color: var(--color-role-text-content-body);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.connector-choice:hover, .connection-wizard-adapter fieldset label:has(> input[type="checkbox"]):hover { border-color: var(--color-role-border-hover); }
+.connector-choice[data-selected="true"], .connector-choice:has(input:checked) {
+  border-color: var(--color-role-border-brand);
+  background: var(--color-role-surface-component-selected);
+}
+.connector-choice:has(input:disabled), .connection-wizard-adapter fieldset:disabled label { cursor: not-allowed; opacity: .65; }
+.connector-choice-copy { display: flex; flex: 1 1 auto; flex-direction: column; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.connector-choice-copy > strong { color: var(--color-role-text-content-heading); font-size: 12px; font-weight: 600; line-height: 1.4; }
+.connector-evidence-picker { margin: 0; }
+/* Checkbox geometry must never inherit text-input height, padding or stretching. */
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot, .connector-choice, .repository-picker) input:is([type="checkbox"], [type="radio"]) {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  max-width: 16px;
+  max-height: 16px;
+  flex: 0 0 16px;
+  align-self: flex-start;
+  margin: 2px 0 0;
+  padding: 0;
+  accent-color: var(--denali-brand-primary);
+  box-shadow: none;
+}
+
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) :where(button, a.primary-action, a.secondary-action) {
+  min-height: 38px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  gap: 7px;
+  text-decoration: none;
+  transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease;
+}
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) button:where(:not(.primary-action, .danger-action, .drawer-close, .connection-provider-tab)) {
+  border: 1px solid var(--color-role-border-default);
+  background: var(--color-role-surface-component-default);
+  color: var(--color-role-text-content-body);
+  cursor: pointer;
+}
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) button:where(:not(.primary-action, .danger-action, .connection-provider-tab):not(:disabled)):hover {
+  border-color: var(--color-role-border-hover);
+  background: var(--color-role-surface-component-hover);
+}
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) .primary-action {
+  border: 1px solid transparent;
+  background: var(--color-role-surface-action-default);
+  color: var(--color-role-foreground-on-color);
+}
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) .primary-action:hover:not(:disabled) { background: var(--color-role-surface-action-hover); }
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) .danger-action {
+  border: 1px solid var(--color-role-status-critical-border-focus);
+  background: var(--color-role-status-critical-subtle);
+  color: var(--color-role-status-critical-foreground);
+}
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) button:disabled { cursor: not-allowed; opacity: .55; transform: none; }
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) button[aria-busy="true"] { cursor: progress; }
+.connector-actions, .shared-aws-pilot-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.connector-form > .connector-actions { margin-top: 2px; }
+.connector-actions .secondary-action { margin: 0; }
+.connector-actions > :is(button, a) { display: inline-flex; align-items: center; justify-content: center; }
+.connector-actions > a:not(.primary-action):not(.secondary-action), .shared-aws-pilot-actions > a { color: var(--color-role-foreground-accent); font-size: 12px; font-weight: 600; text-underline-offset: 3px; }
+.connector-access-expander { padding: 0; border: 1px solid var(--color-role-border-subtle); border-radius: 9px; background: var(--color-role-surface-component-subtle); }
+.connector-access-expander > summary { min-height: 40px; padding: 10px 12px; color: var(--color-role-text-content-heading); font-size: 12px; font-weight: 600; cursor: pointer; }
+.connector-access-expander > :not(summary) { margin: 0 12px 12px; }
+.connection-organization-access { padding-top: 12px; border-top: 1px solid var(--color-role-border-subtle); }
+.connection-organization-access > summary { min-height: 36px; padding: 8px 0; color: var(--color-role-text-content-subtle); font-size: 12px; font-weight: 600; cursor: pointer; }
+
+.repository-picker { min-width: 0; border: 1px solid var(--color-role-border-subtle); border-radius: 10px; overflow: hidden; background: var(--color-role-surface-container-default); }
+.connection-wizard-adapter fieldset.repository-picker { padding: 0; }
+.repository-picker > legend { margin-left: 12px; padding: 0 6px; }
+.repository-picker > .connector-field-hint { margin: 0; padding: 10px 12px; }
+.repository-picker-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border-bottom: 1px solid var(--color-role-border-subtle); }
+.repository-picker-count { display: flex; flex-direction: column; gap: 2px; margin: 0; color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.5; }
+.repository-picker-search { flex: 1 1 200px; width: 100%; min-width: 0; max-width: 360px; margin: 0; }
+.repository-picker-list { max-height: 352px; margin: 0; padding: 4px; list-style: none; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
+.connection-wizard-adapter .repository-picker-list { max-height: 352px; padding: 4px; }
+.repository-picker-list > li { list-style: none; margin: 0; }
+.repository-picker-item, .repository-picker-item > label { display: flex; align-items: flex-start; gap: 9px; min-width: 0; min-height: 44px; margin: 0; padding: 9px 10px; color: var(--color-role-text-content-body); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; cursor: pointer; }
+.repository-picker-item { border-radius: 6px; }
+:is(.connection-wizard-adapter, .connection-detail) .repository-picker label.repository-picker-item { display: flex; margin: 0; padding: 9px 10px; border: 0; border-radius: 6px; background: transparent; }
+.repository-picker-item:has(> label) { display: block; padding: 0; }
+.repository-picker-item:hover { background: var(--color-role-surface-component-hover); }
+.repository-picker-item:has(input:checked) { background: var(--color-role-surface-component-selected); }
+:is(.connection-wizard-adapter, .connection-detail) .repository-picker label.repository-picker-item:has(input:checked) { background: var(--color-role-surface-component-selected); }
+.repository-picker-item:has(input:disabled) { cursor: not-allowed; opacity: .65; }
+.repository-picker-empty { min-height: 112px; padding: 24px 16px; color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.6; text-align: center; }
+.repository-picker-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--color-role-border-subtle); color: var(--color-role-text-content-subtle); font-size: 12px; }
+.repository-picker-footer > :is(div, nav) { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+
+.connector-loading { display: grid; align-content: start; gap: 12px; min-height: 176px; padding: 16px 0; color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.5; }
+.connector-loading-heading { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 500; }
+.connector-loading-heading svg { width: 16px; height: 16px; flex: none; }
+.connector-loading-heading p { margin: 3px 0 0; color: var(--color-role-text-content-subtle); font-weight: 400; }
+.connector-loading.compact { min-height: 100px; padding: 8px 0; }
+.connector-skeleton { display: grid; align-content: start; gap: 10px; max-width: 640px; }
+.connector-skeleton > span, .connector-skeleton > div > span { display: block; height: 12px; border-radius: 5px; background: var(--color-role-surface-component-subtle); animation: connector-skeleton-pulse 1.8s ease-in-out infinite alternate; }
+.connector-skeleton > span:first-child { width: 44%; height: 14px; }
+.connector-skeleton > span:nth-child(2) { width: 72%; }
+.connector-skeleton > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 4px; }
+.connector-skeleton > div > span { height: 40px; }
+@keyframes connector-skeleton-pulse { from { opacity: .55; } to { opacity: 1; } }
+.connector-panel-state { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; min-height: 112px; padding: 18px; border: 1px solid var(--color-role-border-subtle); border-radius: 10px; background: var(--color-role-surface-component-subtle); color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.connector-panel-state > svg { width: 20px; height: 20px; flex: 0 0 auto; }
+.connector-panel-state > div { min-width: 0; }
+.connector-panel-state :is(h4, strong) { margin: 0; color: var(--color-role-text-content-heading); font-size: 13px; }
+.connector-panel-state p { margin: 4px 0 12px; color: inherit; }
+.connector-panel-error { border-color: var(--color-role-status-critical-border-focus); background: var(--color-role-status-critical-subtle); color: var(--color-role-status-critical-foreground); }
+.shared-aws-pilot > [role="alert"] { padding: 12px 14px; border: 1px solid var(--color-role-status-critical-border-focus); border-radius: 8px; background: var(--color-role-status-critical-subtle); color: var(--color-role-status-critical-foreground); font-size: 12px; line-height: 1.5; }
+.shared-aws-pilot > [role="status"] { font-size: 12px; line-height: 1.5; }
+.connection-detail .setup-progress { gap: 0; }
+.connection-detail .setup-progress > div { padding-top: 14px; padding-bottom: 14px; }
+.connection-detail .setup-progress small { font-size: 12px; line-height: 1.55; }
+.connection-create-head > div { min-width: 0; }
+.connection-detail-head h3 { font-size: 18px; line-height: 1.35; }
+.connection-detail-head code { font-size: 11px; line-height: 1.5; }
+.connection-detail-head small { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.connection-detail .validation-grid { gap: 9px; }
+.connection-detail .validation-grid > div { padding: 12px; }
+.connection-detail .validation-grid :is(p, small) { font-size: 12px; line-height: 1.5; }
+.connection-detail .connection-section > section { padding: 10px 0; border-bottom: 1px solid var(--color-role-border-subtle); }
+.connection-detail .connection-section > section:last-child { border-bottom: 0; }
+.connection-detail .connection-section :is(h5, p) { margin: 5px 0; font-size: 12px; line-height: 1.55; }
+.connection-detail .github-plane-results :is(strong, small, p) { font-size: 12px; line-height: 1.5; }
+.connection-detail .github-repository-validation > summary { line-height: 1.5; }
+.connection-detail .github-repository-validation > summary code { font-size: 11px; }
+.connection-detail .github-plane-statuses em { font-size: 10px; }
+.connection-detail .connection-permissions summary { min-height: 42px; font-size: 12px; line-height: 1.5; }
+.connection-detail .connection-permissions p, .connection-detail .connection-safeguards span { font-size: 12px; line-height: 1.5; }
+.connection-detail .connection-permissions code { font-size: 11px; line-height: 1.5; }
+.connection-command-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+.connection-command-field textarea { padding-right: 11px; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.connection-command-field .connection-copy-button { position: static; min-width: 112px; margin: 0; }
+
+:is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot, .repository-picker) :is(button, input, select, textarea, a, summary):focus-visible {
+  outline: 2px solid var(--color-role-foreground-accent);
+  outline-offset: 3px;
+  box-shadow: none;
+}
+.connector-choice:focus-within, .repository-picker-item:focus-within { outline: 2px solid var(--color-role-foreground-accent); outline-offset: 1px; }
+.repository-picker-list:focus-visible { outline: 2px solid var(--color-role-foreground-accent); outline-offset: -3px; }
+.connection-provider-panel:focus-visible { outline: 2px solid var(--color-role-foreground-accent); outline-offset: 4px; border-radius: 6px; }
+@media (max-width: 780px) {
+  .connection-onboarding-wizard { padding: 16px; gap: 16px; }
+  .connection-wizard-heading { gap: 10px; }
+  .connection-wizard-heading h3 { font-size: 18px; }
+  .connection-provider-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .connection-provider-picker button { padding: 9px 10px; }
+  .connection-method-note { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px 10px; }
+  .connection-method-note > button { grid-column: 2; justify-self: start; }
+  .connector-form, .connection-wizard-adapter .shared-aws-pilot-form, .connection-form-grid,
+  fieldset.connector-access-options, .connector-choice-grid, .connection-wizard-adapter fieldset:has(> label > input[type="checkbox"]) { grid-template-columns: minmax(0, 1fr); }
+  .shared-aws-pilot-heading { flex-wrap: wrap; gap: 10px; }
+  .shared-aws-pilot-heading > button { flex: 0 0 auto; }
+  .connector-form-section, .connection-wizard-adapter fieldset { padding: 12px; }
+  .connector-choice { padding: 10px; }
+  .connector-actions { align-items: stretch; }
+  .connector-actions > :is(button, a.primary-action, a.secondary-action) { flex: 1 1 160px; }
+  .repository-picker-toolbar { align-items: stretch; }
+  .repository-picker-search { max-width: none; flex-basis: 100%; }
+  .repository-picker-list { max-height: 288px; }
+  .connection-wizard-adapter .repository-picker-list { max-height: 288px; }
+  .repository-picker-footer { font-size: 11px; }
+  .connector-loading { min-height: 176px; }
+  .connection-command-field { grid-template-columns: minmax(0, 1fr); }
+  .connection-command-field .connection-copy-button { justify-self: end; width: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(.connection-onboarding-wizard, .connection-create, .connection-detail, .shared-aws-pilot) *,
+  .connector-loading *, .connector-skeleton > span, .connector-skeleton > div > span { animation: none; transition: none; scroll-behavior: auto; }
 }
