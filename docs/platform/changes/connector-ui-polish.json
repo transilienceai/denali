@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Browser-only Connections usability and accessibility: visible initial and per-source loading/retry/unavailable states, compact native/shared evidence forms, existing-access-first setup, keyboard-accessible provider tabs, semantic read-only action controls, searchable bounded repository selection, and stale UI-response fences. Provider payloads/default scopes, exact saved identities, one-time authorization protocols, authenticated same-origin API routes, durable jobs, tenant resolution and API/CLI/MCP response contracts remain unchanged. Local synthetic fixtures replace every API method and do not contact providers.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {"impact": "none", "reason": "No typed command, option, package, login scope or exposed operation changed."},
+  "gateway": {"impact": "none", "reason": "No product receiver or Platform adapter/schema change; improvements are confined to Denali browser presentation and request-lifetime handling."}
+}
