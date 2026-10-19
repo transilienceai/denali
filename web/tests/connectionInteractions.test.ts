@@ -36,6 +36,24 @@ const azureAttached: Connection = {
   declared_scopes: [...azureSource.declared_scopes],
   configuration: { tenant_id: azureSource.tenant_id, organization: azureSource.organization, repositories: azureRepositories.slice(0, 2) },
 };
+function detailFixture(provider: Connection["provider"], shared: boolean): Connection {
+  const nativeCredentials: Record<Connection["provider"], Connection["credential_reference"]> = {
+    aws: { type: "aws_assume_role", role_arn: "arn:aws:iam::123456789012:role/FixtureReader" },
+    azure: { type: "azure_multitenant_app", client_id: azureSource.application_client_id },
+    entra: { type: "entra_multitenant_app", client_id: azureSource.application_client_id },
+    gcp: { type: "gcp_service_account", principal_email: "reader@example.invalid" },
+    github: { type: "github_app_installation", app_id: 1, installation_id: 10, app_slug: "fixture" },
+    google_workspace: { type: "google_workspace_domain_wide_delegation", service_account: "reader@example.invalid", oauth_client_id: "100000000001" },
+    azure_repos: { type: "azure_repos_service_principal", client_id: azureSource.application_client_id },
+  };
+  return {
+    ...attached, id: `${shared ? "shared" : "native"}-${provider}`, provider, display_name: `Fixture ${provider}`, health_state: "healthy",
+    credential_reference: shared ? provider === "github" ? attached.credential_reference : { type: `platform_shared_${provider}`, platform_connection_id: azureSource.id } : nativeCredentials[provider],
+    declared_scopes: [provider === "aws" ? "aws.bedrock_agents" : provider === "azure" ? "azure.ai_services" : provider === "entra" ? "entra.ai_applications" : provider === "gcp" ? "gcp.vertex_ai" : provider === "google_workspace" ? "google_workspace.gemini_activity" : `${provider}.repository_metadata`],
+    configuration: { account_id: "123456789012", coverage_mode: "selected", regions: ["us-east-1"], tenant_id: azureSource.tenant_id, subscriptions: [{ id: azureSource.target_id, name: "Fixture subscription" }], projects: [{ id: "fixture-project", number: "123456789012", name: "Fixture project" }], domain: "example.invalid", admin_email: "admin@example.invalid", organization: "fixture", account_login: "fixture", repositories: provider === "azure_repos" ? azureRepositories.slice(0, 2) : repositories.slice(0, 2), onboarding: { method: "google_workspace_domain_wide_delegation", status: "completed" } },
+    setup_capabilities: Object.fromEntries(Object.keys(attached.setup_capabilities).map((key) => [key, true])) as Connection["setup_capabilities"],
+  };
+}
 const catalog: ConnectionCatalog = {
   items: ["github", "gcp", "aws", "azure_repos"].map((provider) => ({ provider: provider as Connection["provider"], label: provider === "github" ? "GitHub" : provider === "gcp" ? "Google Cloud" : provider === "azure_repos" ? "Azure Repos" : "Amazon Web Services", onboarding_path: "shared", shared_enabled: true, native_available: true, supported_scopes: [], parity_gaps: [], reason: null, reason_code: null })),
   platform_only: false, platform_only_blockers: [],
@@ -107,7 +125,7 @@ after(async () => {
   }
 });
 
-function Harness({ initialConnections = [], initialQuery = { new: "1", provider: "github" }, canWrite = true }: { initialConnections?: Connection[]; initialQuery?: Record<string, string>; canWrite?: boolean }) {
+function Harness({ initialConnections = [], initialQuery = { new: "1", provider: "github" }, canWrite = true, onChangedOverride }: { initialConnections?: Connection[]; initialQuery?: Record<string, string>; canWrite?: boolean; onChangedOverride?: () => Promise<void> }) {
   const [rows, setRows] = useState(initialConnections);
   const [query, setQuery] = useState(initialQuery);
   const update = (values: Record<string, string | null | undefined>) => setQuery((previous) => {
@@ -123,7 +141,7 @@ function Harness({ initialConnections = [], initialQuery = { new: "1", provider:
     navigation: { values: query, set: (key, value, defaultValue = "") => update({ [key]: value === defaultValue ? null : value }), clear: (keys) => update(Object.fromEntries(keys.map((key) => [key, null]))), update },
     onSelect: (id) => setQuery(id ? { connection: id } : {}),
     onShowCreate: (visible) => update({ new: visible ? "1" : null, manage: null, onboarding: null }),
-    onChanged: async () => { setRows([...initialConnections.filter((row) => row.id !== nextAttachment.id), nextAttachment]); }, onOperationAccepted: (id, kind) => { acceptedOperations.push({ id, kind }); },
+    onChanged: async () => { await onChangedOverride?.(); setRows([...initialConnections.filter((row) => row.id !== nextAttachment.id), nextAttachment]); }, onOperationAccepted: (id, kind) => { acceptedOperations.push({ id, kind }); },
     entraSetupReturn: null, githubSetupReturn: null, azureReposSetupReturn: null,
   });
 }
@@ -170,6 +188,7 @@ test("selecting repositories attaches exactly that set and opens the returned lo
   assert.deepEqual(calls.attaches, [{ id: installation.id, ids: [42], scopes: ["github.repository_metadata"] }]);
   assert.equal(container.querySelector('[aria-label="Connect an evidence source"]'), null);
   assert.match(container.querySelector(".connection-list button.active")?.textContent ?? "", /Selected GitHub repositories/);
+  assert.equal(document.activeElement, container.querySelector('[data-connector-focus="detail"]'));
   assert.equal(calls.native, 0);
   assert.equal(calls.disable, 0);
 });
@@ -243,6 +262,183 @@ test("read-only members cannot open connector creation or manage shared access",
   assert.ok(![...container.querySelectorAll("button")].some((element) => /Add connection|Manage access and selected resources/.test(element.textContent ?? "")));
   assert.equal(calls.github, 0);
   assert.equal(calls.native, 0);
+});
+
+test("read-only connection actions use native disabled semantics instead of pointer-only blocking", async () => {
+  await mount({initialConnections:[azureAttached],initialQuery:{connection:azureAttached.id},canWrite:false});
+  const detail=container.querySelector<HTMLElement>('[aria-label="Connection details"]')!;
+  assert.match(detail.textContent ?? "", /Read-only access/);
+  const actionButtons=[...detail.querySelectorAll<HTMLButtonElement>("button")];
+  assert.ok(actionButtons.length>0);
+  assert.ok(actionButtons.every((element)=>element.matches(":disabled")),"Not merely CSS pointer-event blocking: keyboard and assistive technology must know these actions are disabled");
+  await click(button("Disconnect from Denali"));
+  assert.equal(calls.localDisable.length,0);
+});
+
+for (const shared of [true, false]) for (const provider of ["aws", "azure", "entra", "gcp", "github", "google_workspace", "azure_repos"] as const) {
+  test(`members can inspect ${shared ? "shared" : "native"} ${provider} without enabling action controls`, async () => {
+    const connection = detailFixture(provider, shared);
+    await mount({ initialConnections: [connection], initialQuery: { connection: connection.id }, canWrite: false });
+    const detail = container.querySelector<HTMLElement>('[aria-label="Connection details"]')!;
+    const actions = [...detail.querySelectorAll<HTMLButtonElement>("button:not(.connection-copy-button)")];
+    assert.ok(actions.length > 0);
+    assert.ok(actions.every((element) => element.matches(":disabled")), "Setup, validation, collection and lifecycle actions must be natively disabled");
+    assert.equal(detail.querySelector(".connection-launch-actions a"), null, "Members must not receive provider setup links");
+    assert.equal(detail.querySelector("fieldset.connection-detail-access[disabled]"), null, "Do not disable the entire inspection surface");
+    for (const action of actions) await click(action);
+    assert.equal(calls.localDisable.length, 0);
+    assert.equal(acceptedOperations.length, 0);
+  });
+}
+
+test("members retain GitHub validation filtering and evidence disclosure", async () => {
+  const connection = detailFixture("github", true);
+  connection.last_validation = { started_at: "2026-10-15T10:00:00Z", completed_at: "2026-10-15T10:01:00Z", credential_state: "passed", health_state: "partial", account_id_observed: "1", summary: "One repository needs attention", results: repositories.slice(0, 2).map((repository, index) => ({ scope: "github.repository_metadata", plane: "repository_metadata", label: "Repository metadata", region: "global", repository_id: repository.id, repository_full_name: repository.full_name, state: index === 0 ? "failed" : "passed", detail: index === 0 ? "Fixture denied" : "Fixture passed" })) };
+  await mount({ initialConnections: [connection], initialQuery: { connection: connection.id }, canWrite: false });
+  const filters = container.querySelector<HTMLElement>('[aria-label="Filter repository validation results"]')!;
+  assert.ok([...filters.querySelectorAll("button")].every((element) => !element.matches(":disabled")));
+  const visible = () => [...container.querySelectorAll(".github-repository-validations details summary strong")].map((element) => element.textContent);
+  assert.deepEqual(visible(), [repositories[0].full_name]);
+  await click(filters.querySelectorAll<HTMLButtonElement>("button")[2]);
+  assert.deepEqual(visible(), [repositories[1].full_name]);
+  const evidence = container.querySelector<HTMLDetailsElement>(".github-repository-validations details")!;
+  assert.equal(evidence.open, false);
+  await click(evidence.querySelector("summary")!);
+  assert.equal(evidence.open, true);
+  await click(filters.querySelectorAll<HTMLButtonElement>("button")[1]);
+  assert.deepEqual(visible(), [repositories[0].full_name, repositories[1].full_name]);
+  assert.ok(button("Validate again").matches(":disabled"));
+  assert.ok(button("Disconnect from Denali").matches(":disabled"));
+  assert.equal(calls.localDisable.length, 0);
+  assert.equal(acceptedOperations.length, 0);
+});
+
+test("members can copy recorded Workspace values but cannot launch or verify setup", async () => {
+  const connection = detailFixture("google_workspace", false);
+  const writes: string[] = [];
+  const original = Object.getOwnPropertyDescriptor(dom.window.navigator, "clipboard");
+  Object.defineProperty(dom.window.navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { writes.push(value); } } });
+  try {
+    await mount({ initialConnections: [connection], initialQuery: { connection: connection.id }, canWrite: false });
+    const value = container.querySelector<HTMLTextAreaElement>('[aria-label="Google Workspace OAuth client ID"]')!;
+    assert.equal(value.readOnly, true);
+    assert.equal(value.matches(":disabled"), false);
+    assert.equal(button("Copy client ID").matches(":disabled"), false);
+    await click(button("Copy client ID"));
+    assert.deepEqual(writes, ["100000000001"]);
+    assert.match(container.textContent ?? "", /Client ID copied to your clipboard/);
+    assert.equal(container.querySelector('a[href*="admin.google.com"]'), null);
+    assert.ok(button("Verify authorization again").matches(":disabled"));
+    assert.ok(button("Validate connection").matches(":disabled"));
+  } finally {
+    if (original) Object.defineProperty(dom.window.navigator, "clipboard", original);
+    else Reflect.deleteProperty(dom.window.navigator, "clipboard");
+  }
+});
+
+test("setup receives keyboard focus and Close restores its Add or Manage opener", async () => {
+  await mount({initialConnections:[attached], initialQuery:{connection:attached.id}});
+  button("Add connection").focus();
+  await click(button("Add connection"));
+  assert.equal(document.activeElement, container.querySelector(".connection-wizard-heading h3"));
+  assert.equal(container.querySelector(".connections-layout"), null, "Old connection actions must not compete with setup");
+  await click(container.querySelector<HTMLButtonElement>('[aria-label="Close connection setup"]')!);
+  assert.equal(document.activeElement, button("Add connection"));
+  button("Manage access and selected resources").focus();
+  await click(button("Manage access and selected resources"));
+  assert.equal(document.activeElement, container.querySelector(".connection-wizard-heading h3"));
+  await click(container.querySelector<HTMLButtonElement>('[aria-label="Close connection setup"]')!);
+  assert.equal(document.activeElement, button("Manage access and selected resources"));
+  assert.match(container.querySelector(".connection-list button.active")?.textContent ?? "", /Selected GitHub repositories/);
+});
+
+test("native exact AWS shows only its required code-to-cloud card, never required discovery scopes", async () => {
+  pageApi.connectionCatalog = async () => ({...catalog,items:[{...catalog.items.find((item) => item.provider === "aws")!,onboarding_path:"native",shared_enabled:false}]});
+  await mount({initialQuery:{new:"1",provider:"aws"}});
+  const coverage = [...container.querySelectorAll<HTMLSelectElement>("select")].find((field) => field.closest("label")?.textContent?.includes("Inventory region coverage"))!;
+  await select(coverage,"selected-resource");
+  const choices = [...container.querySelectorAll<HTMLInputElement>('.connector-evidence-picker input[type="checkbox"]')];
+  assert.equal(choices.length,1);
+  assert.equal(choices[0].checked,true);
+  assert.equal(choices[0].disabled,true);
+  assert.match(choices[0].closest("label")?.textContent ?? "", /Code-to-cloud deployments.*Required/);
+  assert.doesNotMatch(container.querySelector(".connector-evidence-picker")?.textContent ?? "", /Bedrock Agents|CloudTrail|AgentCore/);
+  assert.equal(calls.native,0);
+});
+
+test("catalog loading is announced immediately without a false empty form", async () => {
+  let finish!: (value: ConnectionCatalog) => void;
+  pageApi.connectionCatalog = () => new Promise((resolve) => {finish=resolve;});
+  await mount();
+  assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /Checking available connection methods/);
+  assert.ok(container.querySelector('[aria-busy="true"]'));
+  assert.equal(container.querySelector("form"),null);
+  assert.equal(calls.github,0);
+  await act(async () => finish(catalog));
+  assert.equal(calls.github,1);
+});
+
+test("abandoned native creation cannot refresh or select another setup after it resolves", async () => {
+  pageApi.connectionCatalog = async () => ({...catalog,items:[{...catalog.items.find((item) => item.provider === "aws")!,onboarding_path:"native",shared_enabled:false}]});
+  let finish!: (value: Connection) => void;
+  let created=0;
+  let refreshed=0;
+  pageApi.createConnection = () => {created+=1;return new Promise((resolve) => {finish=resolve;});};
+  await mount({initialConnections:[attached],initialQuery:{new:"1",provider:"aws"},onChangedOverride:async()=>{refreshed+=1;}});
+  const form=container.querySelector<HTMLFormElement>("form.connection-create")!;
+  await act(async () => {
+    form.dispatchEvent(new dom.window.Event("submit",{bubbles:true,cancelable:true}));
+    form.dispatchEvent(new dom.window.Event("submit",{bubbles:true,cancelable:true}));
+  });
+  assert.equal(created,1,"Synchronous double dispatch must not create two records");
+  await click(container.querySelector<HTMLButtonElement>('[aria-label="Close connection setup"]')!);
+  await act(async () => finish({...attached,id:"abandoned-native",display_name:"Abandoned native plan"}));
+  assert.equal(refreshed,0);
+  assert.ok(button("Add connection"));
+  assert.doesNotMatch(container.textContent ?? "", /Abandoned native plan onboarding plan created/);
+});
+
+test("switching a pending native create back to reusable access fences its late result", async () => {
+  let finish!: (value: Connection) => void;
+  let refreshed=0;
+  pageApi.createConnection = () => new Promise((resolve) => {finish=resolve;});
+  await mount({initialConnections:[attached],initialQuery:{new:"1",provider:"github"},onChangedOverride:async()=>{refreshed+=1;}});
+  await click(button("Use Denali setup instead"));
+  const form=container.querySelector<HTMLFormElement>("form.connection-create")!;
+  await act(async () => {form.dispatchEvent(new dom.window.Event("submit",{bubbles:true,cancelable:true}));});
+  await click(button("Use reusable connection setup"));
+  await act(async () => finish({...attached,id:"abandoned-native",display_name:"Abandoned native plan"}));
+  assert.equal(refreshed,0);
+  assert.ok(container.querySelector('[aria-label="GitHub access and repository selection"]'));
+  assert.equal(container.querySelector("form.connection-create"),null);
+  assert.doesNotMatch(container.textContent ?? "", /Abandoned native plan onboarding plan created/);
+});
+
+test("closing native setup during its refresh does not select the completed plan", async () => {
+  pageApi.connectionCatalog = async () => ({...catalog,items:[{...catalog.items.find((item) => item.provider === "aws")!,onboarding_path:"native",shared_enabled:false}]});
+  let finishRefresh!: () => void;
+  pageApi.createConnection = async () => ({...attached,id:"late-native",display_name:"Late native plan"});
+  await mount({initialConnections:[attached],initialQuery:{new:"1",provider:"aws"},onChangedOverride:()=>new Promise<void>((resolve)=>{finishRefresh=resolve;})});
+  await act(async () => {container.querySelector<HTMLFormElement>("form.connection-create")!.dispatchEvent(new dom.window.Event("submit",{bubbles:true,cancelable:true}));});
+  await click(container.querySelector<HTMLButtonElement>('[aria-label="Close connection setup"]')!);
+  await act(async () => finishRefresh());
+  assert.match(container.querySelector(".connection-list button.active")?.textContent ?? "", /Selected GitHub repositories/);
+  assert.doesNotMatch(container.textContent ?? "", /Late native plan onboarding plan created/);
+  assert.equal(document.activeElement,button("Add connection"));
+});
+
+test("a new provider does not mislabel an abandoned native request as its own creation", async () => {
+  pageApi.connectionCatalog = async () => ({...catalog,items:catalog.items.map((item)=>({...item,onboarding_path:"native" as const,shared_enabled:false}))});
+  let finish!: (value: Connection) => void;
+  pageApi.createConnection = () => new Promise((resolve) => {finish=resolve;});
+  await mount({initialConnections:[attached],initialQuery:{new:"1",provider:"aws"}});
+  await act(async () => {container.querySelector<HTMLFormElement>("form.connection-create")!.dispatchEvent(new dom.window.Event("submit",{bubbles:true,cancelable:true}));});
+  await click(button("GitHub"));
+  assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /A previous setup request is finishing/);
+  assert.doesNotMatch(container.textContent ?? "", /Creating the GitHub onboarding plan/);
+  assert.equal(button("Create onboarding plan").disabled,true);
+  await act(async () => finish({...attached,id:"abandoned-native"}));
+  assert.equal(button("Create onboarding plan").disabled,false);
 });
 
 test("Azure Repos preserves saved exact identities and leaves available additions unchecked", async () => {

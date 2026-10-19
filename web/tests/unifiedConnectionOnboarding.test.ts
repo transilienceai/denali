@@ -68,7 +68,8 @@ function render(overrides: Partial<Parameters<typeof ConnectionOnboardingWizard>
 test("one wizard renders provider choice and Grant, Verify, Collect with selected adapter", () => {
   const markup = render();
   assert.match(markup, /aria-label="Evidence source"/);
-  assert.match(markup, /aria-pressed="true"[^>]*>GitHub/);
+  assert.match(markup, /role="tab"[^>]*aria-selected="true"[^>]*>GitHub/);
+  assert.match(markup, /role="tabpanel"/);
   for (const label of ["Grant access", "Verify access", "Collect evidence", "Selected GitHub adapter"]) assert.ok(markup.includes(label));
   assert.match(markup, /Reusable organization connection/);
 });
@@ -90,4 +91,19 @@ test("managing an existing shared binding never offers switching it to native cr
   const markup = render({ managing: true });
   assert.match(markup, /Review access and selected resources/);
   assert.doesNotMatch(markup, /Use Denali setup|Use reusable connection setup/);
+});
+
+test("catalog loading announces the wait and reserves a stable form placeholder", () => {
+  const markup = render({ loading: true });
+  assert.match(markup, /Checking available connection methods/);
+  assert.match(markup, /aria-busy="true"/);
+  assert.match(markup, /role="status"/);
+  assert.match(markup, /connector-skeleton/);
+  assert.doesNotMatch(markup, /Selected GitHub adapter|role="tabpanel"/);
+});
+
+test("returning setup has a distinct accessible loading message", () => {
+  const markup = render({ loading: true, loadingLabel: "Restoring your saved connection setup…" });
+  assert.match(markup, /Restoring your saved connection setup/);
+  assert.doesNotMatch(markup, /Selected GitHub adapter|No connections/);
 });

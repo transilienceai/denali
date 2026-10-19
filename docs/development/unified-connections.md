@@ -182,3 +182,43 @@ The server's shared-AWS input additionally accepts exact-resource browser fields
 the currently pinned public gateway does not expose those new parameters. No
 new CLI/MCP provider credential workflow or CLI release is introduced. Paired
 private broker contracts live in Platform; public results adapter pins are unchanged.
+
+## Connector UI loading and accessibility
+
+Every provider panel must announce its initial access lookup immediately. Loading,
+unavailable access, an empty approved list and a failed request are distinct states;
+none may silently display an empty panel or create a native fallback. Selected-source
+status checks and mutations have their own visible progress. Generation and unmount
+guards discard late results before changing selection, starting a redirect or invoking
+the parent attachment callbacks. Hosted organization changes still remount the app;
+organization identity never moves into a browser-controlled API payload.
+
+Provider tabs support arrow keys, Home and End and label their active panel. Evidence
+choices pair a native checkbox with its visible label in a responsive two-column grid;
+required bundles and saved defaults are unchanged. Existing authorized access is shown
+first; an additional setup plan opens explicitly. Repository search and bounded pages
+never select new repositories or discard selected entries outside the visible page.
+Setup has a focused workspace rather than a duplicate connection detail beneath it.
+Opening setup focuses its heading; closing it restores the Add/Manage opener, and
+successful attachment focuses its detail region. Read-only detail actions use native
+disabled-control semantics, not pointer-only CSS; setup links are hidden while evidence
+disclosures remain readable. API authorization remains the security boundary.
+
+Local visual QA uses `npm --prefix web run dev -- --host 127.0.0.1 --port 3104`, then
+`http://127.0.0.1:3104/tests/fixtures/connector-ui.html`. The fixture uses synthetic
+data, replaces **every** API method and blocks unsupported actions. It is dev-only,
+localhost-only, and is not a production build entrypoint. Query options include
+`provider=azure`, `source=native`, `empty=1`, `slow=1`, `error=1`, `provider_error=1`,
+`member=1` and `theme=light`. These checks prove UI behavior, not hosted provider onboarding or
+authorization. Native/shared scope and identity regression tests remain mandatory.
+
+The October 2026 UI audit reproduced two root causes: text-input sizing was applied
+to checkboxes, and asynchronous catalog/source/repository reads could leave empty
+panels before later inserting the form. Local browser checks covered all seven
+shared provider panels, all seven native forms at 320px, all seven native/shared
+detail views, a 113-repository search with a selected result outside the filter,
+empty access, slow catalog reads, retryable provider failure, and read-only members.
+Azure cards measured 16px checkbox controls and 60px desktop rows; responsive cards
+stayed within a 390px viewport. These are synthetic UI checks, not provider lifecycle
+acceptance. No production connector, provider grant, saved selection or rollout flag
+was changed during this audit.

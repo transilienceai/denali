@@ -36,7 +36,7 @@ test("browser GCP lifecycle stays behind relative authenticated API and durable 
     assert.ok(api.includes(`/shared/connections/gcp/\${encodeURIComponent(id)}/${suffix}`));
   }
   assert.match(panel, /creation\.current\.id/);
-  assert.match(panel, /status\?\.job_state/);
+  assert.match(panel, /status\??\.job_state/);
   assert.match(panel, /No service-account JSON key is needed/);
   assert.match(panel, /window\.confirm/);
   assert.match(panel, /window\.prompt/);
