@@ -38,19 +38,19 @@ export function getConnectionProgress(connection: Connection, busy: string | nul
     || action === "complete"
     || (connection.provider === "aws" && action === "launch");
   const preparing = action === "launch" && connection.provider !== "aws";
-  const initialAwsOnboarding = connection.provider === "aws"
-    && validating
-    && connection.last_validation === null;
+  const verifyingAwsRole = connection.provider === "aws"
+    && connection.credential_reference.type === "aws_assume_role"
+    && validating;
 
   if (validating) {
-    if (initialAwsOnboarding) {
+    if (verifyingAwsRole) {
       return {
         phase: "validating",
         eyebrow: "AWS SETUP IN PROGRESS",
-        title: "Waiting for the AWS role and validating access",
-        detail: "CloudFormation must create this connection's IAM role before Denali can assume it. Denali retries every 10 seconds for up to 15 minutes, then validates the declared read-only access. You can safely leave and return. If AWS rolls the stack back, review the stack Events; Denali will show the final access failure when this window ends.",
+        title: "Verifying the AWS role and declared access",
+        detail: "This run has not yet established access to this connection's IAM role. A CloudFormation launch normally retries every 10 seconds for up to 15 minutes while AWS creates the role; manual validation checks current access without waiting for stack creation. Previous results remain historical until this run finishes. You can safely leave and return. If AWS reports a rollback, review the stack Events.",
         steps: [
-          { label: "Deploy IAM role", state: "current" },
+          { label: "Check IAM role access", state: "current" },
           { label: "Validate access", state: "pending" },
           { label: "Collect evidence", state: "pending" },
         ],

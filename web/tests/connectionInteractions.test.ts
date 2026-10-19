@@ -62,6 +62,7 @@ const catalog: ConnectionCatalog = {
 let dom: JSDOM;
 let server: ViteDevServer;
 let Page: ComponentType<Parameters<typeof ConnectionsPage>[0]>;
+let Application: ComponentType<{ canWrite?: boolean }>;
 let pageApi: typeof api;
 let originalApi: typeof api;
 let createRoot: typeof createRootType;
@@ -80,11 +81,14 @@ before(async () => {
   }
   ({ createRoot } = await import("react-dom/client"));
   server = await createServer({ root: fileURLToPath(new URL("../", import.meta.url)), configFile: false, envDir: false, appType: "custom", server: { middlewareMode: true, ws: false, watch: null }, optimizeDeps: { noDiscovery: true } });
-  Page = (await server.ssrLoadModule("/src/App.tsx")).ConnectionsPage;
+  const application = await server.ssrLoadModule("/src/App.tsx");
+  Page = application.ConnectionsPage;
+  Application = application.default;
   pageApi = (await server.ssrLoadModule("/src/api.ts")).api;
   originalApi = { ...pageApi };
 });
 beforeEach(() => {
+  dom.window.history.replaceState(null, "", "/connections");
   calls = { github: 0, gcp: 0, aws: 0, azure: 0, native: 0, disable: 0, localDisable: [], attaches: [], azureAttaches: [] };
   nextAttachment = attached;
   acceptedOperations = [];
@@ -128,19 +132,21 @@ after(async () => {
 function Harness({ initialConnections = [], initialQuery = { new: "1", provider: "github" }, canWrite = true, onChangedOverride }: { initialConnections?: Connection[]; initialQuery?: Record<string, string>; canWrite?: boolean; onChangedOverride?: () => Promise<void> }) {
   const [rows, setRows] = useState(initialConnections);
   const [query, setQuery] = useState(initialQuery);
-  const update = (values: Record<string, string | null | undefined>) => setQuery((previous) => {
-    const next = { ...previous };
+  // Match App.updateQuery's captured render snapshot. Functional updates here
+  // would hide consecutive callbacks overwriting navigation from the same event.
+  const update = (values: Record<string, string | null | undefined>) => {
+    const next = { ...query };
     for (const [key, value] of Object.entries(values)) {
       if (value) next[key] = value;
       else delete next[key];
     }
-    return next;
-  });
+    setQuery(next);
+  };
   return createElement(Page, {
     connections: rows, selectedId: query.connection, showCreate: query.new === "1" || Boolean(query.onboarding), canWrite,
     navigation: { values: query, set: (key, value, defaultValue = "") => update({ [key]: value === defaultValue ? null : value }), clear: (keys) => update(Object.fromEntries(keys.map((key) => [key, null]))), update },
-    onSelect: (id) => setQuery(id ? { connection: id } : {}),
-    onShowCreate: (visible) => update({ new: visible ? "1" : null, manage: null, onboarding: null }),
+    onSelect: (id) => update({ connection: id || null, new: null, provider: null, manage: null, onboarding: null }),
+    onShowCreate: (visible) => update(visible ? { new: "1", manage: null, onboarding: null } : { new: null, provider: null, manage: null, onboarding: null }),
     onChanged: async () => { await onChangedOverride?.(); setRows([...initialConnections.filter((row) => row.id !== nextAttachment.id), nextAttachment]); }, onOperationAccepted: (id, kind) => { acceptedOperations.push({ id, kind }); },
     entraSetupReturn: null, githubSetupReturn: null, azureReposSetupReturn: null,
   });
@@ -376,6 +382,149 @@ test("catalog loading is announced immediately without a false empty form", asyn
   assert.equal(calls.github,0);
   await act(async () => finish(catalog));
   assert.equal(calls.github,1);
+});
+
+for (const hasExisting of [true, false]) test(`real App native creation selects the returned connection atomically (${hasExisting ? "existing selection" : "first connection"})`, async () => {
+  const previous = { ...detailFixture("aws", false), id: "60000000-0000-0000-0000-000000000001", display_name: "Existing AWS connection" };
+  const created = { ...previous, id: "60000000-0000-0000-0000-000000000002", display_name: "New AWS connection", credential_reference: { type: "aws_assume_role" as const, role_arn: "arn:aws:iam::123456789012:role/SeparateNewReader" } };
+  let rows = hasExisting ? [previous] : [];
+  let launches = 0;
+  // Fail closed: this full App test may only call these synthetic read stubs.
+  Object.assign(pageApi, Object.fromEntries(Object.keys(pageApi).map((name) => [name, async () => { throw new Error(`Unexpected API method in App navigation test: ${name}`); }])));
+  Object.assign(pageApi, Object.fromEntries(["summary", "findingSummary", "vulnerabilitySummary", "issueSummary", "activitySummary", "detectionSummary"].map((name) => [name, async () => ({})])));
+  Object.assign(pageApi, Object.fromEntries(["assets", "coverage", "findings", "vulnerabilities", "issues", "issueEvaluations", "codeToCloudDeployments", "codeToCloudObservations", "activity", "runtimeSessions", "detections", "detectionEvaluations"].map((name) => [name, async () => ({ items: [] })])));
+  Object.assign(pageApi, {
+    connections: async () => ({ items: rows }),
+    connectionCatalog: async () => ({ ...catalog, items: [{ ...catalog.items.find((item) => item.provider === "aws")!, onboarding_path: "native", shared_enabled: false }] }),
+    createConnection: async () => { calls.native += 1; rows = [...rows, created]; return created; },
+    launchCloudFormation: async () => { launches += 1; throw new Error("No provider launch is allowed in this test"); },
+  });
+  dom.window.history.replaceState(null, "", `/connections?${hasExisting ? `connection=${previous.id}&` : ""}new=1&provider=aws`);
+  const pushed: string[] = [];
+  const originalPush = dom.window.history.pushState;
+  dom.window.history.pushState = function (data, unused, url) { pushed.push(String(url)); return originalPush.call(this, data, unused, url); };
+  try {
+    await act(async () => { root.render(createElement(Application)); });
+    const form = container.querySelector<HTMLFormElement>("form.connection-create");
+    assert.ok(form, "The real App must display native AWS setup");
+    await act(async () => { form.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true })); });
+    assert.equal(calls.native, 1);
+    assert.deepEqual(pushed, [`/connections?connection=${created.id}`], "Creation must make one atomic selection/close transition");
+    const query = new URL(dom.window.location.href).searchParams;
+    assert.equal(query.get("connection"), created.id);
+    for (const key of ["new", "provider", "manage", "onboarding"]) assert.equal(query.has(key), false);
+    assert.match(container.querySelector(".connection-list button.active")?.textContent ?? "", /New AWS connection/);
+    assert.match(container.querySelector(".connection-detail-head code")?.textContent ?? "", /SeparateNewReader/);
+    assert.equal(container.querySelector(".connection-onboarding-wizard"), null);
+    assert.equal(document.activeElement, container.querySelector('[data-connector-focus="detail"]'));
+    assert.equal(launches, 0);
+    assert.equal(rows.filter((row) => row.id === previous.id).length, hasExisting ? 1 : 0);
+  } finally { dom.window.history.pushState = originalPush; }
+});
+
+async function renderNativeAwsDetail(connection: Connection) {
+  await act(async () => { root.render(createElement(Page, {
+    connections: [connection], selectedId: connection.id, showCreate: false, canWrite: true,
+    navigation: { values: { connection: connection.id }, set: () => {}, clear: () => {}, update: () => {} },
+    onSelect: () => {}, onShowCreate: () => {}, onChanged: async () => {}, onOperationAccepted: () => {},
+    entraSetupReturn: null, githubSetupReturn: null, azureReposSetupReturn: null,
+  })); });
+}
+
+function previousFailedAwsValidation(): Connection {
+  return {
+    ...detailFixture("aws", false), health_state: "unhealthy", validation_state: "running",
+    last_validated_at: "2026-10-19T00:15:00Z",
+    last_validation: {
+      started_at: "2026-10-19T00:00:00Z", completed_at: "2026-10-19T00:15:00Z", credential_state: "failed", health_state: "unhealthy", account_id_observed: null,
+      summary: "Previous AccessDenied from the earlier run", results: [{ scope: "aws.bedrock_agents", plane: "credential", label: "Role assumption", region: "global", state: "failed", detail: "Previous AccessDenied from the earlier run" }],
+    },
+  };
+}
+
+test("reloaded AWS validation makes an earlier failure explicitly historical and collapsed", async () => {
+  await renderNativeAwsDetail(previousFailedAwsValidation());
+  const pending = container.querySelector('[aria-label="AWS validation in progress"] [role="status"]');
+  assert.match(pending?.textContent ?? "", /Current validation is in progress/);
+  assert.match(pending?.textContent ?? "", /previous result is historical/);
+  assert.doesNotMatch(pending?.textContent ?? "", /AccessDenied/);
+  const history = container.querySelector<HTMLDetailsElement>('details[aria-label="Previous AWS validation result"]');
+  assert.ok(history);
+  assert.equal(history.open, false);
+  assert.equal(history.querySelector("summary time")?.getAttribute("datetime"), "2026-10-19T00:15:00Z");
+  assert.match(history.textContent ?? "", /Previous AccessDenied/);
+  assert.equal(container.querySelector(".validation-summary")?.closest("details"), history);
+  assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Validating"));
+});
+
+test("an AWS launch marks old results historical before the durable running response arrives", async () => {
+  let failLaunch!: (cause: Error) => void;
+  pageApi.launchCloudFormation = () => new Promise((_, reject) => { failLaunch = reject; });
+  const originalOpen = dom.window.open;
+  dom.window.open = () => ({ opener: null, close: () => {}, location: { replace: () => {} } }) as unknown as Window;
+  try {
+    await renderNativeAwsDetail({ ...previousFailedAwsValidation(), validation_state: "idle" });
+    await click(button("Launch in AWS"));
+    assert.match(container.querySelector('[aria-label="AWS validation in progress"]')?.textContent ?? "", /Current validation is in progress/);
+    assert.equal(container.querySelector<HTMLDetailsElement>('[aria-label="Previous AWS validation result"]')?.open, false);
+    await act(async () => { failLaunch(new Error("Synthetic launch stopped before opening AWS")); });
+  } finally { dom.window.open = originalOpen; }
+});
+
+test("a reloaded AWS retry does not reuse an earlier credential pass as current proof", async () => {
+  const previous = previousFailedAwsValidation();
+  await renderNativeAwsDetail({ ...previous, health_state: "healthy", last_validation: { ...previous.last_validation!, credential_state: "passed", health_state: "healthy", summary: "Previous credential pass" } });
+  assert.equal(container.querySelector<HTMLDetailsElement>('[aria-label="Previous AWS validation result"]')?.open, false);
+  assert.match(container.querySelector('[aria-label="Previous AWS validation result"]')?.textContent ?? "", /Previous credential pass/);
+  assert.match(container.querySelector(".connection-operation-status")?.textContent ?? "", /Verifying the AWS role and declared access/);
+  assert.equal(container.querySelector(".setup-progress > div:nth-child(2)")?.className, "current");
+  assert.equal(container.querySelector(".setup-progress > div:nth-child(3)")?.className, "current");
+  assert.equal(container.querySelector(".setup-progress > div:nth-child(3) > span")?.textContent, "3");
+  assert.equal(container.querySelector(".setup-progress > div:nth-child(3) > span svg"), null);
+  assert.equal(button("Verifying AWS access…").disabled, true);
+});
+
+test("an exact-resource AWS retry shows the current verification step above historical failure", async () => {
+  const previous = previousFailedAwsValidation();
+  await renderNativeAwsDetail({ ...previous, declared_scopes: ["aws.code_to_cloud"], configuration: { ...previous.configuration, coverage_mode: "selected-resource" } });
+  assert.match(container.querySelector(".setup-progress > div:nth-child(3)")?.textContent ?? "", /Verify the selected resource and role/);
+  assert.equal(container.querySelector(".setup-progress > div:nth-child(3)")?.className, "current");
+  const history = container.querySelector<HTMLDetailsElement>('[aria-label="Previous AWS validation result"]');
+  assert.equal(history?.open, false);
+  assert.match(history?.textContent ?? "", /Previous AccessDenied/);
+  assert.match(container.querySelector('[aria-label="AWS validation in progress"] [role="status"]')?.textContent ?? "", /Current validation is in progress/);
+});
+
+test("AWS validation without any historical result shows pending rather than a coverage conclusion", async () => {
+  await renderNativeAwsDetail({ ...previousFailedAwsValidation(), last_validation: null, last_validated_at: null, health_state: "unknown" });
+  const pending = container.querySelector('[aria-label="AWS validation in progress"]');
+  assert.match(pending?.textContent ?? "", /No result has been recorded for this run yet/);
+  assert.doesNotMatch(pending?.textContent ?? "", /Not validated|AccessDenied/);
+  assert.equal(container.querySelector('[aria-label="Previous AWS validation result"]'), null);
+});
+
+for (const outcome of ["healthy", "unhealthy"] as const) test(`a fresh AWS ${outcome} result replaces the historical presentation`, async () => {
+  const previous = previousFailedAwsValidation();
+  await renderNativeAwsDetail(previous);
+  await renderNativeAwsDetail({ ...previous, validation_state: "idle", health_state: outcome, last_validated_at: "2026-10-19T00:30:00Z", last_validation: {
+    ...previous.last_validation!, completed_at: "2026-10-19T00:30:00Z", health_state: outcome, credential_state: outcome === "healthy" ? "passed" : "failed", summary: `Fresh ${outcome} result`, results: [],
+  } });
+  assert.equal(container.querySelector('[aria-label="AWS validation in progress"]'), null);
+  assert.equal(container.querySelector('[aria-label="Previous AWS validation result"]'), null);
+  assert.match(container.querySelector(".validation-summary")?.textContent ?? "", new RegExp(`Fresh ${outcome} result`));
+  assert.doesNotMatch(container.textContent ?? "", /Previous AccessDenied/);
+});
+
+for (const coverageMode of ["selected", "automatic"] as const) test(`native AWS ${coverageMode} setup preserves existing stacks and roles`, async () => {
+  const connection = detailFixture("aws", false);
+  await renderNativeAwsDetail({ ...connection, configuration: { ...connection.configuration, coverage_mode: coverageMode } });
+  const setup = container.querySelector(".setup-progress")?.textContent ?? "";
+  assert.match(setup, /Preserve any existing stacks and roles/);
+  assert.match(setup, /separate stack and a unique IAM role name/);
+  assert.match(setup, /stop and review the collision instead of deleting or replacing/);
+  assert.match(setup, /runtime caller policy to permit sts:AssumeRole for that exact role ARN/);
+  assert.match(setup, /Ask the operator to review this before launch; do not widen that policy automatically/);
+  assert.doesNotMatch(setup, /delete that stack|wait for its role to be removed|launching the replacement/);
 });
 
 test("abandoned native creation cannot refresh or select another setup after it resolves", async () => {
