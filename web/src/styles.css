@@ -1780,6 +1780,27 @@ fieldset.connector-access-options > .connector-evidence-picker { margin-top: 4px
 .connector-actions .secondary-action { margin: 0; }
 .connector-actions > :is(button, a) { display: inline-flex; align-items: center; justify-content: center; }
 .connector-actions > a:not(.primary-action):not(.secondary-action), .shared-aws-pilot-actions > a { color: var(--color-role-foreground-accent); font-size: 12px; font-weight: 600; text-underline-offset: 3px; }
+.github-saved-repositories { max-height: 232px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.github-saved-repositories code { font-size: 11px; line-height: 1.5; }
+.github-saved-repositories:focus-visible { outline: 2px solid var(--color-role-foreground-accent); outline-offset: 3px; }
+.github-collection-content { min-width: 0; flex: 1; }
+.setup-progress .github-collection-actions { display: flex; flex-wrap: wrap; align-items: center; align-self: flex-start; gap: 10px; max-width: 100%; margin-top: 12px; }
+.setup-progress .github-collection-actions > button { display: inline-flex; align-items: center; justify-content: center; flex: 0 1 auto; width: fit-content; max-width: 100%; min-width: 0; min-height: 40px; margin: 0; padding: 10px 14px; gap: 8px; text-align: center; }
+.setup-progress .github-collection-actions > button > svg { display: block; width: 16px; height: 16px; flex: 0 0 16px; }
+.github-collection-actions .spin { animation: connection-spin 1s linear infinite; }
+.setup-progress .github-collection-hint { max-width: 720px; margin-top: 8px; color: var(--color-role-text-content-subtle); }
+.github-collection-result, .github-collection-progress { display: grid; gap: 8px; margin-top: 14px; padding: 14px; border: 1px solid var(--color-role-border-subtle); border-radius: 10px; background: var(--color-role-surface-component-subtle); color: var(--color-role-text-content-body); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.github-collection-progress { color: var(--color-role-text-content-body) !important; }
+.github-collection-result > p, .github-collection-progress > p { margin: 0; }
+.github-collection-result .github-collection-result-heading { color: var(--color-role-text-content-subtle); }
+.github-collection-result-heading > span { display: inline-block; margin: 0 3px; padding: 2px 7px; border-radius: 5px; background: var(--color-role-status-low-subtle); color: var(--color-role-status-low-foreground); font-weight: 600; }
+.github-collection-result[data-state="partial"] .github-collection-result-heading > span { background: var(--color-role-status-medium-subtle); color: var(--color-role-status-medium-foreground); }
+.github-collection-result[data-state="failed"] .github-collection-result-heading > span { background: var(--color-role-status-critical-subtle); color: var(--color-role-status-critical-foreground); }
+.github-collection-counts { color: var(--color-role-text-content-heading); font-weight: 600; }
+.github-collection-result > small, .github-collection-progress > small { margin-top: 0; }
+.github-collection-result code, .github-collection-progress code { overflow-wrap: anywhere; }
+.github-collection-history { margin-top: 12px; color: var(--color-role-text-content-subtle); font-size: 12px; line-height: 1.55; }
+.github-collection-history > summary { padding: 6px 0; cursor: pointer; }
 .connector-access-expander { padding: 0; border: 1px solid var(--color-role-border-subtle); border-radius: 9px; background: var(--color-role-surface-component-subtle); }
 .connector-access-expander > summary { min-height: 40px; padding: 10px 12px; color: var(--color-role-text-content-heading); font-size: 12px; font-weight: 600; cursor: pointer; }
 .connector-access-expander > :not(summary) { margin: 0 12px 12px; }
@@ -1876,6 +1897,10 @@ fieldset.connector-access-options > .connector-evidence-picker { margin-top: 4px
   .connector-choice { padding: 10px; }
   .connector-actions { align-items: stretch; }
   .connector-actions > :is(button, a.primary-action, a.secondary-action) { flex: 1 1 160px; }
+  .setup-progress .github-collection-actions { align-items: stretch; flex-direction: column; align-self: stretch; }
+  .setup-progress .github-collection-actions > button { width: 100%; min-height: 44px; }
+  .github-collection-result, .github-collection-progress { padding: 12px; }
+  .github-saved-repositories { max-height: 192px; }
   .repository-picker-toolbar { align-items: stretch; }
   .repository-picker-search { max-width: none; flex-basis: 100%; }
   .repository-picker-list { max-height: 288px; }
