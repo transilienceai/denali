@@ -10,6 +10,56 @@ from denali.hosted_configuration import (
 )
 
 
+@pytest.mark.parametrize(
+    ("present", "missing"),
+    [
+        (
+            "DENALI_GCP_NATIVE_WORKLOAD_IDENTITY_PROVIDER",
+            "DENALI_GCP_NATIVE_RUNTIME_SERVICE_ACCOUNT",
+        ),
+        (
+            "DENALI_GCP_NATIVE_RUNTIME_SERVICE_ACCOUNT",
+            "DENALI_GCP_NATIVE_WORKLOAD_IDENTITY_PROVIDER",
+        ),
+    ],
+)
+def test_optional_native_gcp_identity_requires_the_complete_pair(present, missing) -> None:
+    environment = {
+        name: "configured"
+        for requirements in CONFIGURATION_REQUIREMENTS.values()
+        for name in requirements
+    }
+    environment[present] = "private-test-value"
+    environment[missing] = "   "
+
+    report = configuration_report(environment)
+
+    assert report["gcp"] == (missing,)
+    assert report["google_workspace"] == ()
+    assert "private-test-value" not in repr(report)
+    with pytest.raises(RuntimeError, match="gcp"):
+        require_configuration(report, ("gcp",))
+
+
+def test_complete_optional_native_gcp_identity_preserves_existing_groups() -> None:
+    environment = {
+        name: "configured"
+        for requirements in CONFIGURATION_REQUIREMENTS.values()
+        for name in requirements
+    }
+    environment.update(
+        {
+            "DENALI_GCP_NATIVE_WORKLOAD_IDENTITY_PROVIDER": "configured",
+            "DENALI_GCP_NATIVE_RUNTIME_SERVICE_ACCOUNT": "configured",
+        }
+    )
+
+    report = configuration_report(environment)
+
+    assert tuple(report) == P0_CONFIGURATION_GROUPS
+    assert all(not missing for missing in report.values())
+
+
 def test_p0_configuration_gate_covers_core_and_every_provider() -> None:
     assert P0_CONFIGURATION_GROUPS == (
         "core",

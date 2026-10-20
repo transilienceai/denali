@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol
+
+from denali.connections.gcp_credentials import (
+    credential_for_gcp_reference,
+    validate_gcp_credential_reference,
+)
 
 GCP_SCOPE_VERTEX_AI = "gcp.vertex_ai"
 GCP_SCOPE_AGENT_BUILDER = "gcp.agent_builder"
@@ -144,7 +149,7 @@ class GcpConnectionValidator:
         request: GcpRequest | None = None,
         shared_reader_factory: Callable[[dict[str, Any]], Any] | None = None,
     ):
-        self._credential_factory = credential_factory or _default_credential
+        self._credential_factory = credential_factory
         self._request = request
         self._shared_reader_factory = shared_reader_factory
 
@@ -156,9 +161,15 @@ class GcpConnectionValidator:
         projects = configuration.get("projects", [])
         if not projects:
             return _credential_failure(connection, started_at, "projects_not_selected")
-        principal_email = connection["credential_reference"]["principal_email"]
+        reference = connection["credential_reference"]
+        principal_email = reference["principal_email"]
         try:
-            credential = self._credential_factory(principal_email)
+            validate_gcp_credential_reference(reference)
+            credential = (
+                self._credential_factory(principal_email)
+                if self._credential_factory is not None
+                else authorized_gcp_credential(principal_email, credential_reference=reference)
+            )
             request = self._request or _authorized_request(credential)
         except Exception as error:
             return _credential_failure(connection, started_at, _gcp_error_code(error))
@@ -373,7 +384,7 @@ def _credential_failure(
                 "detail": "Not attempted because credential or project binding failed.",
                 **({"project_id": item["project_id"]} if item.get("project_id") else {}),
             }
-            for item in connection["coverage_plan"]
+            for item in connection.get("coverage_plan", [])
         ],
         "summary": f"Unable to validate the Google Cloud connection ({code}).",
     }
@@ -468,13 +479,25 @@ def _authorized_request(credential: GcpCredential) -> GcpRequest:
     return AuthorizedSession(credential).request
 
 
-def authorized_gcp_request(principal_email: str) -> GcpRequest:
+def authorized_gcp_request(
+    principal_email: str, *, credential_reference: Mapping[str, Any] | None = None
+) -> GcpRequest:
     """Create the bounded authorized request callable for one connection principal."""
 
-    return _authorized_request(authorized_gcp_credential(principal_email))
+    if credential_reference is None:
+        return _authorized_request(authorized_gcp_credential(principal_email))
+    return _authorized_request(
+        authorized_gcp_credential(principal_email, credential_reference=credential_reference)
+    )
 
 
-def authorized_gcp_credential(principal_email: str) -> GcpCredential:
+def authorized_gcp_credential(
+    principal_email: str, *, credential_reference: Mapping[str, Any] | None = None
+) -> GcpCredential:
     """Create credentials impersonating one configured Denali reader principal."""
 
-    return _default_credential(principal_email)
+    if credential_reference is None or "operator_credential_profile" not in credential_reference:
+        return _default_credential(principal_email)
+    if credential_reference.get("principal_email") != principal_email:
+        raise ValueError("Native Google Cloud reader does not match its credential reference")
+    return credential_for_gcp_reference(credential_reference)

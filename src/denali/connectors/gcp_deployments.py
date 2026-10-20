@@ -18,6 +18,7 @@ from denali.connections.gcp import (
     authorized_gcp_request,
     valid_gcp_project_id,
 )
+from denali.connections.gcp_credentials import validate_gcp_credential_reference
 from denali.connectors.container_images import image_digests
 from denali.connectors.gcp_vertex_activity import GcpVertexActivityConnector
 from denali.domain import (
@@ -196,9 +197,7 @@ class GcpConnectionDeploymentCollector:
         asset_client_factory: Callable[[str], GcpAssetClient] | None = None,
         shared_reader_factory: Callable[[dict[str, Any]], Any] | None = None,
     ):
-        self._asset_client_factory = asset_client_factory or (
-            lambda principal: GcpCloudAssetRestClient(authorized_gcp_request(principal))
-        )
+        self._asset_client_factory = asset_client_factory
         self._shared_reader_factory = shared_reader_factory
 
     def collect(
@@ -225,7 +224,8 @@ class GcpConnectionDeploymentCollector:
         configured_resource_names = configuration.get("resource_names")
         configured_display_names = configuration.get("resource_display_names")
         shared = connection.get("credential_type") == "platform_shared_gcp"
-        principal = connection.get("credential_reference", {}).get("principal_email")
+        reference = connection.get("credential_reference", {})
+        principal = reference.get("principal_email")
         if not isinstance(projects, list) or not projects or (
             not shared and not isinstance(principal, str)
         ):
@@ -258,13 +258,26 @@ class GcpConnectionDeploymentCollector:
             shared_reader = (self._shared_reader_factory or SharedGcpReader)(connection)
             client = shared_reader
         else:
-            client = self._asset_client_factory(principal)
+            profile = validate_gcp_credential_reference(reference)
+            if self._asset_client_factory is not None:
+                client = self._asset_client_factory(principal)
+            else:
+                request = (
+                    authorized_gcp_request(principal, credential_reference=reference)
+                    if profile is not None
+                    else authorized_gcp_request(principal)
+                )
+                client = GcpCloudAssetRestClient(request)
         activity_credentials = None
         cloud_logging = None
         if GCP_SCOPE_AI_ACTIVITY in scopes and not shared:
             from google.cloud import logging as cloud_logging_module
 
-            activity_credentials = authorized_gcp_credential(principal)
+            activity_credentials = (
+                authorized_gcp_credential(principal, credential_reference=reference)
+                if profile is not None
+                else authorized_gcp_credential(principal)
+            )
             cloud_logging = cloud_logging_module
         project_results: list[dict[str, Any]] = []
         failed = 0

@@ -8,12 +8,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
+import denali.connections.gcp_credentials as gcp_credentials
 from denali.connections.aws_onboarding import S3OnboardingClient
 from denali.connections.gcp import (
     GcpCredential,
     GcpHttpResponse,
     valid_gcp_project_id,
     valid_gcp_service_account_email,
+)
+from denali.connections.gcp_credentials import (
+    NATIVE_GCP_CREDENTIAL_PROFILE,
+    validate_gcp_credential_reference,
 )
 
 GCP_ONBOARDING_SCRIPT_VERSION = "denali-gcp-project-reader-v2"
@@ -28,12 +33,16 @@ class GcpConnectionPrincipalProvisioner:
         operator_project_id: str,
         credential_factory: Callable[[], GcpCredential] | None = None,
         request: Callable[..., GcpHttpResponse] | None = None,
+        operator_credential_profile: str | None = None,
     ):
         if not valid_gcp_project_id(operator_project_id):
             raise ValueError("Denali Google Cloud operator project ID is invalid")
         self._operator_project_id = operator_project_id
-        self._credential_factory = credential_factory or _default_operator_credential
+        if operator_credential_profile not in {None, NATIVE_GCP_CREDENTIAL_PROFILE}:
+            raise ValueError("Native Google Cloud credential profile is unsupported")
+        self._credential_factory = credential_factory
         self._request = request
+        self._operator_credential_profile = operator_credential_profile
 
     @property
     def operator_project_id(self) -> str:
@@ -41,7 +50,24 @@ class GcpConnectionPrincipalProvisioner:
 
     def create_principal(self, *, connection_id: str, display_name: str) -> dict[str, str]:
         account_id = f"denali-{connection_id.replace('-', '')[:20]}"
-        credential = self._credential_factory()
+        profile = self._operator_credential_profile
+        if profile is not None:
+            validate_gcp_credential_reference(
+                {
+                    "operator_credential_profile": profile,
+                    "operator_project_id": self._operator_project_id,
+                    "principal_email": (
+                        f"{account_id}@{self._operator_project_id}.iam.gserviceaccount.com"
+                    ),
+                }
+            )
+        credential = (
+            self._credential_factory()
+            if self._credential_factory is not None
+            else gcp_credentials.native_gcp_source_credentials()
+            if profile is not None
+            else _default_operator_credential()
+        )
         request = self._request or _authorized_request(credential)
         response = request(
             "POST",
@@ -71,7 +97,11 @@ class GcpConnectionPrincipalProvisioner:
             or not unique_id.isdigit()
         ):
             raise RuntimeError("Google Cloud returned an invalid Denali service account")
-        return {"principal_email": email, "principal_unique_id": unique_id}
+        return {
+            "principal_email": email,
+            "principal_unique_id": unique_id,
+            **({"operator_credential_profile": profile} if profile is not None else {}),
+        }
 
 
 class GcpSetupScriptLauncher:

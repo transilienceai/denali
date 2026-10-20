@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from denali.api.app import DEFAULT_LOCAL_TENANT, create_app
@@ -131,9 +133,7 @@ class GcpConnectionRepositoryStub:
             "credential_reference": {
                 "type": "gcp_service_account",
                 "principal_email": target["credential_reference"]["principal_email"],
-                "principal_unique_id": target["credential_reference"][
-                    "principal_unique_id"
-                ],
+                "principal_unique_id": target["credential_reference"]["principal_unique_id"],
             },
             "declared_scopes": target["declared_scopes"],
             "coverage_plan": target["coverage_plan"],
@@ -259,9 +259,7 @@ def test_gcp_setup_selects_projects_without_customer_credentials() -> None:
         connection_id = created["id"]
         assert created["coverage_plan"] == []
         assert created["configuration"]["projects"] == []
-        assert created["credential_reference"]["principal_unique_id"] == (
-            "112233445566778899001"
-        )
+        assert created["credential_reference"]["principal_unique_id"] == ("112233445566778899001")
         assert provisioner.calls == [
             {"connection_id": connection_id, "display_name": "Production GCP"}
         ]
@@ -293,11 +291,7 @@ def test_gcp_setup_selects_projects_without_customer_credentials() -> None:
         ]
         completed = client.post(
             f"/v1/connections/{connection_id}/gcp/setup/complete",
-            json={
-                "completion_code": (
-                    f"DENALI_GCP_SETUP_COMPLETE={_completion_code(projects)}"
-                )
-            },
+            json={"completion_code": (f"DENALI_GCP_SETUP_COMPLETE={_completion_code(projects)}")},
         )
         assert completed.status_code == 202
         detail = client.get(f"/v1/connections/{connection_id}").json()
@@ -306,9 +300,7 @@ def test_gcp_setup_selects_projects_without_customer_credentials() -> None:
         assert len(detail["coverage_plan"]) == 6 * len(projects)
         assert len(detail["last_validation"]["results"]) == 6 * len(projects)
         assert "setup_token" not in json.dumps(detail)
-        collected = client.post(
-            f"/v1/connections/{connection_id}/gcp/collect-deployments"
-        )
+        collected = client.post(f"/v1/connections/{connection_id}/gcp/collect-deployments")
         assert collected.status_code == 202
         assert collected.json()["status"] == "started"
         after_collection = client.get(f"/v1/connections/{connection_id}").json()
@@ -350,9 +342,7 @@ def test_gcp_principal_provisioning_creates_a_unique_keyless_service_account() -
     )
 
     assert principal == {
-        "principal_email": (
-            "denali-123456781234567890ab@denali-operator.iam.gserviceaccount.com"
-        ),
+        "principal_email": ("denali-123456781234567890ab@denali-operator.iam.gserviceaccount.com"),
         "principal_unique_id": "112233445566778899001",
     }
     method, url, kwargs = requests[0]
@@ -365,6 +355,241 @@ def test_gcp_principal_provisioning_creates_a_unique_keyless_service_account() -
         "denali-abcdefabcdef4abc8def@denali-operator.iam.gserviceaccount.com"
     )
     assert second_principal["principal_email"] != principal["principal_email"]
+
+
+def _native_profile_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DENALI_GCP_OPERATOR_PROJECT_ID", "native-operator")
+    monkeypatch.setenv(
+        "DENALI_GCP_NATIVE_WORKLOAD_IDENTITY_PROVIDER",
+        "projects/123456789012/locations/global/workloadIdentityPools/native/providers/modal",
+    )
+    monkeypatch.setenv(
+        "DENALI_GCP_NATIVE_RUNTIME_SERVICE_ACCOUNT",
+        "native-runtime@native-operator.iam.gserviceaccount.com",
+    )
+    monkeypatch.setenv("MODAL_IDENTITY_TOKEN", "synthetic-modal-identity")
+
+
+def test_native_profile_is_server_stamped_and_hidden_by_the_real_public_projection(
+    monkeypatch,
+) -> None:
+    from denali.connections import gcp_credentials, gcp_onboarding
+    from denali.store.repository import _connection_response
+
+    _native_profile_environment(monkeypatch)
+    source_calls = []
+    source = FakeCredential()
+    requests = []
+    monkeypatch.setattr(
+        gcp_credentials,
+        "native_gcp_source_credentials",
+        lambda: source_calls.append("native") or source,
+    )
+
+    def request(method, url, **kwargs):
+        requests.append((method, url, kwargs))
+        return FakeResponse(
+            {
+                "email": f"{kwargs['json']['accountId']}@native-operator.iam.gserviceaccount.com",
+                "uniqueId": "123456789012345678901",
+            }
+        )
+
+    def authorized_request(credential):
+        assert credential is source
+        return request
+
+    monkeypatch.setattr(gcp_onboarding, "_authorized_request", authorized_request)
+
+    class RealProjectionRepository(GcpConnectionRepositoryStub):
+        @staticmethod
+        def _safe(target):
+            return _connection_response(
+                {
+                    **target,
+                    "health_state": "unknown",
+                    "last_validation": None,
+                    "last_validated_at": None,
+                }
+            )
+
+    repository = RealProjectionRepository()
+    launcher = GcpSetupScriptLauncher(
+        bucket_name="synthetic-onboarding", s3_client=FakeS3OnboardingClient()
+    )
+    app = create_app(repository=repository, gcp_setup_launcher=launcher, migrate_on_start=False)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/connections", json={"provider": "gcp", "display_name": "Isolated GCP"}
+        )
+        assert response.status_code == 201
+        created = response.json()
+        reference = repository.targets[created["id"]]["credential_reference"]
+        assert reference["operator_credential_profile"] == "native_gcp_wif_v1"
+        assert reference["operator_project_id"] == "native-operator"
+        assert created["credential_reference"] == {
+            "type": "gcp_service_account",
+            "principal_email": reference["principal_email"],
+            "principal_unique_id": "123456789012345678901",
+        }
+        detail = client.get(f"/v1/connections/{created['id']}")
+        assert detail.status_code == 200
+        for public in (response.text, detail.text):
+            assert "operator_credential_profile" not in public
+            assert "native_gcp_wif_v1" not in public
+            assert "synthetic-modal-identity" not in public
+        assert source_calls == ["native"]
+        assert len(requests) == 1
+        assert requests[0][0] == "POST"
+        assert requests[0][1] == (
+            "https://iam.googleapis.com/v1/projects/native-operator/serviceAccounts"
+        )
+        assert set(requests[0][2]["json"]) == {"accountId", "serviceAccount"}
+        assert len(repository.targets) == 1
+
+
+@pytest.mark.parametrize(
+    "untrusted",
+    [
+        {"operator_credential_profile": "native_gcp_wif_v1"},
+        {"operator_project_id": "other-operator"},
+        {"credential_reference": {"operator_credential_profile": "native_gcp_wif_v1"}},
+    ],
+)
+def test_browser_cannot_select_an_operator_credential_profile(untrusted) -> None:
+    repository = GcpConnectionRepositoryStub()
+    provisioner = FakeGcpPrincipalProvisioner()
+    app = create_app(
+        repository=repository,
+        gcp_principal_provisioner=provisioner,
+        gcp_setup_launcher=GcpSetupScriptLauncher(
+            bucket_name="synthetic-onboarding", s3_client=FakeS3OnboardingClient()
+        ),
+        migrate_on_start=False,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/connections",
+            json={"provider": "gcp", "display_name": "Untrusted profile", **untrusted},
+        )
+    assert response.status_code == 422
+    assert provisioner.calls == []
+    assert repository.targets == {}
+
+
+def test_partial_native_configuration_fails_new_creation_without_disrupting_api_startup(
+    monkeypatch,
+) -> None:
+    import google.auth
+
+    _native_profile_environment(monkeypatch)
+    monkeypatch.delenv("DENALI_GCP_NATIVE_RUNTIME_SERVICE_ACCOUNT")
+    monkeypatch.setattr(
+        google.auth,
+        "default",
+        lambda **_kwargs: pytest.fail("partial native configuration fell back to legacy ADC"),
+    )
+    repository = GcpConnectionRepositoryStub()
+    app = create_app(
+        repository=repository,
+        gcp_setup_launcher=GcpSetupScriptLauncher(
+            bucket_name="synthetic-onboarding", s3_client=FakeS3OnboardingClient()
+        ),
+        migrate_on_start=False,
+    )
+    with TestClient(app) as client:
+        assert client.get("/v1/connections").status_code == 200
+        response = client.post(
+            "/v1/connections", json={"provider": "gcp", "display_name": "Broken native profile"}
+        )
+        assert response.status_code == 502
+        assert response.json()["detail"] == (
+            "Unable to create the keyless Google Cloud connection principal"
+        )
+        assert client.get("/v1/connections").json()["items"] == []
+    assert repository.targets == {}
+
+
+def test_marked_native_validation_resolves_the_same_exact_reader_profile(monkeypatch) -> None:
+    from google.auth import impersonated_credentials
+
+    from denali.connections import gcp_credentials
+
+    _native_profile_environment(monkeypatch)
+    source = FakeCredential()
+    credential = FakeCredential()
+    monkeypatch.setattr(gcp_credentials, "native_gcp_source_credentials", lambda: source)
+    impersonations = []
+    monkeypatch.setattr(
+        impersonated_credentials,
+        "Credentials",
+        lambda **kwargs: impersonations.append(kwargs) or credential,
+    )
+    requests = []
+
+    def request(method, url, **kwargs):
+        requests.append((method, url, kwargs))
+        if "cloudresourcemanager" in url:
+            return FakeResponse({"projectId": PROJECT_ONE, "name": "projects/123456789012"})
+        return FakeResponse({"results": []})
+
+    reference = {
+        "principal_email": "denali-reader@native-operator.iam.gserviceaccount.com",
+        "operator_project_id": "native-operator",
+        "operator_credential_profile": "native_gcp_wif_v1",
+    }
+    target = {
+        "id": "native-profile-connection",
+        "provider": "gcp",
+        "credential_reference": reference,
+        "declared_scopes": ["gcp.vertex_ai"],
+        "configuration": {
+            "projects": [
+                {"id": PROJECT_ONE, "number": "123456789012", "name": "Selected project"},
+            ]
+        },
+    }
+    before = deepcopy(target)
+    result = GcpConnectionValidator(request=request).validate(target)
+    assert result["credential_state"] == "passed"
+    assert result["health_state"] == "healthy"
+    assert impersonations == [
+        {
+            "source_credentials": source,
+            "target_principal": reference["principal_email"],
+            "target_scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+            "lifetime": 900,
+        }
+    ]
+    assert len(requests) == 3
+    assert target == before
+
+
+def test_invalid_native_marker_is_rejected_even_with_an_injected_validator_factory() -> None:
+    calls = []
+    validator = GcpConnectionValidator(
+        credential_factory=lambda principal: calls.append(principal) or FakeCredential(),
+        request=lambda *_args, **_kwargs: pytest.fail("invalid profile reached Google"),
+    )
+    result = validator.validate(
+        {
+            "id": "invalid-profile",
+            "provider": "gcp",
+            "credential_reference": {
+                "principal_email": PRINCIPAL_EMAIL,
+                "operator_credential_profile": "unknown",
+            },
+            "declared_scopes": ["gcp.vertex_ai"],
+            "configuration": {
+                "projects": [
+                    {"id": PROJECT_ONE, "number": "123456789012", "name": "Selected project"},
+                ]
+            },
+        }
+    )
+    assert result["credential_state"] == "failed"
+    assert result["health_state"] == "unhealthy"
+    assert calls == []
 
 
 class FakeCredential:
@@ -422,9 +647,7 @@ def test_gcp_validation_is_project_specific_and_all_locations() -> None:
         if "cloudresourcemanager" in url:
             project_id = url.rsplit("/", 1)[1]
             project = next(item for item in projects if item["id"] == project_id)
-            return FakeResponse(
-                {"projectId": project_id, "name": f"projects/{project['number']}"}
-            )
+            return FakeResponse({"projectId": project_id, "name": f"projects/{project['number']}"})
         return FakeResponse({"results": []})
 
     validator = GcpConnectionValidator(

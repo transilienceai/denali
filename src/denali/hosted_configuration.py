@@ -56,16 +56,26 @@ CONFIGURATION_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 
 P0_CONFIGURATION_GROUPS = tuple(CONFIGURATION_REQUIREMENTS)
 
+GCP_NATIVE_CONFIGURATION_KEYS = (
+    "DENALI_GCP_NATIVE_WORKLOAD_IDENTITY_PROVIDER",
+    "DENALI_GCP_NATIVE_RUNTIME_SERVICE_ACCOUNT",
+)
+
 
 def configuration_report(environment: Mapping[str, str]) -> dict[str, tuple[str, ...]]:
     """Return missing variable names per group without reading or returning values."""
 
-    return {
-        group: tuple(
-            name for name in requirements if not environment.get(name, "").strip()
-        )
+    report = {
+        group: tuple(name for name in requirements if not environment.get(name, "").strip())
         for group, requirements in CONFIGURATION_REQUIREMENTS.items()
     }
+    # The isolated native identity is optional, but must never be half-configured.
+    # Keep the existing groups and legacy configurations backward compatible.
+    if any(environment.get(name, "").strip() for name in GCP_NATIVE_CONFIGURATION_KEYS):
+        report["gcp"] += tuple(
+            name for name in GCP_NATIVE_CONFIGURATION_KEYS if not environment.get(name, "").strip()
+        )
+    return report
 
 
 def require_configuration(
