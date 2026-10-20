@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Polish the browser-only GitHub collection recovery controls: compact aligned action styling, eligible retry as the primary action, stable disabled controls while busy, accessible scope guidance, bounded saved-repository review and a distinct recorded-result card. Existing full-collection and exact prior-job retry calls, connection identities, saved repository scopes, permissions, authorization, durable jobs and public output contracts are unchanged.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "Presentation-only changes use existing collection/job operations and parameters; no new command, output, login scope or CLI release is needed."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "No Platform adapter, schema, service behavior or cross-application access changes are involved. Existing native and shared connector operations are preserved."
+  }
+}

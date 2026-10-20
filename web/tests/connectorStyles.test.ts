@@ -29,6 +29,11 @@ const dom = new JSDOM(`<!doctype html><html><head><style></style></head><body>
     <div class="connector-loading compact" id="compact-loading"></div>
   </section>
   <form class="connection-create"><fieldset class="connection-create-lock"><fieldset class="connector-evidence-picker" id="native-evidence"><legend>Native evidence</legend><div class="connector-choice-grid"><label class="connector-choice" id="native-choice"><input type="checkbox" id="native-checkbox"><span class="connector-choice-copy"><strong>Read-only metadata</strong></span></label></div></fieldset></fieldset></form>
+  <section class="connection-detail"><div class="setup-progress"><div><span>4</span><div class="github-collection-content" id="collection-content">
+    <div class="azure-subscriptions github-saved-repositories" id="saved-repositories"><code>example/repository</code></div>
+    <div class="github-collection-actions" id="collection-actions"><button class="primary-action" id="retry-action"><svg id="retry-icon"></svg>Retry incomplete repositories only</button><button class="secondary-action" id="full-collection-action"><svg></svg>Collect and correlate again</button></div>
+    <div class="github-collection-result" id="collection-result"><p>Latest result: Partial</p></div>
+  </div></div></div></section>
   <label id="unrelated-label">Profile preference<input type="checkbox" id="unrelated-checkbox"></label><textarea id="unrelated-textarea"></textarea>
   <div class="read-only-detail"><fieldset class="connection-detail-access" disabled id="readonly-access"><div class="connection-launch-actions"><a href="https://example.invalid/setup" id="readonly-setup">Provider setup</a></div><details><summary id="readonly-summary">Read evidence</summary><p>Evidence remains visible.</p></details><a href="https://example.invalid/docs" id="readonly-docs">Documentation</a></fieldset></div>
 </body></html>`);
@@ -98,12 +103,34 @@ test("provider selection keeps a readable keyboard target and loading reserves b
   assert.match(layer, /:focus-visible\s*\{\s*outline: 2px solid var\(--color-role-foreground-accent\)/);
 });
 
+test("GitHub retry and full collection use compact aligned controls, not a stretched unstyled button", () => {
+  assert.equal(computed("collection-content").minWidth, "0px");
+  assert.equal(computed("collection-actions").display, "flex");
+  assert.equal(computed("collection-actions").flexWrap, "wrap");
+  assert.equal(computed("collection-actions").alignSelf, "flex-start");
+  for (const id of ["retry-action", "full-collection-action"]) {
+    assert.equal(computed(id).display, "inline-flex");
+    assert.equal(computed(id).width, "fit-content");
+    assert.equal(computed(id).minHeight, "40px");
+    assert.equal(computed(id).margin, "0px");
+    assert.equal(computed(id).gap, "8px");
+  }
+  assert.equal(computed("retry-icon").width, "16px");
+  assert.equal(computed("retry-icon").height, "16px");
+  assert.equal(computed("retry-icon").flexShrink, "0");
+  assert.equal(computed("collection-result").display, "grid");
+  assert.equal(computed("saved-repositories").maxHeight, "232px");
+  assert.equal(computed("saved-repositories").overflowY, "auto");
+});
+
 test("mobile and reduced-motion behavior are explicit in the scoped component layer", () => {
   const sheet = dom.window.document.querySelector("style")!.sheet!;
   const media = [...sheet.cssRules].filter((rule): rule is CSSMediaRule => "conditionText" in rule);
   const mobile = media.filter((rule) => rule.conditionText === "(max-width: 780px)").map((rule) => rule.cssText).join("\n");
   assert.match(mobile, /\.connector-choice-grid[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(mobile, /\.repository-picker-list[^}]*max-height: 288px/);
+  assert.match(mobile, /\.github-collection-actions[^}]*flex-direction: column/);
+  assert.match(mobile, /\.github-collection-actions > button[^}]*width: 100%;[^}]*min-height: 44px/);
   const reduced = media.filter((rule) => rule.conditionText === "(prefers-reduced-motion: reduce)").map((rule) => rule.cssText).join("\n");
   assert.match(reduced, /\.connector-loading \*[\s\S]*?animation: none;[\s\S]*?transition: none;/);
 });

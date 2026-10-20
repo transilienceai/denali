@@ -222,3 +222,22 @@ Azure cards measured 16px checkbox controls and 60px desktop rows; responsive ca
 stayed within a 390px viewport. These are synthetic UI checks, not provider lifecycle
 acceptance. No production connector, provider grant, saved selection or rollout flag
 was changed during this audit.
+
+GitHub collection recovery uses one wrapping action group: an eligible incomplete-only
+retry is the primary action, while a full saved-selection collection is secondary.
+Both controls have fixed-size icons and intrinsic desktop widths; narrow viewports
+stack the controls with 44px minimum targets. Retry remains mounted but disabled
+while collection runs, preserving its keyboard focus and preventing duplicate
+submissions. Its associated description explains the affected count, retained
+timestamps and the limits that may still leave coverage partial. Job IDs, retry
+selection, durable dispatch, authorization and provider permissions are unchanged.
+The recorded result is a separate status/count/time card, never a claim that
+successful dispatch or healthy validation means complete evidence. Saved repository
+identities remain fully inspectable in a bounded, keyboard-scrollable region.
+
+The local fixture additionally accepts `collection=partial`, `collection=running`
+or `collection=quota` to open a synthetic 113-repository GitHub detail directly.
+Combine these with `source=native`, `member=1`, `disabled=1` and `theme=light` to
+inspect action hierarchy, progress, permissions and responsive layout. Every API
+method remains replaced: the preview cannot start a real collection or change
+connections, repository selections or provider permissions.

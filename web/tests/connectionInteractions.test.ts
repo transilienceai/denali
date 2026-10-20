@@ -753,6 +753,148 @@ test("GitHub incomplete recovery submits the current job only, not saved reposit
   assert.equal(calls.disable, 0);
 });
 
+function githubRetryFixture(shared: boolean): Connection {
+  return {
+    ...detailFixture("github", shared), source_collection_state: "idle",
+    last_source_collection: {
+      job_id: "11111111-1111-4111-8111-111111111111", connection_id: "github-source", state: "partial",
+      completed_at: "2026-10-20T00:02:00Z", repository_count: 113, completed_repository_count: 113,
+      failed_count: 1, partial_count: 14, repositories: [], retained_repository_count: 90,
+      retry_repository_count: 23, refreshed_repository_count: 23,
+    },
+  };
+}
+
+function githubCollectionActions() {
+  const group = container.querySelector<HTMLElement>('[role="group"][aria-label="GitHub source collection actions"]');
+  assert.ok(group, "Collection actions must have a named, keyboard-inspectable group");
+  return group;
+}
+
+for (const shared of [false, true]) {
+  const source = shared ? "shared" : "native";
+
+  for (const action of ["retry", "full"] as const) {
+    test(`GitHub ${source}: compact ${action} action preserves its exact request semantics`, async () => {
+      const row = githubRetryFixture(shared);
+      const submissions: Array<{ id: string; retryOf?: string }> = [];
+      pageApi.collectGitHubSource = async (id, retryOf) => {
+        submissions.push({ id, retryOf });
+        nextAttachment = { ...row, source_collection_state: "running" };
+        return { status: "started", connection_id: id };
+      };
+      await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+      const group = githubCollectionActions();
+      const buttons = [...group.querySelectorAll<HTMLButtonElement>("button")];
+      assert.deepEqual(buttons.map((element) => element.textContent?.trim()), ["Retry incomplete repositories only", "Collect and correlate again"]);
+      assert.ok(buttons[0].classList.contains("primary-action"));
+      assert.ok(buttons[1].classList.contains("secondary-action"));
+      assert.equal(buttons[1].classList.contains("primary-action"), false);
+      assert.equal(group.getAttribute("aria-busy"), "false");
+      const descriptionIds = buttons[0].getAttribute("aria-describedby")?.trim().split(/\s+/) ?? [];
+      assert.ok(descriptionIds.length > 0, "Retry scope must be explained to assistive technology");
+      const description = descriptionIds.map((id) => {
+        const element = document.getElementById(id);
+        assert.ok(element && group.parentElement?.contains(element), "Retry description must resolve within this collection step");
+        return element.textContent ?? "";
+      }).join(" ");
+      assert.match(description, /\b15\b/);
+      assert.match(description, /incomplete/i);
+      assert.match(description, /completed results|retain|earlier complete/i);
+      assert.match(description, /timestamp|collection time/i);
+
+      await click(buttons[action === "retry" ? 0 : 1]);
+      assert.deepEqual(submissions, [{ id: row.id, retryOf: action === "retry" ? row.last_source_collection!.job_id : undefined }]);
+      assert.deepEqual(acceptedOperations, [{ id: row.id, kind: "source" }]);
+      assert.equal(calls.attaches.length, 0);
+      assert.equal(calls.native, 0);
+      assert.equal(calls.disable, 0);
+      assert.equal(calls.localDisable.length, 0);
+    });
+  }
+
+  for (const reason of ["complete", "missing job", "member", "disabled"] as const) {
+    test(`GitHub ${source}: retry is absent for ${reason} without changing the full-collection contract`, async () => {
+      const row = githubRetryFixture(shared);
+      if (reason === "complete") row.last_source_collection = { ...row.last_source_collection!, state: "complete", partial_count: 0, failed_count: 0 };
+      if (reason === "missing job") row.last_source_collection = { ...row.last_source_collection!, job_id: undefined };
+      if (reason === "disabled") row.lifecycle_state = "disabled";
+      const submissions: string[] = [];
+      pageApi.collectGitHubSource = async (id) => { submissions.push(id); return { status: "started", connection_id: id }; };
+      await mount({ initialConnections: [row], initialQuery: { connection: row.id }, canWrite: reason !== "member" });
+      assert.equal([...container.querySelectorAll("button")].some((element) => element.textContent?.trim() === "Retry incomplete repositories only"), false);
+      if (reason === "complete" || reason === "missing job") {
+        const full = button("Collect and correlate again");
+        assert.ok(full.classList.contains("primary-action"));
+        assert.equal(full.matches(":disabled"), false);
+      } else {
+        const actions = container.querySelector('[aria-label="GitHub source collection actions"]');
+        for (const element of actions?.querySelectorAll<HTMLButtonElement>("button") ?? []) {
+          assert.equal(element.matches(":disabled"), true);
+          await click(element);
+        }
+      }
+      assert.deepEqual(submissions, []);
+      assert.deepEqual(acceptedOperations, []);
+    });
+  }
+
+  test(`GitHub ${source}: submitting retry retains focus and disables repeat actions until a rejected request restores them`, async () => {
+    const row = githubRetryFixture(shared);
+    const submissions: Array<{ id: string; retryOf?: string }> = [];
+    let rejectRequest!: (reason: Error) => void;
+    pageApi.collectGitHubSource = (id, retryOf) => {
+      submissions.push({ id, retryOf });
+      return new Promise((_resolve, reject) => { rejectRequest = reject; });
+    };
+    await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+    const retry = button("Retry incomplete repositories only");
+    retry.focus();
+    await click(retry);
+    const busyGroup = githubCollectionActions();
+    assert.equal(busyGroup.getAttribute("aria-busy"), "true");
+    assert.equal(button("Retry incomplete repositories only"), retry, "Do not replace or remove the focused retry node during submission");
+    assert.equal(document.activeElement, retry);
+    const actions = [...busyGroup.querySelectorAll<HTMLButtonElement>("button")];
+    assert.equal(actions.length, 2);
+    assert.ok(actions.every((element) => element.matches(":disabled")));
+    assert.equal(actions[1].getAttribute("aria-busy"), "true");
+    for (const element of actions) await click(element);
+    assert.deepEqual(submissions, [{ id: row.id, retryOf: row.last_source_collection!.job_id }]);
+
+    await act(async () => rejectRequest(new Error("Retry could not be accepted. Try again.")));
+    assert.equal(githubCollectionActions().getAttribute("aria-busy"), "false");
+    assert.equal(button("Retry incomplete repositories only"), retry);
+    assert.equal(retry.matches(":disabled"), false);
+    assert.equal(button("Collect and correlate again").matches(":disabled"), false);
+    assert.equal(document.activeElement, retry);
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Retry could not be accepted/);
+    assert.deepEqual(acceptedOperations, []);
+  });
+
+  for (const blocked of ["collect unavailable", "validation running", "collection running"] as const) {
+    test(`GitHub ${source}: ${blocked} keeps retry inspectable but natively disables every collection action`, async () => {
+      const row = githubRetryFixture(shared);
+      if (blocked === "collect unavailable") row.actions = { validate: true, collect: false, disconnect: true, delete: false, manage_shared: true, review_scope: true };
+      if (blocked === "validation running") row.validation_state = "running";
+      if (blocked === "collection running") row.source_collection_state = "running";
+      const submissions: string[] = [];
+      pageApi.collectGitHubSource = async (id) => { submissions.push(id); return { status: "started", connection_id: id }; };
+      await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+      const group = githubCollectionActions();
+      const retry = button("Retry incomplete repositories only");
+      assert.equal(retry.matches(":disabled"), true);
+      const actions = [...group.querySelectorAll<HTMLButtonElement>("button")];
+      assert.equal(actions.length, 2);
+      assert.ok(actions.every((element) => element.matches(":disabled")));
+      assert.equal(group.getAttribute("aria-busy"), String(blocked === "collection running"));
+      for (const element of actions) await click(element);
+      assert.deepEqual(submissions, []);
+      assert.deepEqual(acceptedOperations, []);
+    });
+  }
+}
+
 test("GitHub terminal recovery distinguishes fresh evidence from retained history", async () => {
   const row: Connection = { ...detailFixture("github", false), source_collection_state: "idle",
     last_source_collection: { connection_id: "github-source", state: "partial", completed_at: "2026-10-20T00:03:00Z", repository_count: 113, completed_repository_count: 113, failed_count: 0, partial_count: 4, repositories: [], retained_repository_count: 90, retry_repository_count: 23, refreshed_repository_count: 23 } };

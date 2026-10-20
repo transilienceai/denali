@@ -16,6 +16,7 @@ const readOnly = params.get("member") === "1";
 const slow = params.get("slow") === "1";
 const fail = params.get("error") === "1";
 const providerFail = params.get("provider_error") === "1";
+const collectionPreview = params.get("collection");
 const providers = ["aws", "azure", "entra", "gcp", "github", "google_workspace", "azure_repos"] as const;
 type Provider = typeof providers[number];
 const labels: Record<Provider, string> = {aws:"Amazon Web Services", azure:"Microsoft Azure", entra:"Microsoft Entra", gcp:"Google Cloud", github:"GitHub", google_workspace:"Google Workspace", azure_repos:"Azure Repos"};
@@ -54,6 +55,16 @@ const rows: Connection[] = providers.map((provider, index) => ({
   last_validated_at:timestamp,last_validation:{started_at:timestamp,completed_at:timestamp,health_state:"healthy",credential_state:"passed",account_id_observed:provider==="aws"?"123456789012":id(31),summary:"Read-only access verified for the declared evidence planes. Synthetic UI fixture.",results:scopes[provider].map((scope) => ({scope,plane:scope.replace(".","_"),label:scope.split(".")[1].replaceAll("_"," "),region:"selected boundary",state:"passed",detail:"The declared read-only operation completed. Synthetic data only."}))},created_at:timestamp,updated_at:timestamp,
 } as Connection));
 
+// Collection examples remain synthetic and cannot dispatch a job or change a connection.
+if (collectionPreview) {
+  const github = rows.find((row) => row.provider === "github")!;
+  github.lifecycle_state = params.get("disabled") === "1" ? "disabled" : "active";
+  github.configuration.repositories = repositories;
+  github.last_source_collection = {job_id:id(900),connection_id:github.id,state:"partial",completed_at:timestamp,repository_count:113,completed_repository_count:113,partial_count:15,failed_count:0,retained_repository_count:98,retry_repository_count:15,refreshed_repository_count:15,repositories:[]};
+  github.source_collection_state = ["running","quota"].includes(collectionPreview) ? "running" : "idle";
+  if (github.source_collection_state === "running") github.source_collection_progress = {job_id:id(901),state:"running",repository_count:113,completed_repository_count:102,partial_count:4,failed_count:0,retained_repository_count:98,retry_repository_count:15,refreshed_repository_count:4,resume_pending:true,retry_after_seconds:collectionPreview === "quota" ? 120 : 0,updated_at:timestamp,repositories:[]};
+}
+
 // Fail closed: even an unanticipated method cannot use the real API transport.
 for (const method of Object.keys(api)) (api as unknown as Record<string,unknown>)[method] = async () => {throw new Error("This is a read-only synthetic UI preview. No API or provider action was performed.");};
 const respond = <T,>(value: T, isCatalog = false) => async () => {
@@ -74,7 +85,7 @@ Object.assign(api, {
 applyTheme(params.get("theme")==="light"?"light":"dark",{persist:false});
 function Harness() {
   const requested = params.get("provider") as Provider;
-  const [query,setQuery] = useState<Record<string,string>>({new:"1",provider:providers.includes(requested)?requested:"azure"});
+  const [query,setQuery] = useState<Record<string,string>>(collectionPreview ? {connection:rows.find((row) => row.provider === "github")!.id} : {new:"1",provider:providers.includes(requested)?requested:"azure"});
   const [theme,setTheme] = useState(params.get("theme")==="light"?"light":"dark");
   const update = (values:Record<string,string|null|undefined>) => setQuery((previous) => {
     const next = {...previous}; for(const [key,value] of Object.entries(values)) {if(value) next[key]=value; else delete next[key];} return next;
