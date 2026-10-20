@@ -580,10 +580,10 @@ export const api = {
       `/v1/connections/${id}/azure-repos/collect`,
       { method: "POST" },
     ),
-  collectGitHubSource: (id: string) =>
+  collectGitHubSource: (id: string, retryOf?: string) =>
     request<{ status: "started" | "already_running"; connection_id: string }>(
       `/v1/connections/${id}/github/collect`,
-      { method: "POST" },
+      { method: "POST", ...(retryOf ? { body: JSON.stringify({ retry_of: retryOf }) } : {}) },
     ),
   summary: () => request<Summary>("/v1/inventory/summary"),
   assets: (filters: {

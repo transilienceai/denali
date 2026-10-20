@@ -734,6 +734,34 @@ test("GitHub terminal interruption shows unprocessed repositories instead of cal
   assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Needs attention"));
 });
 
+test("GitHub incomplete recovery submits the current job only, not saved repository changes", async () => {
+  const row: Connection = { ...detailFixture("github", false), source_collection_state: "idle",
+    last_source_collection: { job_id: "11111111-1111-4111-8111-111111111111", connection_id: "github-source", state: "partial", completed_at: "2026-10-20T00:02:00Z", repository_count: 113, failed_count: 1, partial_count: 22, repositories: [] } };
+  const submissions: Array<{id: string; retryOf?: string}> = [];
+  pageApi.collectGitHubSource = async (id, retryOf) => {
+    submissions.push({ id, retryOf });
+    nextAttachment = { ...row, source_collection_state: "running", source_collection_progress: { state: "running", repository_count: 113, completed_repository_count: 90, failed_count: 0, partial_count: 0, retained_repository_count: 90, retry_repository_count: 23, refreshed_repository_count: 0, resume_pending: true, retry_after_seconds: 0, updated_at: "2026-10-20T00:03:00Z" } };
+    return { status: "started", connection_id: id };
+  };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  await click(button("Retry incomplete repositories only"));
+  assert.deepEqual(submissions, [{ id: row.id, retryOf: row.last_source_collection!.job_id }]);
+  assert.match(container.textContent ?? "", /0 of 23 affected repositories retried/);
+  assert.match(container.textContent ?? "", /90 earlier complete results.*without new provider reads/);
+  assert.equal(calls.attaches.length, 0);
+  assert.equal(calls.native, 0);
+  assert.equal(calls.disable, 0);
+});
+
+test("GitHub terminal recovery distinguishes fresh evidence from retained history", async () => {
+  const row: Connection = { ...detailFixture("github", false), source_collection_state: "idle",
+    last_source_collection: { connection_id: "github-source", state: "partial", completed_at: "2026-10-20T00:03:00Z", repository_count: 113, completed_repository_count: 113, failed_count: 0, partial_count: 4, repositories: [], retained_repository_count: 90, retry_repository_count: 23, refreshed_repository_count: 23 } };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  const result = container.querySelector('[aria-label="GitHub collection result"]')!;
+  assert.match(result.textContent ?? "", /90 earlier complete results retained without new provider reads.*23 repositories refreshed/);
+  assert.match(result.textContent ?? "", /Retained evidence keeps its original collection time/);
+});
+
 for (const state of ["complete", "partial", "failed"] as const) {
   test(`GitHub terminal ${state} result is not inferred from healthy access or zero counters`, async () => {
     const row: Connection = {

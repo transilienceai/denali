@@ -333,12 +333,38 @@ class WalkingApp(AppClient):
             return super().installation_request(method, path, token=token, **kwargs)
         self.requests.append(path)
         self.tree_parameters.append(kwargs.get("params"))
-        if kwargs.get("params") == {"recursive": "1"}:
+        if kwargs.get("params") == {"recursive": "1"} and path.endswith(COMMIT):
             return Response(
-                {"truncated": not self.oversized, "tree": [{}] * 20_001 if self.oversized else []}
+                {
+                    "truncated": not self.oversized,
+                    "tree": (
+                        [
+                            {"path": f"manual-{index}.pdf", "type": "blob", "mode": "100644"}
+                            for index in range(20_001)
+                        ]
+                        + [
+                            {
+                                "path": "stack.ts",
+                                "type": "blob",
+                                "mode": "100644",
+                                "sha": BLOB,
+                                "size": len(SOURCE.encode()),
+                            },
+                            {
+                                "path": "src/handler.ts",
+                                "type": "blob",
+                                "mode": "100644",
+                                "sha": HANDLER_BLOB,
+                                "size": len(HANDLER.encode()),
+                            },
+                        ]
+                        if self.oversized
+                        else []
+                    ),
+                }
             )
-        assert "params" not in kwargs, "Non-recursive reads must omit the recursive parameter"
         if path.endswith(COMMIT):
+            assert "params" not in kwargs, "Non-recursive reads must omit recursive"
             return Response(
                 {
                     "sha": self.ROOT,
@@ -385,7 +411,9 @@ def test_large_or_truncated_recursive_tree_uses_bounded_pruned_immutable_walk(ov
     result = run(GitHubRepositoryCollector(app), checkpoint)
     assert result["state"] == "complete"
     assert result["repositories"][0]["files"] == 2
-    assert app.tree_parameters == [{"recursive": "1"}, None, None]
+    assert app.tree_parameters == (
+        [{"recursive": "1"}] if oversized else [{"recursive": "1"}, None, {"recursive": "1"}]
+    )
     assert not any(
         path.endswith(sha * 40) for sha in ("1", "2", "3", "4", "5") for path in app.requests
     )
@@ -394,7 +422,13 @@ def test_large_or_truncated_recursive_tree_uses_bounded_pruned_immutable_walk(ov
 
 @pytest.mark.parametrize("path", ["../escape.py", "/escape.py", "a/b.py", ".", "bad\\name.py"])
 def test_tree_walk_rejects_unsafe_child_paths_without_fetching_source(path):
-    app = WalkingApp(
+    class NonrecursiveChildApp(WalkingApp):
+        def installation_request(self, method, path, *, token, **kwargs):
+            if path.endswith(self.CHILD) and "params" in kwargs:
+                return Response({"sha": self.CHILD, "truncated": True, "tree": []})
+            return super().installation_request(method, path, token=token, **kwargs)
+
+    app = NonrecursiveChildApp(
         bad_child={
             "path": path,
             "type": "blob",

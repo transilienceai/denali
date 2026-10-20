@@ -396,7 +396,7 @@ def test_shared_github_reference_jobs_are_durable_without_provider_secrets(repos
         repo.connection_collection_status(tenant, connection_id, collection_kind="github_source")[
             "last_result"
         ]
-        == result
+        == {**result, "job_id": str(job["id"])}
     )
 
 
@@ -471,7 +471,7 @@ def test_shared_github_subset_binding_jobs_and_local_lifecycle_are_independent(r
         repo.connection_collection_status(tenant, local_id, collection_kind="github_source")[
             "last_result"
         ]
-        == result
+        == {**result, "job_id": str(subset_job["id"])}
     )
     assert repo.disable_connection(other, local_id) is None
     assert repo.delete_connection(other, local_id) == "not_found"

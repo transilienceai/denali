@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Improve internal immutable GitHub tree acquisition and non-executing static analysis, preserving explicit unknown/bounded outcomes. Add an authenticated admin browser-only retry_of checkpoint recovery on the existing collection route. The server derives incomplete repositories and validates the unchanged full saved connection boundary; the browser cannot submit repository selections. Existing public named collection/job/results projections, permissions, scopes and idempotency remain unchanged.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "Existing full-collection CLI/MCP requests and login scopes are unchanged. Historical checkpoint recovery is intentionally an authenticated browser workflow, not a new public parameter or typed command."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "No Platform adapter/schema/source or cross-application permission change is required. Denali continues owning analysis and durable provider execution."
+  }
+}

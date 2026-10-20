@@ -80,6 +80,58 @@ class GatewayConnectionJobCooldown(Exception):
     """A fresh gateway job is too soon after the previous completed action."""
 
 
+def _github_incomplete_retry_seed(
+    tenant_id: str, target: dict[str, Any], previous: dict[str, Any] | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Retain historical complete results without changing the saved connection.
+
+    Called under the provider row lock. The full installation/scope/repository
+    identity must still match; client-provided repository lists are never used.
+    Affected repositories have no retained pin, so the retry reads their current
+    default revision. Retained results are explicitly historical, not fresh reads.
+    """
+    from copy import deepcopy
+
+    from denali.connectors.github_repository import (
+        _validated_checkpoint,
+        github_collection_boundary_hash,
+    )
+
+    if not previous:
+        raise ValueError("no compatible collection checkpoint")
+    selected = target.get("configuration", {}).get("repositories", [])
+    try:
+        saved = _validated_checkpoint(
+            previous, github_collection_boundary_hash(tenant_id, target), selected
+        )
+    except (ValueError, RuntimeError) as error:
+        raise ValueError("no compatible collection checkpoint") from error
+    retained = {
+        key: deepcopy(value) for key, value in saved["repositories"].items()
+        if value.get("result", {}).get("state") == "complete"
+    }
+    if len(retained) == len(selected):
+        raise ValueError("no incomplete repositories")
+    retained_ids = sorted(int(key) for key in retained)
+    checkpoint = {
+        "boundary_hash": saved["boundary_hash"],
+        "repository_count": len(selected),
+        "repositories": retained,
+        "retained_repository_ids": retained_ids,
+    }
+    result = {
+        "connection_id": str(target["id"]), "state": "running",
+        "repository_count": len(selected), "selected_repository_count": len(selected),
+        "completed_repository_count": len(retained),
+        "repositories": [value["result"] for value in retained.values()],
+        "failed_count": 0, "partial_count": 0,
+        "retained_repository_count": len(retained),
+        "retry_repository_count": len(selected) - len(retained),
+        "refreshed_repository_count": 0,
+    }
+    return checkpoint, result
+
+
 def _collection_checkpoint_json(value: dict[str, Any]) -> str:
     if not isinstance(value, dict):
         raise ValueError("collection checkpoint must be an object")
@@ -104,6 +156,8 @@ def _collection_progress(active: dict[str, Any] | None) -> dict[str, Any] | None
         return None
     result = active["result"]
     progress: dict[str, Any] = {"state": "running"}
+    if active.get("id") is not None:
+        progress["job_id"] = str(active["id"])
     for key in (
         "repository_count",
         "completed_repository_count",
@@ -111,6 +165,9 @@ def _collection_progress(active: dict[str, Any] | None) -> dict[str, Any] | None
         "partial_count",
         "github_requests",
         "github_request_limit",
+        "retained_repository_count",
+        "retry_repository_count",
+        "refreshed_repository_count",
     ):
         value = result.get(key)
         if type(value) is int and 0 <= value <= 50_000_000:
@@ -3345,20 +3402,51 @@ class PostgresInventoryRepository:
         connection_id: str,
         *,
         collection_kind: str,
+        retry_incomplete: bool = False,
+        retry_of: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         """Create one durable active collection job for a connection and collection kind."""
 
+        if type(retry_incomplete) is not bool or (
+            retry_incomplete and collection_kind != "github_source"
+        ):
+            raise ValueError("incomplete retry is available only for GitHub source collection")
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
                 target = connection.execute(
                     """
-                    SELECT lifecycle_state FROM provider_connection
+                    SELECT * FROM provider_connection
                     WHERE tenant_id = %s::uuid AND id = %s::uuid FOR UPDATE
                     """,
                     (tenant_id, connection_id),
                 ).fetchone()
                 if target is None or target["lifecycle_state"] != "active":
                     raise ValueError("connection is no longer active")
+                checkpoint: dict[str, Any] = {}
+                initial_result: dict[str, Any] = {}
+                if retry_incomplete:
+                    active = connection.execute(
+                        """SELECT * FROM connection_collection_job
+                           WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                             AND collection_kind = 'github_source'
+                             AND state IN ('queued', 'running') LIMIT 1""",
+                        (tenant_id, connection_id),
+                    ).fetchone()
+                    if active is not None:
+                        return dict(active), False
+                    previous = connection.execute(
+                        """SELECT id, checkpoint FROM connection_collection_job
+                           WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                             AND collection_kind = 'github_source'
+                             AND state IN ('succeeded', 'failed')
+                           ORDER BY created_at DESC, id DESC LIMIT 1""",
+                        (tenant_id, connection_id),
+                    ).fetchone()
+                    if previous is None or str(previous["id"]) != retry_of:
+                        raise ValueError("retry result is no longer current")
+                    checkpoint, initial_result = _github_incomplete_retry_seed(
+                        tenant_id, dict(target), previous["checkpoint"]
+                    )
                 connection.execute(
                     """
                     UPDATE connection_collection_job
@@ -3380,14 +3468,16 @@ class PostgresInventoryRepository:
                 row = connection.execute(
                     """
                     INSERT INTO connection_collection_job
-                      (tenant_id, connection_id, collection_kind)
-                    VALUES (%s::uuid, %s::uuid, %s)
+                      (tenant_id, connection_id, collection_kind, checkpoint, result)
+                    VALUES (%s::uuid, %s::uuid, %s, %s::jsonb, %s::jsonb)
                     ON CONFLICT (tenant_id, connection_id, collection_kind)
                       WHERE state IN ('queued', 'running')
                     DO NOTHING
                     RETURNING *
                     """,
-                    (tenant_id, connection_id, collection_kind),
+                    (tenant_id, connection_id, collection_kind,
+                     _collection_checkpoint_json(checkpoint),
+                     _collection_checkpoint_json(initial_result)),
                 ).fetchone()
                 if row is not None:
                     return dict(row), True
@@ -3907,7 +3997,7 @@ class PostgresInventoryRepository:
             )
             active = connection.execute(
                 """
-                SELECT result, available_at, updated_at, continuation_count, state
+                SELECT id, result, available_at, updated_at, continuation_count, state
                 FROM connection_collection_job
                 WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
                   AND collection_kind = %s AND state IN ('queued', 'running')
@@ -3917,7 +4007,7 @@ class PostgresInventoryRepository:
             ).fetchone()
             latest = connection.execute(
                 """
-                SELECT state, result, error_summary, completed_at
+                SELECT id, state, result, error_summary, completed_at
                 FROM connection_collection_job
                 WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
                   AND collection_kind = %s AND state IN ('succeeded', 'failed')
@@ -3928,6 +4018,8 @@ class PostgresInventoryRepository:
         last_result: dict[str, Any] | None = None
         if latest is not None:
             last_result = dict(latest["result"] or {})
+            if collection_kind == "github_source":
+                last_result["job_id"] = str(latest["id"])
             last_result.setdefault("state", "failed" if latest["state"] == "failed" else "complete")
             if collection_kind == "github_source" and latest["state"] == "failed":
                 last_result["state"] = "failed"

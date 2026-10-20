@@ -19,11 +19,12 @@ export function githubSourceCollectionProgress(connection: Connection) {
   const total = progress ? count(progress.repository_count) : connection.configuration.repositories?.length ?? 0;
   const counts = githubSourceCollectionCounts({ repository_count: total, completed_repository_count: progress?.completed_repository_count ?? 0, failed_count: progress?.failed_count ?? 0, partial_count: progress?.partial_count ?? 0 });
   const { processed, remaining } = counts;
+  const retained = Math.min(processed, count(progress?.retained_repository_count));
   const retryAfter = count(progress?.retry_after_seconds);
   const waiting = retryAfter > 0;
   const finalizing = total > 0 && remaining === 0;
   const title = waiting ? "Waiting for GitHub quota" : finalizing ? "Finalizing GitHub source collection" : "GitHub source collection is continuing";
-  const summary = total > 0 ? `${processed} of ${total} repositories processed` : "Preparing the saved repository selection";
+  const summary = retained > 0 ? `${processed - retained} of ${total - retained} affected repositories retried` : total > 0 ? `${processed} of ${total} repositories processed` : "Preparing the saved repository selection";
   const queue = total > 0 ? `${remaining} ${remaining === 1 ? "repository remains" : "repositories remain"} queued.` : "Repository progress will be available after the first batch.";
   const cooldown = retryAfter < 60 ? `${retryAfter} seconds` : `${Math.ceil(retryAfter / 60)} minutes`;
   const detail = waiting
@@ -31,5 +32,6 @@ export function githubSourceCollectionProgress(connection: Connection) {
     : finalizing
       ? "Every selected repository has a recorded outcome. Denali is finalizing the durable run; collection is not complete yet."
       : `${queue} Denali processes the saved selection in resumable batches. Progress refreshes automatically, and it is safe to leave and return.`;
-  return { title, summary, detail, ...counts, waiting, updatedAt: progress?.updated_at ?? null };
+  const retryDetail = retained > 0 ? `${retained} earlier complete results are retained without new provider reads or refreshed timestamps. ${detail}` : detail;
+  return { title, summary, detail: retryDetail, ...counts, waiting, updatedAt: progress?.updated_at ?? null };
 }
