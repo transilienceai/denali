@@ -1928,6 +1928,17 @@ def create_app(
                 if call_id:
                     repo.set_connection_collection_call_id(job_id, call_id)
             except Exception as error:
+                if collection_kind == "github_source":
+                    # Dispatch may have succeeded before its acknowledgement or
+                    # call-ID write failed. Preserve the durable job for the
+                    # GitHub reconciler rather than failing a live worker.
+                    logger.warning(
+                        "GitHub initial collection dispatch is unconfirmed (%s)",
+                        type(error).__name__,
+                        extra={"tenant_id": current_tenant, "connection_id": connection_id,
+                               "job_id": job_id, "error_type": type(error).__name__},
+                    )
+                    return {"status": "started", "connection_id": connection_id}
                 fail_job = getattr(repo, "fail_connection_collection_job", None)
                 if fail_job is not None:
                     fail_job(job_id, "Unable to dispatch collection worker.")
@@ -1944,6 +1955,9 @@ def create_app(
                 repo,
                 {collection_kind: collector},
                 job_id,
+                # Local Compose has no Modal continuation reconciler. Retain
+                # its bounded single-run collector; hosted uses the dispatcher.
+                resumable_github=False,
             )
         return {"status": "started", "connection_id": connection_id}
 
@@ -6199,6 +6213,15 @@ def create_app(
                     else:
                         repo.set_connection_collection_call_id(job_id, call_id)
             except Exception as error:
+                if job_type == "collection" and collection_kind == "github_source":
+                    logger.warning(
+                        "GitHub gateway collection dispatch is unconfirmed (%s)",
+                        type(error).__name__,
+                        extra={"tenant_id": current_tenant,
+                               "connection_id": str(connection_id), "job_id": job_id,
+                               "error_type": type(error).__name__},
+                    )
+                    return result
                 if job_type == "validation":
                     repo.fail_connection_validation_job(
                         job_id, "Unable to dispatch validation worker."
@@ -7195,6 +7218,7 @@ def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]
     result["validation_state"] = _connection_validation_state(request, tenant_id, str(result["id"]))
     result["source_collection_state"] = "idle"
     result["last_source_collection"] = None
+    result["source_collection_progress"] = None
     result["evidence_collection_state"] = "idle"
     result["last_evidence_collection"] = None
     result["deployment_collection_state"] = "idle"
@@ -7222,6 +7246,8 @@ def _with_validation_state(request: Request, tenant_id: str, row: dict[str, Any]
         )
         result[f"{field_prefix}_collection_state"] = status["state"]
         result[f"last_{field_prefix}_collection"] = status["last_result"]
+        if field_prefix == "source":
+            result["source_collection_progress"] = status.get("progress")
         runtime_kind = {
             "aws": ("aws.agent_runtime_activity", "aws_agent_runtime"),
             "azure": ("azure.agent_runtime_activity", "azure_agent_runtime"),

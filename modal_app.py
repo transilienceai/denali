@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -62,6 +63,7 @@ shasta_bridge_secrets = [
     modal.Secret.from_name(SHASTA_BRIDGE_SECRET_NAME),
 ]
 app = modal.App(APP_NAME)
+logger = logging.getLogger(__name__)
 
 
 def _region_options() -> dict[str, str]:
@@ -215,7 +217,15 @@ def _queue_collection(repository, tenant_id: str, connection_id: str, kind: str)
     try:
         call = collection_worker.spawn(job_id)
         repository.set_connection_collection_call_id(job_id, call.object_id)
-    except Exception:
+    except Exception as error:
+        if kind == "github_source":
+            logger.warning(
+                "GitHub automatic collection dispatch is unconfirmed (%s)",
+                type(error).__name__,
+                extra={"tenant_id": tenant_id, "connection_id": connection_id,
+                       "job_id": job_id, "error_type": type(error).__name__},
+            )
+            return
         repository.fail_connection_collection_job(
             job_id, "Unable to dispatch automatic collection worker."
         )
@@ -347,6 +357,7 @@ def collection_worker(job_id: str) -> None:
         },
         job_id,
         on_succeeded=_after_collection_succeeded,
+        dispatch_continuation=_dispatch_collection,
     )
 
 
@@ -377,6 +388,27 @@ def _after_collection_succeeded(
 def _dispatch_collection(job_id: str) -> str:
     call = collection_worker.spawn(job_id)
     return call.object_id
+
+
+@app.function(
+    image=image,
+    secrets=runtime_secrets,
+    schedule=modal.Period(minutes=1),
+    timeout=300,
+    retries=0,
+    **_region_options(),
+)
+def resume_github_source_collections() -> dict[str, int]:
+    """Recover committed continuations; never perform provider reads in a scheduler."""
+
+    from denali.api.collection import queue_due_github_collection_jobs
+    from denali.store.repository import PostgresInventoryRepository
+
+    return queue_due_github_collection_jobs(
+        PostgresInventoryRepository(os.environ["DENALI_DSN"]),
+        _dispatch_collection,
+        limit=100,
+    )
 
 
 @app.function(

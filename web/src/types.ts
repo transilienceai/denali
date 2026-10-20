@@ -210,6 +210,7 @@ export type Connection = {
   };
   validation_state?: "idle" | "running";
   source_collection_state?: "idle" | "running";
+  source_collection_progress?: GitHubSourceCollectionProgress | null;
   last_source_collection?: GitHubSourceCollection | null;
   evidence_collection_state?: "idle" | "running";
   last_evidence_collection?: EntraEvidenceCollection | null;
@@ -351,10 +352,25 @@ export type GitHubSourceCollection = {
   state: "complete" | "partial" | "failed";
   completed_at: string;
   repository_count: number;
+  completed_repository_count?: number;
   failed_count: number;
   partial_count: number;
   repositories: GitHubSourceCollectionRepository[];
   detail?: string;
+};
+
+// Active durable progress is separate from the last terminal collection result.
+// A saved checkpoint or provider cooldown never proves complete source coverage.
+export type GitHubSourceCollectionProgress = {
+  state: "running";
+  repository_count: number;
+  completed_repository_count: number;
+  failed_count: number;
+  partial_count: number;
+  repositories?: GitHubSourceCollectionRepository[];
+  resume_pending: boolean;
+  retry_after_seconds: number;
+  updated_at: string;
 };
 
 export type GcpDeploymentCollection = {

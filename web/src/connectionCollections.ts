@@ -18,14 +18,20 @@ export function collectionResult(connection: Connection, kind: ConnectionCollect
   return connection[`last_${kind}_collection`] ?? null;
 }
 
+function resultComplete(result: ReturnType<typeof collectionResult>) {
+  return result?.state === "complete" && !("repository_count" in result
+    && result.completed_repository_count !== undefined
+    && result.completed_repository_count < result.repository_count);
+}
+
 export function connectionCollectionStatus(connection: Connection, kinds = selectedCollectionKinds(connection)) {
   const results = kinds.map((kind) => collectionResult(connection, kind));
   const running = kinds.some((kind) => connection[`${kind}_collection_state`] === "running");
   return {
     running,
     hasResults: results.some((result) => result !== null),
-    complete: !running && kinds.length > 0 && results.every((result) => result?.state === "complete"),
-    attention: !running && results.some((result) => result && result.state !== "complete"),
+    complete: !running && kinds.length > 0 && results.every(resultComplete),
+    attention: !running && results.some((result) => result && !resultComplete(result)),
   };
 }
 
