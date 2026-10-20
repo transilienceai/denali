@@ -22,6 +22,13 @@ import yaml
 
 from denali.connectors.repository import MAX_SOURCE_BYTES, RepositoryConnector, _source_files
 from denali.connectors.repository_posture import _balanced_object_end, _line
+from denali.connectors.static_deployment_values import (
+    StaticResolutionLimit,
+    StaticValue,
+    cloudformation_document,
+    cloudformation_value,
+)
+from denali.connectors.static_javascript_strings import javascript_string_property
 from denali.domain import (
     AssertionType,
     AssetAssertion,
@@ -194,6 +201,8 @@ class DeploymentDeclaration:
     entry: str | None = None
     build_context: str | None = None
     build_file: str | None = None
+    unresolved_fields: tuple[str, ...] = ()
+    resolution_state: str = "literal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,6 +451,15 @@ def _candidate_observation(
 ) -> dict[str, Any]:
     """Record correlation disposition without manufacturing a deployment edge."""
 
+    unresolved_name = bool(set(declaration.unresolved_fields) - {"account_id", "region"})
+    resolution = {
+        "resolution_state": declaration.resolution_state,
+        "unresolved_fields": list(declaration.unresolved_fields),
+        "resolution_detail": (
+            "Deployment-time values are not statically known; "
+            "no deployment relationship is inferred."
+        ),
+    } if declaration.unresolved_fields else {}
     return {
         "status": status,
         "provider": declaration.identity.provider,
@@ -449,10 +467,11 @@ def _candidate_observation(
         "deployment_framework": declaration.framework,
         "service": declaration.service,
         "construct_id": declaration.construct_id,
-        "deployment_identifier": declaration.deployment_name,
+        "deployment_identifier": "" if unresolved_name else declaration.deployment_name,
         "source_path": declaration.path,
         "source_line": declaration.line,
         "match_basis": _match_basis(declaration),
+        **resolution,
         "matched_workload_count": len(matches),
         "matched_workloads": [
             item.natural_key for item in matches[:_MAX_CANDIDATE_MATCHES]
@@ -500,7 +519,7 @@ def _deployment_declarations(
             )
             continue
         body = text[object_start : object_end + 1]
-        function_name = _literal_property(body, "functionName")
+        function_name = javascript_string_property(text, object_start, object_end, "functionName")
         if function_name is None:
             warnings.append(
                 f"{relative}:{_line(text, match.start())}: Lambda functionName is not literal"
@@ -999,11 +1018,13 @@ def _aws_deployment_identity(
 def _aws_cloudformation_json_declarations(
     text: str, relative: str
 ) -> tuple[list[DeploymentDeclaration], list[str]]:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
+    if not re.search(r'"Resources"\s*:', text):
         return [], []
-    if not isinstance(payload, dict) or not isinstance(payload.get("Resources"), dict):
+    try:
+        payload = cloudformation_document(text, json_input=True)
+    except ValueError:
+        return [], [f"{relative}:1: CloudFormation template could not be statically parsed"]
+    if payload is None:
         return [], []
     metadata = payload.get("Metadata")
     denali = metadata.get("Denali") if isinstance(metadata, dict) else None
@@ -1015,6 +1036,7 @@ def _aws_cloudformation_json_declarations(
         region=region,
         relative=relative,
         framework="sam_cloudformation",
+        mappings=payload.get("Mappings"),
     )
 
 
@@ -1025,6 +1047,7 @@ def _aws_template_resources(
     region: Any,
     relative: str,
     framework: str,
+    mappings: Any = None,
 ) -> tuple[list[DeploymentDeclaration], list[str]]:
     output: list[DeploymentDeclaration] = []
     warnings: list[str] = []
@@ -1049,40 +1072,60 @@ def _aws_template_resources(
         if not isinstance(logical_id, str) or not isinstance(resource, dict):
             continue
         resource_type = resource.get("Type")
-        if resource_type not in supported:
+        if not isinstance(resource_type, str) or resource_type not in supported:
             continue
         service, runtime_kind, property_name, identifier_name = supported[resource_type]
         properties = resource.get("Properties")
-        name = properties.get(property_name) if isinstance(properties, dict) else None
-        if (
-            not isinstance(account_id, str)
-            or re.fullmatch(r"[0-9]{12}", account_id) is None
-            or not isinstance(region, str)
-            or not region
-            or not isinstance(name, str)
-            or not name
-        ):
-            warnings.append(
-                f"{relative}:1: SAM/CloudFormation Metadata.Denali AccountId/Region and "
-                f"{logical_id} {property_name} must all be literal"
+        known = {}
+        try:
+            account = cloudformation_value(account_id, mappings=mappings)
+            location = cloudformation_value(region, mappings=mappings)
+            if account.value and re.fullmatch(r"[0-9]{12}", account.value):
+                known["AWS::AccountId"] = account.value
+            if location.value and re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-[0-9]+", location.value):
+                known["AWS::Region"] = location.value
+            name = cloudformation_value(
+                properties.get(property_name) if isinstance(properties, dict) else None,
+                bindings=known, mappings=mappings,
             )
-            continue
+        except StaticResolutionLimit:
+            warnings.append(
+                f"{relative}:1: CloudFormation static expression resolution limit reached"
+            )
+            account = location = name = StaticValue(None)
+            known = {}
+        unresolved = tuple(
+            field for field, resolved in (
+                ("account_id", known.get("AWS::AccountId")),
+                ("region", known.get("AWS::Region")),
+                (identifier_name, name.value),
+            ) if resolved is None
+        )
+        identity = (
+            DeploymentIdentity("aws", runtime_kind, (
+                DeploymentIdentifier("cloudformation_logical_id", logical_id,
+                                     evidence_basis="literal_cloudformation_logical_id"),
+            )) if unresolved else _aws_deployment_identity(
+                account_id=known["AWS::AccountId"], region=known["AWS::Region"],
+                runtime_kind=runtime_kind, identifier_name=identifier_name,
+                identifier_value=name.value, identifier_basis=f"literal_aws_{identifier_name}",
+            )
+        )
+        resolution_state = (
+            "ambiguous" if any(item.state == "ambiguous" for item in (account, location, name))
+            else "unknown" if unresolved else "literal"
+        )
         output.append(
             DeploymentDeclaration(
-                identity=_aws_deployment_identity(
-                    account_id=account_id,
-                    region=region,
-                    runtime_kind=runtime_kind,
-                    identifier_name=identifier_name,
-                    identifier_value=name,
-                    identifier_basis=f"literal_aws_{identifier_name}",
-                ),
+                identity=identity,
                 framework=framework,
                 service=service,
                 construct_id=logical_id,
-                deployment_name=name,
+                deployment_name=name.value or logical_id,
                 path=relative,
                 line=1,
+                unresolved_fields=unresolved,
+                resolution_state=resolution_state,
             )
         )
     return output, warnings
@@ -1395,60 +1438,23 @@ def _cloud_run_yaml_declarations(
 def _aws_sam_yaml_declarations(
     text: str, relative: str
 ) -> tuple[list[DeploymentDeclaration], list[str]]:
-    metadata = _yaml_top_level_block(text, "Metadata")
-    resources_block = _yaml_top_level_block(text, "Resources")
-    if resources_block is None:
+    if not re.search(r"(?m)^Resources\s*:", text):
         return [], []
-    denali = _yaml_direct_block(metadata, "Denali") if metadata is not None else None
-    account_id = _yaml_direct_literal(denali, "AccountId") if denali is not None else None
-    region = _yaml_direct_literal(denali, "Region") if denali is not None else None
-    indent = _yaml_direct_indent(resources_block)
-    if indent is None:
+    try:
+        payload = cloudformation_document(text)
+    except ValueError:
+        return [], [f"{relative}:1: CloudFormation template could not be statically parsed"]
+    if payload is None:
         return [], []
-    matches = list(
-        re.finditer(
-            rf"(?m)^ {{{indent}}}(?P<logical>[A-Za-z0-9]+):\s*(?:#.*)?$",
-            resources_block,
-        )
-    )
-    resources: dict[str, Any] = {}
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(resources_block)
-        resource_block = resources_block[match.end() : end]
-        resource_type = _yaml_direct_literal(resource_block, "Type")
-        properties = _yaml_direct_block(resource_block, "Properties")
-        if resource_type is None:
-            continue
-        property_values: dict[str, str] = {}
-        if properties is not None:
-            for key in ("FunctionName", "Family", "Name", "EndpointName"):
-                value = _yaml_direct_literal(properties, key)
-                if value is not None:
-                    property_values[key] = value
-        resources[match.group("logical")] = {
-            "Type": resource_type,
-            "Properties": property_values,
-        }
-    if not any(
-        isinstance(item, dict)
-        and str(item.get("Type", "")).startswith(
-            (
-                "AWS::Serverless::",
-                "AWS::Lambda::",
-                "AWS::ECS::",
-                "AWS::EKS::",
-                "AWS::SageMaker::",
-            )
-        )
-        for item in resources.values()
-    ):
-        return [], []
+    metadata = payload.get("Metadata")
+    denali = metadata.get("Denali") if isinstance(metadata, dict) else None
     return _aws_template_resources(
-        resources,
-        account_id=account_id,
-        region=region,
+        payload["Resources"],
+        account_id=denali.get("AccountId") if isinstance(denali, dict) else None,
+        region=denali.get("Region") if isinstance(denali, dict) else None,
         relative=relative,
         framework="sam_cloudformation",
+        mappings=payload.get("Mappings"),
     )
 
 
@@ -2017,6 +2023,8 @@ def _import_chain(path: str, parents: dict[str, str | None]) -> list[str]:
 def _matching_targets(
     declaration: DeploymentDeclaration, targets: tuple[DeploymentTarget, ...]
 ) -> tuple[DeploymentTarget, ...]:
+    if declaration.unresolved_fields:
+        return ()
     matches: list[DeploymentTarget] = []
     for target in targets:
         if declaration.identity.matches(target.identity):

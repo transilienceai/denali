@@ -99,3 +99,14 @@ test("a terminal interrupted run counts only processed repositories, preserving 
   assert.equal(connectionJourney(interrupted)[2]!.state, "attention");
   assert.equal(connectionCollectionStatus({ ...interrupted, last_source_collection: { ...result, state: "complete" } }).complete, false);
 });
+
+test("targeted retry never presents retained historical outcomes as fresh reads", () => {
+  const row = connection({ source_collection_progress: {
+    ...progress, completed_repository_count: 95, retained_repository_count: 90,
+    retry_repository_count: 23, refreshed_repository_count: 5,
+  } });
+  const active = githubSourceCollectionProgress(row)!;
+  assert.equal(active.summary, "5 of 23 affected repositories retried");
+  assert.equal(active.remaining, 18);
+  assert.match(active.detail, /90 earlier complete results.*without new provider reads or refreshed timestamps/);
+});

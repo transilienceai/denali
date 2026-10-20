@@ -42,6 +42,10 @@ MAX_TREE_ENTRIES = 20_000
 MAX_SELECTED_FILES = 2_000
 MAX_BLOB_BYTES = 2_000_000
 MAX_TOTAL_BYTES = 25_000_000
+MAX_JSON_INSPECTION_BYTES = 8_000_000
+MAX_JSON_INSPECTION_TOTAL_BYTES = 256_000_000
+MAX_JSON_STRUCTURE_ITEMS = 100_000
+MAX_JSON_STRUCTURE_DEPTH = 64
 MAX_BLOB_FETCH_WORKERS = 8
 MAX_CONNECTION_REQUESTS = 4_000
 GITHUB_RATE_LIMIT_RESERVE = 500
@@ -233,6 +237,7 @@ class GitHubSnapshot:
     files: tuple[tuple[str, bytes], ...]
     warnings: tuple[str, ...] = ()
     detail: str | None = None
+    ignored_inputs: tuple[tuple[str, int], ...] = ()
 
     @property
     def total_bytes(self) -> int:
@@ -284,6 +289,7 @@ class GitHubRepositoryCollector:
         boundary_hash = github_collection_boundary_hash(tenant_id, connection)
         selected = connection["configuration"]["repositories"]
         saved = _validated_checkpoint(checkpoint, boundary_hash, selected)
+        retained_count = len(saved.get("retained_repository_ids", []))
 
         def fence() -> None:
             if save_checkpoint(deepcopy(saved)) is not True:
@@ -312,6 +318,9 @@ class GitHubRepositoryCollector:
                 "repository_count": len(selected),
                 "selected_repository_count": len(selected),
                 "completed_repository_count": len(completed),
+                "retained_repository_count": retained_count,
+                "retry_repository_count": len(selected) - retained_count,
+                "refreshed_repository_count": len(completed) - retained_count,
                 "failed_count": failed,
                 "partial_count": partial,
                 "github_requests": requests,
@@ -690,13 +699,24 @@ class GitHubRepositoryCollector:
         entries = tree.get("tree")
         if not isinstance(entries, list):
             raise GitHubSourceError("repository_tree_incomplete")
-        if tree.get("truncated") is not False or len(entries) > MAX_TREE_ENTRIES:
-            if resumable and (tree.get("truncated") is True or len(entries) > MAX_TREE_ENTRIES):
+        if resumable:
+            if len(entries) > MAX_TREE_INSPECTED_ENTRIES:
+                raise GitHubSourceError("repository_tree_inspection_limit_exceeded")
+            if tree.get("truncated") is True:
                 entries = self._walk_tree(full_name, commit, token=token, budget=budget)
             elif tree.get("truncated") is not False:
                 raise GitHubSourceError("repository_tree_incomplete")
             else:
-                raise GitHubSourceError("repository_tree_limit_exceeded")
+                # GitHub bounds a recursive response at 100k entries/7 MB. The
+                # analysis bound applies after pruning, not to unrelated PDFs,
+                # dependencies or generated/test trees returned in that page.
+                entries, _, relevant = _validated_tree_page(entries, recursive=True)
+                if relevant > MAX_TREE_ENTRIES:
+                    raise GitHubSourceError("repository_tree_limit_exceeded")
+        elif tree.get("truncated") is not False:
+            raise GitHubSourceError("repository_tree_incomplete")
+        elif len(entries) > MAX_TREE_ENTRIES:
+            raise GitHubSourceError("repository_tree_limit_exceeded")
 
         selected_entries: list[tuple[str, str, int]] = []
         warnings: list[str] = []
@@ -714,13 +734,31 @@ class GitHubRepositoryCollector:
                 raise GitHubSourceError("invalid_blob_identity")
             if not isinstance(size, int) or size < 0:
                 raise GitHubSourceError("repository_blob_limit_exceeded")
-            if size > MAX_BLOB_BYTES:
+            inspection_limit = (
+                MAX_JSON_INSPECTION_BYTES if resumable and _generic_json(path) else MAX_BLOB_BYTES
+            )
+            if size > inspection_limit:
                 warnings.append(f"{path}: larger than {MAX_BLOB_BYTES} bytes")
                 continue
             selected_entries.append((path, sha, size))
 
         eligible_count = len(selected_entries)
         selected_entries.sort(key=lambda item: (_analysis_priority(item[0]), item[0]))
+        if resumable:
+            files, file_warnings, ignored = self._resumable_files(
+                full_name, selected_entries, token=token, budget=budget
+            )
+            return GitHubSnapshot(
+                repository_id=repository_id,
+                repository_name=f"github.com/{full_name}",
+                default_branch=default_branch,
+                commit=commit,
+                remote=f"https://github.com/{full_name}.git",
+                source_locator=f"github://repositories/{repository_id}/commits/{commit}",
+                files=tuple(files),
+                warnings=tuple([*warnings, *file_warnings]),
+                ignored_inputs=(("non_analysis_json", ignored),) if ignored else (),
+            )
         budgeted_entries: list[tuple[str, str, int]] = []
         selected_bytes = 0
         byte_skipped = 0
@@ -815,29 +853,146 @@ class GitHubRepositoryCollector:
             warnings=tuple(warnings),
         )
 
+    def _resumable_files(
+        self,
+        full_name: str,
+        entries: list[tuple[str, str, int]],
+        *,
+        token: str,
+        budget: _GitHubRequestBudget,
+    ) -> tuple[list[tuple[str, bytes]], list[str], int]:
+        """Inspect bounded batches; unrelated JSON never consumes analysis capacity.
+
+        At most two >2MB inspection blobs are live in one eight-item batch.
+        JSON parsing is serial. Only <=2MB relevant inputs enter the <=25MB
+        temporary analysis tree; data-only JSON is dropped, never projected.
+        """
+
+        def fetch(entry: tuple[str, str, int]) -> tuple[str, bytes] | _GitHubRequestBudgetReached:
+            path, sha, size = entry
+            try:
+                blob = self._json(
+                    "GET", f"/repos/{full_name}/git/blobs/{sha}", token=token, budget=budget
+                )
+            except _GitHubRequestBudgetReached as error:
+                return error
+            if blob.get("sha") != sha or blob.get("encoding") != "base64":
+                raise GitHubSourceError("invalid_blob_response")
+            try:
+                encoded = re.sub(r"\s+", "", str(blob.get("content", "")))
+                if len(encoded) > 4 * ((size + 2) // 3):
+                    raise GitHubSourceError("blob_size_mismatch")
+                content = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as error:
+                raise GitHubSourceError("invalid_blob_encoding") from error
+            if len(content) != size:
+                raise GitHubSourceError("blob_size_mismatch")
+            return path, content
+
+        files: list[tuple[str, bytes]] = []
+        warnings: list[str] = []
+        ignored = total = inspected = offset = file_skipped = byte_skipped = 0
+        with ThreadPoolExecutor(max_workers=MAX_BLOB_FETCH_WORKERS) as executor:
+            while offset < len(entries):
+                batch: list[tuple[str, str, int]] = []
+                large = 0
+                while offset < len(entries) and len(batch) < MAX_BLOB_FETCH_WORKERS:
+                    entry = entries[offset]
+                    path, _, size = entry
+                    if size > MAX_BLOB_BYTES and large >= 2:
+                        break
+                    offset += 1
+                    if _generic_json(path):
+                        if inspected + size > MAX_JSON_INSPECTION_TOTAL_BYTES:
+                            warnings.append(f"{path}: JSON inspection byte limit exceeded")
+                            continue
+                        inspected += size
+                    elif len(files) >= MAX_SELECTED_FILES:
+                        file_skipped += 1
+                        continue
+                    elif total + size > MAX_TOTAL_BYTES:
+                        byte_skipped += 1
+                        continue
+                    large += size > MAX_BLOB_BYTES
+                    batch.append(entry)
+                fetched = list(executor.map(fetch, batch))
+                stops = {
+                    item.code for item in fetched if isinstance(item, _GitHubRequestBudgetReached)
+                }
+                if stops:
+                    rate = stops & {"github_rate_limited", "github_rate_limit_reserve_reached"}
+                    raise _GitHubRequestBudgetReached(sorted(rate or stops)[0])
+                for item in fetched:
+                    path, content = item
+                    if _generic_json(path):
+                        relevance = _json_analysis_relevance(content)
+                        if relevance is False:
+                            ignored += 1
+                            continue
+                        if relevance is None:
+                            warnings.append(f"{path}: JSON analysis relevance is unknown")
+                            continue
+                    elif path.lower().endswith(".json"):
+                        try:
+                            bounded = _bounded_json_structure(content.decode("utf-8"))
+                        except UnicodeError:
+                            bounded = False
+                        if not bounded:
+                            warnings.append(f"{path}: JSON structure exceeds safe analysis limits")
+                            continue
+                    if len(content) > MAX_BLOB_BYTES:
+                        warnings.append(f"{path}: larger than {MAX_BLOB_BYTES} bytes")
+                        continue
+                    if len(files) >= MAX_SELECTED_FILES:
+                        file_skipped += 1
+                    elif total + len(content) > MAX_TOTAL_BYTES:
+                        byte_skipped += 1
+                    else:
+                        files.append((path, content))
+                        total += len(content)
+                # Do not retain the previous batch while downloading the next.
+                if fetched:
+                    del item, content
+                del fetched
+        if file_skipped or byte_skipped:
+            warnings.append(
+                "repository analysis budget selected "
+                f"{len(files)} relevant files; {file_skipped} exceeded the file budget and "
+                f"{byte_skipped} exceeded the byte budget"
+            )
+        return files, warnings, ignored
+
     def _walk_tree(
         self, full_name: str, commit: str, *, token: str, budget: _GitHubRequestBudget
     ) -> list[dict[str, Any]]:
-        """Walk immutable non-recursive trees, pruning before requesting child trees."""
+        """Split truncated trees, batching complete immutable subtrees recursively.
 
-        pending = deque([("", commit, 0)])
+        A folder-per-request walk exhausts the tree budget on ordinary monorepos.
+        Try one recursive page for each admitted subtree, splitting only pages
+        GitHub reports truncated. No truncated page is used as complete evidence.
+        """
+
+        pending = deque([("", commit, False)])
         entries: list[dict[str, Any]] = []
         paths: set[str] = set()
         requests = inspected = relevant = 0
         while pending:
             if requests >= MAX_TREE_REQUESTS:
                 raise GitHubSourceError("repository_tree_request_limit_exceeded")
-            prefix, sha, depth = pending.popleft()
+            prefix, sha, recursive = pending.popleft()
             # Omitting recursive is intentional; even recursive=0 enables recursion.
             payload = self._json(
-                "GET", f"/repos/{full_name}/git/trees/{sha}", token=token, budget=budget
+                "GET",
+                f"/repos/{full_name}/git/trees/{sha}",
+                token=token,
+                budget=budget,
+                **({"params": {"recursive": "1"}} if recursive else {}),
             )
             requests += 1
             children = payload.get("tree")
             observed_sha = payload.get("sha")
             if (
-                payload.get("truncated") is not False
-                or not isinstance(children, list)
+                not isinstance(children, list)
                 or not isinstance(observed_sha, str)
                 or not _BLOB_SHA.fullmatch(observed_sha)
                 or (prefix and observed_sha != sha)
@@ -846,58 +1001,22 @@ class GitHubRepositoryCollector:
             inspected += len(children)
             if inspected > MAX_TREE_INSPECTED_ENTRIES:
                 raise GitHubSourceError("repository_tree_inspection_limit_exceeded")
-            for child in children:
-                if not isinstance(child, dict):
-                    raise GitHubSourceError("invalid_tree_entry")
-                name = child.get("path")
-                if (
-                    not isinstance(name, str)
-                    or name in {"", ".", ".."}
-                    or "/" in name
-                    or len(name) > 255
-                    or any(ord(char) < 32 for char in name)
-                    or _safe_repository_path(name) != name
-                ):
-                    raise GitHubSourceError("invalid_tree_path")
-                path = f"{prefix}/{name}" if prefix else name
-                if len(path) > 1024 or path in paths:
-                    raise GitHubSourceError("invalid_tree_path")
-                paths.add(path)
-                kind, mode = child.get("type"), child.get("mode")
-                if kind == "tree":
-                    if mode != "040000":
-                        raise GitHubSourceError("invalid_tree_mode")
-                    if name in _EXCLUDED_PARTS or name.startswith("."):
-                        continue
-                    child_sha = child.get("sha")
-                    if not isinstance(child_sha, str) or not _BLOB_SHA.fullmatch(child_sha):
-                        raise GitHubSourceError("invalid_tree_identity")
-                    if depth >= MAX_TREE_WALK_DEPTH or len(pending) + requests >= MAX_TREE_REQUESTS:
-                        raise GitHubSourceError("repository_tree_request_limit_exceeded")
-                    pending.append((path, child_sha, depth + 1))
-                elif kind == "blob":
-                    if mode == "120000":
-                        continue
-                    if mode not in {"100644", "100755"}:
-                        raise GitHubSourceError("invalid_tree_mode")
-                    if not _eligible_path(path):
-                        continue
-                    child_sha, size = child.get("sha"), child.get("size")
-                    if (
-                        not isinstance(child_sha, str)
-                        or not _BLOB_SHA.fullmatch(child_sha)
-                        or type(size) is not int
-                        or size < 0
-                    ):
-                        raise GitHubSourceError("invalid_blob_identity")
-                    entries.append({**child, "path": path})
-                elif kind == "commit" and mode == "160000":
-                    continue
-                else:
-                    raise GitHubSourceError("invalid_tree_entry")
-                relevant += 1
-                if relevant > MAX_TREE_ENTRIES:
-                    raise GitHubSourceError("repository_tree_limit_exceeded")
+            if payload.get("truncated") is True and recursive:
+                pending.appendleft((prefix, sha, False))
+                continue
+            if payload.get("truncated") is not False:
+                raise GitHubSourceError("repository_tree_incomplete")
+            blobs, directories, count = _validated_tree_page(
+                children, prefix=prefix, recursive=recursive, seen=paths
+            )
+            relevant += count
+            if relevant > MAX_TREE_ENTRIES:
+                raise GitHubSourceError("repository_tree_limit_exceeded")
+            entries.extend(blobs)
+            if not recursive:
+                if len(pending) + len(directories) + requests > MAX_TREE_REQUESTS:
+                    raise GitHubSourceError("repository_tree_request_limit_exceeded")
+                pending.extend((path, child_sha, True) for path, child_sha in directories)
         return entries
 
     def _record_partial_repository(
@@ -969,6 +1088,7 @@ class GitHubRepositoryCollector:
                 file_count=len(snapshot.files),
                 total_bytes=snapshot.total_bytes,
                 source_locator=snapshot.source_locator,
+                ignored_inputs=dict(snapshot.ignored_inputs),
             )
             inventory_batch = RepositoryConnector(root, **metadata).collect(
                 connection_id=connection_id
@@ -1027,6 +1147,9 @@ class GitHubRepositoryCollector:
             "deployment_relationships": correlation_result["relationships"],
             "correlation": summary,
             "coverage": coverage_states,
+            **(
+                {"ignored_inputs": dict(snapshot.ignored_inputs)} if snapshot.ignored_inputs else {}
+            ),
         }
 
     def _json(
@@ -1201,7 +1324,8 @@ def _validated_checkpoint(
         }
     if (
         not {"boundary_hash", "repositories"} <= set(checkpoint)
-        or not set(checkpoint) <= {"boundary_hash", "repositories", "repository_count"}
+        or not set(checkpoint)
+        <= {"boundary_hash", "repositories", "repository_count", "retained_repository_ids"}
         or checkpoint["boundary_hash"] != boundary_hash
         or not isinstance(checkpoint["repositories"], dict)
         or (
@@ -1214,6 +1338,13 @@ def _validated_checkpoint(
     ):
         raise GitHubSourceError("collection_checkpoint_boundary_changed")
     by_id = {str(item["id"]): item for item in selected}
+    retained = checkpoint.get("retained_repository_ids", [])
+    if (
+        not isinstance(retained, list)
+        or any(type(value) is not int or str(value) not in by_id for value in retained)
+        or len(set(retained)) != len(retained)
+    ):
+        raise GitHubSourceError("invalid_collection_checkpoint")
     for key, progress in checkpoint["repositories"].items():
         if (
             key not in by_id
@@ -1246,6 +1377,11 @@ def _validated_checkpoint(
                 raise GitHubSourceError("invalid_collection_checkpoint")
         if "result" in progress:
             _validate_checkpoint_result(progress["result"], by_id[key], progress.get("revision"))
+    if any(
+        checkpoint["repositories"].get(str(value), {}).get("result", {}).get("state") != "complete"
+        for value in retained
+    ):
+        raise GitHubSourceError("invalid_collection_checkpoint")
     normalized = deepcopy(checkpoint)
     normalized["repository_count"] = len(selected)
     return normalized
@@ -1267,7 +1403,16 @@ def _validate_checkpoint_result(
         not isinstance(result, dict)
         or not set(result)
         <= counts
-        | {"repository_id", "repository", "state", "revision", "detail", "coverage", "correlation"}
+        | {
+            "repository_id",
+            "repository",
+            "state",
+            "revision",
+            "detail",
+            "coverage",
+            "correlation",
+            "ignored_inputs",
+        }
         or type(result.get("repository_id")) is not int
         or result["repository_id"] != selected["id"]
         or result.get("repository") != selected["full_name"]
@@ -1318,6 +1463,16 @@ def _validate_checkpoint_result(
     ):
         raise GitHubSourceError("invalid_collection_checkpoint")
     base = {"repository_id", "repository", "state"}
+    ignored = result.get("ignored_inputs", {})
+    if (
+        not isinstance(ignored, dict)
+        or not set(ignored) <= {"non_analysis_json"}
+        or any(
+            type(value) is not int or not 0 <= value <= MAX_TREE_ENTRIES
+            for value in ignored.values()
+        )
+    ):
+        raise GitHubSourceError("invalid_collection_checkpoint")
     if result["state"] == "failed":
         valid = set(result) == base | {"detail"}
     elif result.get("detail") == "github_collection_retry_limit_reached":
@@ -1328,7 +1483,11 @@ def _validate_checkpoint_result(
         )
     else:
         valid = (
-            set(result) == base | counts | {"revision", "coverage", "correlation"}
+            set(result)
+            == base
+            | counts
+            | {"revision", "coverage", "correlation"}
+            | ({"ignored_inputs"} if "ignored_inputs" in result else set())
             and result["revision"] == revision
             and set(coverage) == coverage_keys
             and set(correlation) == correlation_keys
@@ -1437,6 +1596,7 @@ def _source_batch(
     file_count: int = 0,
     total_bytes: int = 0,
     source_locator: str | None = None,
+    ignored_inputs: dict[str, int] | None = None,
 ) -> InventoryBatch:
     observed_at = datetime.now(UTC)
     revision = commit or "unresolved"
@@ -1469,6 +1629,7 @@ def _source_batch(
                     "default_branch": default_branch,
                     "selected_file_count": file_count,
                     "selected_bytes": total_bytes,
+                    **({"ignored_analysis_inputs": ignored_inputs} if ignored_inputs else {}),
                     "collection_state": state.value,
                     "collection_detail": detail,
                 },
@@ -1492,6 +1653,211 @@ def _safe_repository_path(value: Any) -> str | None:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         return None
     return path.as_posix()
+
+
+def _generic_json(path: str) -> bool:
+    name = PurePosixPath(path).name.lower()
+    # These files have consumers independent of their top-level JSON shape.
+    return (
+        name.endswith(".json")
+        and not _is_dependency_manifest(name)
+        and name not in {"mcp.json", "claude_desktop_config.json"}
+        and not name.endswith(".assets.json")
+    )
+
+
+def _json_analysis_relevance(content: bytes) -> bool | None:
+    """False only for valid data JSON outside every supported input shape.
+
+    JSON IaC consumers accept top-level Resources/resources/id at any path.
+    Dependency, MCP and CDK asset filenames bypass this classifier. Preserve
+    conservative AI/provider/MCP configuration shapes anywhere in generic JSON
+    too, rather than treating an unfamiliar filename as proof of irrelevance.
+    Unknown/ambiguous parsing is incomplete, never an ignored successful input.
+    """
+
+    if len(content) > MAX_JSON_INSPECTION_BYTES:
+        return None
+
+    def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("ambiguous JSON")
+            result[key] = value
+        return result
+
+    def invalid_constant(_value: str) -> None:
+        raise ValueError("invalid JSON")
+
+    try:
+        text = content.decode("utf-8")
+        if not _bounded_json_structure(text):
+            return None
+        parsed = json.loads(text, object_pairs_hook=unique_pairs, parse_constant=invalid_constant)
+    except (UnicodeError, ValueError, RecursionError, MemoryError):
+        return None
+    if isinstance(parsed, dict) and {"Resources", "resources", "id"} & parsed.keys():
+        return True
+    configuration_keys = {
+        "mcp",
+        "mcpservers",
+        "mcpconfig",
+        "servers",
+        "provider",
+        "providers",
+        "models",
+        "model",
+        "modelid",
+        "modelname",
+        "llm",
+        "inference",
+        "openai",
+        "anthropic",
+        "bedrock",
+        "vertexai",
+        "azureopenai",
+        "aiconfig",
+        "agents",
+        "agent",
+        "tools",
+        "tool",
+        "dependencies",
+        "devdependencies",
+        "peerdependencies",
+        "optionaldependencies",
+    }
+    pending = [parsed]
+    inspected = 0
+    while pending:
+        inspected += 1
+        if inspected > MAX_TREE_INSPECTED_ENTRIES:
+            return None
+        item = pending.pop()
+        if isinstance(item, dict):
+            if any(re.sub(r"[-_]", "", key).lower() in configuration_keys for key in item):
+                return True
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return False
+
+
+def _bounded_json_structure(text: str) -> bool:
+    """Bound allocation *before* json.loads, without counting string contents.
+
+    Separators, string starts, containers and unquoted atoms conservatively
+    overcount JSON nodes. A small byte payload containing millions of tiny
+    values therefore cannot allocate millions of Python objects first.
+    This is only a safety preflight; the strict decoder still validates JSON.
+    """
+
+    stack: list[str] = []
+    quoted = escaped = atom = False
+    items = 0
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char.isspace():
+            atom = False
+            continue
+        if char == '"':
+            quoted, atom = True, False
+            items += 1
+        elif char in "[{":
+            stack.append(char)
+            if len(stack) > MAX_JSON_STRUCTURE_DEPTH:
+                return False
+            atom = False
+            items += 1
+        elif char in "]}":
+            if not stack or {"[": "]", "{": "}"}[stack.pop()] != char:
+                return False
+            atom = False
+        elif char in ",:":
+            atom = False
+            items += 1
+        elif not atom:
+            atom = True
+            items += 1
+        if items > MAX_JSON_STRUCTURE_ITEMS:
+            return False
+    return not quoted and not stack
+
+
+def _validated_tree_page(
+    children: list[Any],
+    *,
+    prefix: str = "",
+    recursive: bool,
+    seen: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[tuple[str, str]], int]:
+    """Validate a complete tree page before counting analysis-relevant entries."""
+
+    seen = set() if seen is None else seen
+    blobs: list[dict[str, Any]] = []
+    directories: list[tuple[str, str]] = []
+    relevant = 0
+    for child in children:
+        if not isinstance(child, dict):
+            raise GitHubSourceError("invalid_tree_entry")
+        name = child.get("path")
+        if (
+            not isinstance(name, str)
+            or name in {"", ".", ".."}
+            or _safe_repository_path(name) != name
+            or any(ord(char) < 32 for char in name)
+            or (not recursive and "/" in name)
+            or any(len(part) > 255 for part in PurePosixPath(name).parts)
+        ):
+            raise GitHubSourceError("invalid_tree_path")
+        path = f"{prefix}/{name}" if prefix else name
+        parts = PurePosixPath(path).parts
+        if len(path) > 1024 or path in seen:
+            raise GitHubSourceError("invalid_tree_path")
+        if len(parts) > MAX_TREE_WALK_DEPTH + 1:
+            raise GitHubSourceError("repository_tree_request_limit_exceeded")
+        seen.add(path)
+        kind, mode = child.get("type"), child.get("mode")
+        if any(part in _EXCLUDED_PARTS or part.startswith(".") for part in parts[:-1]):
+            continue
+        if kind == "tree":
+            if mode != "040000":
+                raise GitHubSourceError("invalid_tree_mode")
+            if parts[-1] in _EXCLUDED_PARTS or parts[-1].startswith("."):
+                continue
+            sha = child.get("sha")
+            if not isinstance(sha, str) or not _BLOB_SHA.fullmatch(sha):
+                raise GitHubSourceError("invalid_tree_identity")
+            directories.append((path, sha))
+        elif kind == "blob":
+            if mode == "120000":
+                continue
+            if mode not in {"100644", "100755"}:
+                raise GitHubSourceError("invalid_tree_mode")
+            if not _eligible_path(path):
+                continue
+            sha, size = child.get("sha"), child.get("size")
+            if (
+                not isinstance(sha, str)
+                or not _BLOB_SHA.fullmatch(sha)
+                or type(size) is not int
+                or size < 0
+            ):
+                raise GitHubSourceError("invalid_blob_identity")
+            blobs.append({**child, "path": path})
+        elif kind == "commit" and mode == "160000":
+            continue
+        else:
+            raise GitHubSourceError("invalid_tree_entry")
+        relevant += 1
+    return blobs, directories, relevant
 
 
 def _eligible_path(path: str) -> bool:

@@ -99,3 +99,38 @@ a private authenticated browser projection, never the checkpoint itself. Accepta
 job is durably queued even when immediate dispatch acknowledgement is unavailable. Local Compose
 without a Modal dispatcher retains its existing single-run bounded collection path; it does not
 depend on the hosted reconciler.
+
+## Incomplete-result recovery
+
+The authenticated admin browser may submit `retry_of` with the current terminal GitHub job
+identifier to the existing collection route. PostgreSQL locks the tenant-owned provider row,
+validates the complete saved installation/repository/scope boundary against that job's checkpoint,
+and seeds a new job with only its fully complete historical results. Partial, failed and
+unprocessed repositories are reread at their current default revisions. No connection, credential,
+repository selection or provider grant is edited. A stale retry identifier is rejected; active
+requests share the existing job. This recovery requires the hosted durable executor.
+
+The UI distinguishes retained historical results from freshly retried repositories. Retention
+does not refresh old coverage timestamps, ingest old source again, or claim new provider reads.
+Existing full-collection CLI/MCP operations remain unchanged; this checkpoint-recovery option is
+an intentionally browser-only workflow, not a new public gateway parameter or provider capability.
+
+Large complete recursive Git trees are filtered for relevant entries before applying the relevant
+entry bound. Truncated trees are split into immutable recursive subtrees before directory-by-directory
+fallback, retaining request, depth and inspected-entry safety caps. Analysis input selection is
+aligned with supported parsers; unknown or over-limit relevant content remains incomplete.
+Bounded transient inspection can identify valid non-analysis JSON data without persisting it.
+Generic JSON inspection is bounded at 8 MB per file and 256 MB per repository, with lexical
+node/depth preflight before decoding and at most two large inspection blobs in a fetch batch.
+Only relevant inputs under the unchanged 2 MB blob/25 MB aggregate materialization caps reach
+the analyzers; ignored non-analysis JSON is counted explicitly. Unknown, malformed or
+over-inspection-limit JSON remains partial rather than being silently omitted as complete.
+The fallback inspected-entry cap excludes the initial discarded truncated page, itself capped
+at 100,000 entries; it includes every fallback page, including discarded truncated child pages.
+
+Source parsing remains non-executing. Proven legacy Python grammar may be normalized for static
+AST analysis only when the original line mapping is preserved. Genuinely malformed or unsupported
+code remains explicit partial coverage. Valid CloudFormation/SAM declarations without literal
+deployment scope or provider-generated names are recorded as unresolved/unmatched candidates,
+not fabricated deployed identities or evidence relationships. A complete analysis can correctly
+contain such unmatched declarations; it does not prove deployment.

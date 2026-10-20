@@ -18,6 +18,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from denali.connectors.python_source import (
+    MAX_PYTHON_SOURCE_BYTES,
+    PythonSourceError,
+    decode_python_source,
+    parse_python_source,
+)
 from denali.domain import (
     AssertionType,
     AssetAssertion,
@@ -38,7 +44,7 @@ CONNECTOR_ID = "denali.repository"
 CAPABILITIES = ConnectorCapabilities(inventory=True, relationships=True)
 INVENTORY_PLANE = "repository_inventory"
 RELATIONSHIP_PLANE = "repository_relationships"
-MAX_SOURCE_BYTES = 1_000_000
+MAX_SOURCE_BYTES = MAX_PYTHON_SOURCE_BYTES
 
 _EXCLUDED_DIRS = frozenset(
     {
@@ -491,7 +497,16 @@ class RepositoryConnector:
                 if source_file.stat().st_size > MAX_SOURCE_BYTES:
                     warnings.append(f"{relative}: larger than {MAX_SOURCE_BYTES} bytes")
                     continue
-                text = source_file.read_text(encoding="utf-8", errors="replace")
+                text = (
+                    decode_python_source(source_file.read_bytes())
+                    if source_file.suffix == ".py"
+                    else source_file.read_text(encoding="utf-8", errors="replace")
+                )
+            except PythonSourceError as error:
+                warnings.append(
+                    f"{relative}:{error.line}: invalid Python source ({error.category})"
+                )
+                continue
             except OSError as error:
                 warnings.append(f"{relative}: {error.__class__.__name__}")
                 continue
@@ -499,9 +514,11 @@ class RepositoryConnector:
             tree = None
             if source_file.suffix == ".py":
                 try:
-                    tree = ast.parse(text, filename=relative)
-                except SyntaxError as error:
-                    warnings.append(f"{relative}:{error.lineno or 0}: invalid Python syntax")
+                    tree = parse_python_source(text, filename=relative)
+                except PythonSourceError as error:
+                    warnings.append(
+                        f"{relative}:{error.line}: invalid Python syntax ({error.category})"
+                    )
 
             if tree is not None:
                 self._discover_frameworks(

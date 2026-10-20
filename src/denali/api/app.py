@@ -659,6 +659,13 @@ class GatewayCollectJob(GatewayValidateJob):
     collection_kind: GatewayCollectionKind
 
 
+class GitHubCollectionRequest(BaseModel):
+    """Browser recovery of one current result; never a repository selection."""
+
+    model_config = ConfigDict(extra="forbid")
+    retry_of: UUID
+
+
 class RuntimeResponseCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1903,6 +1910,7 @@ def create_app(
         collector: Any,
         unavailable_detail: str,
         dispatch_failure_detail: str,
+        retry_of: str | None = None,
     ) -> dict[str, str] | None:
         connection_id = str(target["id"])
         if collector is None:
@@ -1915,8 +1923,15 @@ def create_app(
                 current_tenant,
                 connection_id,
                 collection_kind=collection_kind,
+                **({"retry_incomplete": True, "retry_of": retry_of} if retry_of else {}),
             )
         except ValueError:
+            if retry_of:
+                raise HTTPException(
+                    status_code=409,
+                    detail="No compatible incomplete result is current. "
+                    "Refresh status or collect all repositories.",
+                ) from None
             raise HTTPException(status_code=409, detail="connection is no longer active") from None
         if not created:
             return {"status": "already_running", "connection_id": connection_id}
@@ -2011,6 +2026,8 @@ def create_app(
         repo: InventoryReader,
         current_tenant: str,
         target: dict[str, Any],
+        *,
+        retry_of: str | None = None,
     ) -> dict[str, str]:
         connection_id = str(target["id"])
         connection_key = (current_tenant, connection_id)
@@ -2025,6 +2042,7 @@ def create_app(
             collector=collector,
             unavailable_detail="GitHub source collection is not configured",
             dispatch_failure_detail="Unable to dispatch GitHub source collection",
+            retry_of=retry_of,
         )
         if durable_result is not None:
             return durable_result
@@ -5415,6 +5433,7 @@ def create_app(
         request: Request,
         background_tasks: BackgroundTasks,
         connection_id: UUID,
+        payload: GitHubCollectionRequest | None = None,
     ) -> dict[str, str]:
         repo, current_tenant = _context(request)
         target = repo.get_connection_validation_target(current_tenant, str(connection_id))
@@ -5427,7 +5446,17 @@ def create_app(
                 status_code=409,
                 detail="complete GitHub App installation before collecting source",
             )
-        return queue_github_collection(request, background_tasks, repo, current_tenant, target)
+        retry_of = str(payload.retry_of) if payload and payload.retry_of else None
+        if retry_of and (
+            request.app.state.collection_dispatcher is None
+            or not callable(getattr(repo, "create_connection_collection_job", None))
+        ):
+            raise HTTPException(
+                status_code=409, detail="Targeted retries require hosted durable collection"
+            )
+        return queue_github_collection(
+            request, background_tasks, repo, current_tenant, target, retry_of=retry_of
+        )
 
     @app.post("/v1/connections/{connection_id}/azure-repos/collect", status_code=202)
     def collect_azure_repos_source(

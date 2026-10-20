@@ -348,6 +348,10 @@ export type GitHubSourceCollectionRepository = {
 };
 
 export type GitHubSourceCollection = {
+  job_id?: string;
+  retained_repository_count?: number;
+  retry_repository_count?: number;
+  refreshed_repository_count?: number;
   connection_id: string;
   state: "complete" | "partial" | "failed";
   completed_at: string;
@@ -362,6 +366,10 @@ export type GitHubSourceCollection = {
 // Active durable progress is separate from the last terminal collection result.
 // A saved checkpoint or provider cooldown never proves complete source coverage.
 export type GitHubSourceCollectionProgress = {
+  job_id?: string;
+  retained_repository_count?: number;
+  retry_repository_count?: number;
+  refreshed_repository_count?: number;
   state: "running";
   repository_count: number;
   completed_repository_count: number;
@@ -867,6 +875,9 @@ export type CodeToCloudCandidate = {
   service: string;
   construct_id: string;
   deployment_identifier: string;
+  resolution_state?: "literal" | "unknown" | "ambiguous";
+  unresolved_fields?: string[];
+  resolution_detail?: string;
   source_path: string;
   source_line: number;
   match_basis: string[];
