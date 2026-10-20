@@ -226,7 +226,7 @@ def test_non_rate_no_progress_restarts_have_a_durable_bound():
     checkpoint, sink = {}, Sink()
     for number in range(3):
         result = run(
-            GitHubRepositoryCollector(AppClient(routes()), max_requests=5), checkpoint, sink=sink
+            GitHubRepositoryCollector(AppClient(routes()), max_requests=4), checkpoint, sink=sink
         )
         assert checkpoint["repositories"]["42"]["interruption_count"] == number + 1
         assert result["resume_pending"] is (number < 2)
