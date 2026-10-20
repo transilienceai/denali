@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Fix internal GitHub acquisition that kept inspecting candidate JSON after analysis capacity was full and repeatedly discarded verified inputs at the local request limit. Oversized repositories now retain bounded, explicitly partial analysis rather than a source-only retry-limit outcome. Provider quota/deadline resumption, immutable identities, tenant fences, connection settings, scopes, permissions and public projections remain unchanged.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "Existing collection and job commands, parameters, login scopes and output contracts are unchanged. No new typed command or CLI release is required."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "No Platform adapter/schema or cross-application access change is needed. This is a generic Denali-owned provider collection fix, not an application-specific Platform enhancement."
+  }
+}

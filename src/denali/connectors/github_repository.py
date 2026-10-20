@@ -756,7 +756,7 @@ class GitHubRepositoryCollector:
                 remote=f"https://github.com/{full_name}.git",
                 source_locator=f"github://repositories/{repository_id}/commits/{commit}",
                 files=tuple(files),
-                warnings=tuple([*warnings, *file_warnings]),
+                warnings=tuple([*file_warnings, *warnings]),
                 ignored_inputs=(("non_analysis_json", ignored),) if ignored else (),
             )
         budgeted_entries: list[tuple[str, str, int]] = []
@@ -868,6 +868,22 @@ class GitHubRepositoryCollector:
         temporary analysis tree; data-only JSON is dropped, never projected.
         """
 
+        def raise_if_external_stop(stops: set[str]) -> None:
+            # Every fetch in this batch has joined. The final successful response
+            # may have observed quota exhaustion after other workers already hit
+            # the local cap; current provider/deadline state outranks those stops.
+            rate = (stops | {budget.blocked_code}) & {
+                "github_rate_limited",
+                "github_rate_limit_reserve_reached",
+            }
+            if rate:
+                raise _GitHubRequestBudgetReached(sorted(rate)[0])
+            if (
+                "github_collection_deadline_reached" in stops
+                or budget.monotonic() >= budget.deadline
+            ):
+                raise _GitHubRequestBudgetReached("github_collection_deadline_reached")
+
         def fetch(entry: tuple[str, str, int]) -> tuple[str, bytes] | _GitHubRequestBudgetReached:
             path, sha, size = entry
             try:
@@ -891,9 +907,19 @@ class GitHubRepositoryCollector:
 
         files: list[tuple[str, bytes]] = []
         warnings: list[str] = []
-        ignored = total = inspected = offset = file_skipped = byte_skipped = 0
+        ignored = total = inspected = offset = file_skipped = byte_skipped = verified = 0
         with ThreadPoolExecutor(max_workers=MAX_BLOB_FETCH_WORKERS) as executor:
             while offset < len(entries):
+                if len(files) >= MAX_SELECTED_FILES:
+                    # No remaining candidate can be materialized, including JSON
+                    # that might be data-only. Do not spend more provider quota
+                    # classifying inputs beyond the declared analysis capacity.
+                    warnings.insert(
+                        0,
+                        "repository analysis file limit reached; "
+                        f"{len(entries) - offset} remaining candidates were not inspected",
+                    )
+                    break
                 batch: list[tuple[str, str, int]] = []
                 large = 0
                 while offset < len(entries) and len(batch) < MAX_BLOB_FETCH_WORKERS:
@@ -920,10 +946,16 @@ class GitHubRepositoryCollector:
                     item.code for item in fetched if isinstance(item, _GitHubRequestBudgetReached)
                 }
                 if stops:
-                    rate = stops & {"github_rate_limited", "github_rate_limit_reserve_reached"}
-                    raise _GitHubRequestBudgetReached(sorted(rate or stops)[0])
+                    raise_if_external_stop(stops)
+                    if stops != {"github_request_budget_reached"}:
+                        raise _GitHubRequestBudgetReached(sorted(stops)[0])
+                batch_verified = 0
                 for item in fetched:
+                    if isinstance(item, _GitHubRequestBudgetReached):
+                        continue
                     path, content = item
+                    verified += 1
+                    batch_verified += 1
                     if _generic_json(path):
                         relevance = _json_analysis_relevance(content)
                         if relevance is False:
@@ -951,14 +983,39 @@ class GitHubRepositoryCollector:
                         files.append((path, content))
                         total += len(content)
                 # Do not retain the previous batch while downloading the next.
+                if batch_verified:
+                    del content
                 if fetched:
-                    del item, content
+                    del item
+                if stops:
+                    # Bounded JSON inspection can itself cross the slice deadline.
+                    raise_if_external_stop(stops)
+                    if not verified:
+                        # An explicitly tiny budget can expire before any source
+                        # input is received. Preserve the existing pin/retry flow.
+                        raise _GitHubRequestBudgetReached("github_request_budget_reached")
+                    not_inspected = (
+                        sum(isinstance(value, _GitHubRequestBudgetReached) for value in fetched)
+                        + len(entries)
+                        - offset
+                    )
+                    warnings.insert(
+                        0,
+                        "GitHub per-repository request safety limit reached "
+                        "(github_request_budget_reached); "
+                        f"{not_inspected} remaining candidates were not inspected",
+                    )
+                    # Unlike a provider cooldown or an elapsed slice, a fixed
+                    # request bound will fail at the same input again. Analyze
+                    # only verified files as explicit partial coverage instead.
+                    break
                 del fetched
         if file_skipped or byte_skipped:
-            warnings.append(
+            warnings.insert(
+                0,
                 "repository analysis budget selected "
                 f"{len(files)} relevant files; {file_skipped} exceeded the file budget and "
-                f"{byte_skipped} exceeded the byte budget"
+                f"{byte_skipped} exceeded the byte budget",
             )
         return files, warnings, ignored
 
@@ -1577,7 +1634,11 @@ def _with_partial_coverage(batch: Any, detail: str) -> Any:
             item.plane,
             (CoverageState.PARTIAL if item.state is CoverageState.COMPLETE else item.state),
             item.scope,
-            "; ".join(part for part in (item.detail, detail) if part)[:4_000],
+            (
+                detail[:1_999] + "; " + item.detail[:1_999]
+                if detail and item.detail
+                else detail or item.detail or ""
+            )[:4_000],
         )
         for item in batch.coverage
     )
