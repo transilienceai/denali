@@ -1,4 +1,7 @@
+from copy import deepcopy
 from typing import Any
+
+import pytest
 
 from denali.connectors.gcp_deployments import (
     CLOUD_FUNCTION_ASSET_TYPE,
@@ -364,6 +367,131 @@ def test_connection_collector_uses_selected_project_number_and_persists_batch() 
     }
     assert result["state"] == "complete"
     assert result["projects"][0]["ai_workloads"] == 1
+
+
+def _isolated_native_target() -> dict[str, Any]:
+    return {
+        "id": "isolated-native-connection",
+        "provider": "gcp",
+        "lifecycle_state": "active",
+        "declared_scopes": ["gcp.code_to_cloud", "gcp.ai_activity"],
+        "credential_reference": {
+            "principal_email": "denali-reader@native-operator.iam.gserviceaccount.com",
+            "operator_project_id": "native-operator",
+            "operator_credential_profile": "native_gcp_wif_v1",
+        },
+        "configuration": {
+            "projects": [
+                {"id": PROJECT, "number": "123456789012", "name": "Selected project"},
+            ]
+        },
+    }
+
+
+def test_native_asset_and_activity_collection_share_the_stored_credential_profile(
+    monkeypatch,
+) -> None:
+    from google.cloud import logging as cloud_logging
+
+    from denali.connectors import gcp_deployments
+
+    monkeypatch.setenv("DENALI_GCP_OPERATOR_PROJECT_ID", "native-operator")
+    monkeypatch.setenv(
+        "DENALI_GCP_NATIVE_WORKLOAD_IDENTITY_PROVIDER",
+        "projects/123456789012/locations/global/workloadIdentityPools/native/providers/modal",
+    )
+    monkeypatch.setenv(
+        "DENALI_GCP_NATIVE_RUNTIME_SERVICE_ACCOUNT",
+        "native-runtime@native-operator.iam.gserviceaccount.com",
+    )
+    assets = []
+    activities = []
+    requests = []
+    logging_clients = []
+    logging_queries = []
+    activity_credential = object()
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"assets": []}
+
+    def request(method, url, **kwargs):
+        requests.append((method, url, kwargs))
+        return Response()
+
+    def asset_request(principal, *, credential_reference=None):
+        assets.append((principal, deepcopy(credential_reference)))
+        return request
+
+    def activity_credentials(principal, *, credential_reference=None):
+        activities.append((principal, deepcopy(credential_reference)))
+        return activity_credential
+
+    class Logs:
+        def list_entries(self, **kwargs):
+            logging_queries.append(kwargs)
+            return []
+
+    monkeypatch.setattr(gcp_deployments, "authorized_gcp_request", asset_request)
+    monkeypatch.setattr(gcp_deployments, "authorized_gcp_credential", activity_credentials)
+    monkeypatch.setattr(
+        cloud_logging,
+        "Client",
+        lambda **kwargs: logging_clients.append(kwargs) or Logs(),
+    )
+
+    class Sink:
+        def __init__(self):
+            self.batches = []
+            self.activity_batches = []
+
+        def ingest(self, tenant, batch):
+            assert tenant == "tenant-isolated"
+            self.batches.append(batch)
+
+        def ingest_activity(self, tenant, batch):
+            assert tenant == "tenant-isolated"
+            self.activity_batches.append(batch)
+
+    target = _isolated_native_target()
+    before = deepcopy(target)
+    sink = Sink()
+    result = GcpConnectionDeploymentCollector().collect(
+        tenant_id="tenant-isolated", connection=target, repository=sink
+    )
+    expected = [(target["credential_reference"]["principal_email"], target["credential_reference"])]
+    assert assets == expected
+    assert activities == expected
+    assert len(requests) == 3
+    assert all(
+        url == f"https://cloudasset.googleapis.com/v1/projects/{PROJECT}/assets"
+        for _method, url, _kwargs in requests
+    )
+    assert logging_clients == [{"project": PROJECT, "credentials": activity_credential}]
+    assert logging_queries[0]["resource_names"] == [f"projects/{PROJECT}"]
+    assert result["state"] == "complete"
+    assert len(sink.batches) == 1
+    assert len(sink.activity_batches) == 1
+    assert target == before
+
+
+@pytest.mark.parametrize("profile", [None, "", "unknown-profile"])
+def test_invalid_native_profile_is_rejected_before_an_injected_asset_factory(
+    monkeypatch,
+    profile,
+) -> None:
+    target = _isolated_native_target()
+    target["credential_reference"]["operator_credential_profile"] = profile
+    calls = []
+    collector = GcpConnectionDeploymentCollector(
+        asset_client_factory=lambda principal: calls.append(principal) or FakeAssetClient({})
+    )
+    with pytest.raises((RuntimeError, ValueError)):
+        collector.collect(tenant_id="tenant-isolated", connection=target, repository=object())
+    assert calls == []
 
 
 def test_ai_inventory_maps_exact_cloud_asset_types_without_raw_resource_payloads() -> None:

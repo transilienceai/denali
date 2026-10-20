@@ -114,6 +114,11 @@ from denali.connections import (
 )
 from denali.connections.aws import render_cloudformation
 from denali.connections.gcp import valid_gcp_project_id
+from denali.connections.gcp_credentials import (
+    NATIVE_GCP_CREDENTIAL_PROFILE,
+    NATIVE_GCP_PROVIDER_ENV,
+    NATIVE_GCP_RUNTIME_ENV,
+)
 from denali.connections.github import valid_github_login
 from denali.connectors.aws_agent_runtime_activity import AwsConnectionAgentRuntimeCollector
 from denali.connectors.aws_deployments import AwsConnectionDeploymentCollector
@@ -7509,7 +7514,20 @@ def _gcp_principal_provisioner_from_environment() -> GcpConnectionPrincipalProvi
     operator_project_id = os.environ.get("DENALI_GCP_OPERATOR_PROJECT_ID")
     if not operator_project_id:
         return None
-    return GcpConnectionPrincipalProvisioner(operator_project_id=operator_project_id)
+    # Defer pair validation to new provisioning. An invalid optional native pair
+    # must not prevent unrelated Workspace or legacy GCP requests from starting.
+    profile = (
+        NATIVE_GCP_CREDENTIAL_PROFILE
+        if any(
+            os.environ.get(key, "").strip()
+            for key in (NATIVE_GCP_PROVIDER_ENV, NATIVE_GCP_RUNTIME_ENV)
+        )
+        else None
+    )
+    return GcpConnectionPrincipalProvisioner(
+        operator_project_id=operator_project_id,
+        operator_credential_profile=profile,
+    )
 
 
 def _github_app_from_environment() -> GitHubAppClient | None:
