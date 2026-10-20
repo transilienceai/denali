@@ -67,7 +67,7 @@ export function connectionJourney(connection?: Connection, phase: ConnectionJour
     && connection.last_validation.results.length === 2
     && connection.last_validation.results.every((result) => result.state === "passed")
     && connection.actions?.collect === true;
-  const verified = (connection?.health_state === "healthy" || exactValidation) && !platformUnavailable;
+  const verified = !validationRunning && (connection?.health_state === "healthy" || exactValidation) && !platformUnavailable;
   const hasBoundary = Boolean(connection && (connection.credential_reference.type.startsWith("platform_shared_") || validationRunning || connection.last_validation || verified));
   const collection = connection ? connectionCollectionStatus(connection) : null;
   const state = (complete: boolean, current: boolean) => complete ? "complete" : current ? "current" : "pending";

@@ -204,12 +204,33 @@ successful attachment focuses its detail region. Read-only detail actions use na
 disabled-control semantics, not pointer-only CSS; setup links are hidden while evidence
 disclosures remain readable. API authorization remains the security boundary.
 
+Native creation selects the returned connection and closes setup in one navigation
+transition; a second close action must not restore the previous query's connection.
+During native AWS validation, an earlier result remains available as a collapsed,
+timestamped historical result, never the outcome of the active retry. Durable running
+state restores that distinction after reload. CloudFormation launches may wait for
+role creation; manual validation checks current access without that wait. Setup must
+preserve existing stacks and roles: use a separate stack and unique role name, and stop
+to review a name collision rather than deleting an existing integration. A custom role
+name also requires Denali's runtime caller policy to permit `sts:AssumeRole` for that
+exact role ARN; ask the operator to review it before launch. Do not automatically widen
+the caller policy. A previous credential pass is historical too: the current response
+does not expose intermediate role proof while validation is running.
+The top-level journey likewise keeps Verify current for every provider during a
+validation rerun, even with earlier healthy or successful exact-resource proof.
+Historical collection outcomes remain visible and are not reset by presentation.
+
 Local visual QA uses `npm --prefix web run dev -- --host 127.0.0.1 --port 3104`, then
 `http://127.0.0.1:3104/tests/fixtures/connector-ui.html`. The fixture uses synthetic
 data, replaces **every** API method and blocks unsupported actions. It is dev-only,
 localhost-only, and is not a production build entrypoint. Query options include
 `provider=azure`, `source=native`, `empty=1`, `slow=1`, `error=1`, `provider_error=1`,
-`member=1` and `theme=light`. These checks prove UI behavior, not hosted provider onboarding or
+`member=1`, `validating=1` and `theme=light`. With a local server on port 3106, use
+`http://127.0.0.1:3106/tests/fixtures/connector-ui.html?source=native&provider=aws&validating=1`
+and close setup to inspect the native AWS detail. Only its synthetic validation state
+is running; the earlier synthetic pass is retained to inspect the collapsed historical
+result and current Verify journey. All other rows stay idle, and all API methods remain
+synthetic or fail closed. These checks prove UI behavior, not hosted provider onboarding or
 authorization. Native/shared scope and identity regression tests remain mandatory.
 
 The October 2026 UI audit reproduced two root causes: text-input sizing was applied
