@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from typing import Any, Protocol
 
 from denali.worker_limits import COLLECTION_WORKER_LEASE_SECONDS
@@ -119,6 +120,8 @@ def run_durable_collection_job(
     lease_seconds: int = COLLECTION_WORKER_LEASE_SECONDS,
     max_attempts: int = 3,
     on_succeeded: Callable[[str, str, str, dict[str, Any]], None] | None = None,
+    dispatch_continuation: Callable[[str], Any] | None = None,
+    resumable_github: bool = True,
 ) -> None:
     """Claim and execute a durable collection job with bounded idempotent retries."""
 
@@ -141,6 +144,29 @@ def run_durable_collection_job(
             collector = collectors.get(collection_kind)
             if collector is None:
                 raise RuntimeError("connection collector is not configured")
+            resumable = getattr(collector, "collect_resumable", None)
+            if resumable_github and collection_kind == "github_source" and callable(resumable):
+                try:
+                    _run_github_collection_slice(
+                        repository,
+                        resumable,
+                        job,
+                        job_id,
+                        target,
+                        max_attempts=max_attempts,
+                        on_succeeded=on_succeeded,
+                        dispatch_continuation=dispatch_continuation,
+                    )
+                except Exception as error:
+                    # A storage outage can also prevent recording a fenced
+                    # failure. Never fall back to the legacy unfenced mutation;
+                    # leave the durable lease for the recovery scheduler.
+                    logger.warning(
+                        "GitHub slice could not persist its claim state (%s)",
+                        type(error).__name__,
+                        extra={"job_id": job_id, "error_type": type(error).__name__},
+                    )
+                return
             result = collector.collect(
                 tenant_id=tenant_id,
                 connection=target,
@@ -163,6 +189,28 @@ def run_durable_collection_job(
                     "error_type": error_type,
                 },
             )
+            if (
+                resumable_github
+                and collection_kind == "github_source"
+                and callable(getattr(repository, "retry_resumable_collection_job", None))
+            ):
+                try:
+                    if repository.collection_job_is_current(job_id, int(job["attempt_count"])):
+                        repository.retry_resumable_collection_job(
+                            job_id,
+                            int(job["attempt_count"]),
+                            "Collection worker could not complete the declared read planes "
+                            f"({error_type}).",
+                            max_attempts=max_attempts,
+                            delay_seconds=30,
+                        )
+                except Exception as storage_error:
+                    logger.warning(
+                        "GitHub slice could not persist its claim state (%s)",
+                        type(storage_error).__name__,
+                        extra={"job_id": job_id, "error_type": type(storage_error).__name__},
+                    )
+                return
             retry = repository.record_connection_collection_failure(
                 job_id,
                 f"Collection worker could not complete the declared read planes ({error_type}).",
@@ -170,3 +218,115 @@ def run_durable_collection_job(
             )
             if not retry:
                 return
+
+
+def _run_github_collection_slice(
+    repository: Any,
+    collect: Callable[..., dict[str, Any]],
+    job: dict[str, Any],
+    job_id: str,
+    target: dict[str, Any],
+    *,
+    max_attempts: int,
+    on_succeeded: Callable[[str, str, str, dict[str, Any]], None] | None,
+    dispatch_continuation: Callable[[str], Any] | None,
+) -> None:
+    """Run one bounded slice under a fenced, recoverable PostgreSQL claim.
+
+    Checkpoints contain immutable identities/revisions and sanitized results, not
+    source content or credentials. Dispatch is an optimization: the periodic
+    reconciler recovers a queued continuation even if spawning is interrupted.
+    """
+
+    tenant_id = str(job["tenant_id"])
+    connection_id = str(job["connection_id"])
+    generation = int(job["attempt_count"])
+    checkpoint = deepcopy(job.get("checkpoint") or {})
+
+    def save_checkpoint(value: dict[str, Any]) -> bool:
+        nonlocal checkpoint
+        if not repository.save_collection_checkpoint(job_id, generation, value):
+            return False
+        checkpoint = deepcopy(value)
+        return True
+
+    try:
+        fenced_repository = repository.for_collection_claim(job_id, generation)
+        result = collect(
+            tenant_id=tenant_id,
+            connection=target,
+            repository=fenced_repository,
+            checkpoint=checkpoint,
+            save_checkpoint=save_checkpoint,
+        )
+        if result.get("resume_pending"):
+            delay = max(0, min(7_200, int(result.get("retry_after_seconds", 0))))
+            queued = repository.defer_connection_collection_job(
+                job_id,
+                generation,
+                checkpoint,
+                result,
+                delay_seconds=delay,
+            )
+            if queued and delay == 0:
+                _dispatch_github_continuation(dispatch_continuation, job_id)
+            return
+        if not repository.collection_job_is_current(job_id, generation):
+            return
+        if on_succeeded is not None:
+            on_succeeded(tenant_id, connection_id, "github_source", result)
+        repository.complete_resumable_collection_job(job_id, generation, result)
+    except Exception as error:
+        if not repository.collection_job_is_current(job_id, generation):
+            return
+        error_type = type(error).__name__
+        logger.warning(
+            "GitHub collection slice failed (%s)",
+            error_type,
+            extra={
+                "tenant_id": tenant_id,
+                "connection_id": connection_id,
+                "job_id": job_id,
+                "collection_kind": "github_source",
+                "error_type": error_type,
+            },
+        )
+        repository.retry_resumable_collection_job(
+            job_id,
+            generation,
+            f"Collection worker could not complete the declared read planes ({error_type}).",
+            max_attempts=max_attempts,
+            delay_seconds=30,
+        )
+
+
+def _dispatch_github_continuation(
+    dispatch: Callable[[str], Any] | None, job_id: str
+) -> bool:
+    if dispatch is None:
+        return False
+    try:
+        dispatch(job_id)
+        return True
+    except Exception as error:
+        # Never terminalize committed work because a delivery acknowledgement was
+        # lost. The reconciler redispatches; generation-fenced claims deduplicate.
+        logger.warning(
+            "GitHub continuation dispatch failed (%s)",
+            type(error).__name__,
+            extra={"job_id": job_id, "error_type": type(error).__name__},
+        )
+        return False
+
+
+def queue_due_github_collection_jobs(
+    repository: Any,
+    dispatch: Callable[[str], Any],
+    *,
+    limit: int = 100,
+) -> dict[str, int]:
+    """Recover due continuations and expired worker leases using durable IDs only."""
+
+    jobs = repository.list_due_github_collection_jobs(limit=limit)
+    queued = sum(_dispatch_github_continuation(dispatch, job_id) for job_id in jobs)
+    return {"eligible": len(jobs), "queued": queued, "failed": len(jobs) - queued}

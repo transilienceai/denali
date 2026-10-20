@@ -1,5 +1,6 @@
 import type { Connection } from "./types";
 import { connectionCollectionStatus } from "./connectionCollections.ts";
+import { githubSourceCollectionProgress } from "./githubSourceCollectionProgress.ts";
 
 export type ConnectionProgressStepState = "complete" | "current" | "pending" | "attention";
 
@@ -71,11 +72,12 @@ export function getConnectionProgress(connection: Connection, busy: string | nul
 
   if (collecting) {
     const validationState: ConnectionProgressStepState = connection.health_state === "healthy" ? "complete" : "attention";
+    const sourceProgress = githubSourceCollectionProgress(connection);
     return {
       phase: "collecting",
       eyebrow: "EVIDENCE COLLECTION IN PROGRESS",
-      title: `${provider} evidence is being collected`,
-      detail: "Denali is reading the declared evidence planes in the background. This page refreshes automatically, and it is safe to leave and return.",
+      title: sourceProgress?.title ?? `${provider} evidence is being collected`,
+      detail: sourceProgress ? `${sourceProgress.summary}. ${sourceProgress.detail}` : "Denali is reading the declared evidence planes in the background. This page refreshes automatically, and it is safe to leave and return.",
       steps: [
         { label: "Access setup", state: "complete" },
         { label: "Validate access", state: validationState },

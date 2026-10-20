@@ -667,6 +667,90 @@ test("shared exact AWS result never implies Region discovery or account inventor
 });
 
 for (const shared of [true, false]) {
+  for (const cooldown of [0, 120]) {
+    test(`GitHub ${shared ? "shared" : "native"}: reload shows resumable ${cooldown ? "quota wait" : "progress"}, not a completed previous run`, async () => {
+      const row: Connection = {
+        ...detailFixture("github", shared), source_collection_state: "running",
+        last_source_collection: { connection_id: "github-source", state: "complete", completed_at: "2026-10-19T00:01:00Z", repository_count: 113, failed_count: 0, partial_count: 0, repositories: [] },
+        source_collection_progress: { state: "running", repository_count: 113, completed_repository_count: 20, failed_count: 1, partial_count: 2, repositories: [], resume_pending: true, retry_after_seconds: cooldown, updated_at: "2026-10-20T00:01:00Z" },
+      };
+      await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+      const active = container.querySelector('[aria-label="GitHub source collection progress"]')!;
+      assert.match(active.textContent ?? "", /20 of 113 repositories processed/);
+      assert.match(active.textContent ?? "", /93 repositories remain queued/);
+      assert.match(active.textContent ?? "", /17 complete · 2 partial · 1 failed so far/);
+      assert.match(active.textContent ?? "", /Access health is separate from source coverage/);
+      assert.equal(active.querySelector("time")?.dateTime, "2026-10-20T00:01:00Z");
+      if (cooldown) assert.match(active.textContent ?? "", /resumes automatically.*do not start another collection/);
+      else assert.match(active.textContent ?? "", /resumable batches/);
+      const history = container.querySelector<HTMLDetailsElement>('[aria-label="Previous GitHub collection result"]')!;
+      assert.equal(history.open, false);
+      assert.equal(history.querySelector("time")?.dateTime, "2026-10-19T00:01:00Z");
+      assert.match(history.textContent ?? "", /Previous run: Complete/);
+      assert.equal(container.querySelector(".setup-progress > div:last-child")?.className, "current");
+      assert.equal(container.querySelector(".setup-progress > div:last-child > span svg"), null);
+      assert.equal(button(cooldown ? "Waiting for GitHub quota…" : "Collecting and correlating…").disabled, true);
+      assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Collecting"));
+      assert.equal(calls.attaches.length, 0);
+      assert.equal(calls.native, 0);
+    });
+  }
+}
+
+test("GitHub collect stops at durable acceptance and never polls to a false completion notice", async () => {
+  const row = detailFixture("github", false);
+  let submissions = 0;
+  let statusReads = 0;
+  pageApi.collectGitHubSource = async () => {
+    submissions += 1;
+    nextAttachment = { ...row, source_collection_state: "running", source_collection_progress: null };
+    return { status: "started", connection_id: row.id };
+  };
+  pageApi.connection = async () => { statusReads += 1; throw new Error("No request-lifetime completion poll"); };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  await click(button("Collect source & correlate"));
+  assert.equal(submissions, 1);
+  assert.equal(statusReads, 0);
+  assert.deepEqual(acceptedOperations, [{ id: row.id, kind: "source" }]);
+  assert.match(container.textContent ?? "", /GitHub source collection accepted. Resumable batches continue safely/);
+  assert.doesNotMatch(container.textContent ?? "", /GitHub source collection completed/);
+  assert.match(container.querySelector('[aria-label="GitHub source collection progress"]')?.textContent ?? "", /0 of 2 repositories processed/);
+  await click(button("Collecting and correlating…"));
+  assert.equal(submissions, 1);
+});
+
+test("GitHub terminal interruption shows unprocessed repositories instead of calling them complete", async () => {
+  const row: Connection = {
+    ...detailFixture("github", true), source_collection_state: "idle",
+    last_source_collection: { connection_id: "github-source", state: "failed", completed_at: "2026-10-20T00:02:00Z", repository_count: 113, completed_repository_count: 20, failed_count: 1, partial_count: 2, repositories: [], detail: "Source access is no longer available" },
+  };
+  await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+  const result = container.querySelector('[aria-label="GitHub collection result"]')!;
+  assert.match(result.textContent ?? "", /Latest result: Failed/);
+  assert.match(result.textContent ?? "", /17 complete · 2 partial · 1 failed/);
+  assert.match(result.textContent ?? "", /20 of 113 repositories processed · 93 unprocessed/);
+  assert.doesNotMatch(result.textContent ?? "", /110 complete/);
+  assert.equal(container.querySelector(".setup-progress > div:last-child")?.className, "attention");
+  assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === "Needs attention"));
+});
+
+for (const state of ["complete", "partial", "failed"] as const) {
+  test(`GitHub terminal ${state} result is not inferred from healthy access or zero counters`, async () => {
+    const row: Connection = {
+      ...detailFixture("github", false), source_collection_state: "idle",
+      last_source_collection: { connection_id: "github-source", state, completed_at: "2026-10-20T00:02:00Z", repository_count: 113, failed_count: 0, partial_count: 0, repositories: [] },
+    };
+    await mount({ initialConnections: [row], initialQuery: { connection: row.id } });
+    const result = container.querySelector('[aria-label="GitHub collection result"]')!;
+    assert.match(result.textContent ?? "", new RegExp(`Latest result: ${state[0]!.toUpperCase()}${state.slice(1)}`));
+    assert.equal(result.querySelector("time")?.dateTime, "2026-10-20T00:02:00Z");
+    assert.equal(container.querySelector('[aria-label="GitHub source collection progress"]'), null);
+    assert.equal(container.querySelector(".setup-progress > div:last-child")?.className, state === "complete" ? "complete" : "attention");
+    assert.ok([...container.querySelectorAll(".connection-health")].every((badge) => badge.textContent === (state === "complete" ? "Ready" : "Needs attention")));
+  });
+}
+
+for (const shared of [true, false]) {
   for (const state of ["complete", "partial", "failed"] as const) {
     test(`Azure Repos ${shared ? "shared" : "native"}: terminal ${state} source result and finish time remain inspectable`, async () => {
       const completedAt = "2026-10-16T00:02:00Z";

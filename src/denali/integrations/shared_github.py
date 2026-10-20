@@ -464,3 +464,28 @@ class GitHubCollectorRouter:
         return self._legacy.collect(
             tenant_id=tenant_id, connection=connection, repository=repository
         )
+
+    def collect_resumable(
+        self,
+        *,
+        tenant_id: str,
+        connection: dict[str, Any],
+        repository: Any,
+        checkpoint: dict[str, Any],
+        save_checkpoint: Any,
+    ) -> dict[str, Any]:
+        if connection.get("credential_type") == "platform_shared_github":
+            if self._platform is None:
+                raise RuntimeError("shared GitHub broker is not configured")
+            collector = GitHubRepositoryCollector(SharedGitHubAppClient(self._platform, connection))
+        else:
+            if self._legacy is None:
+                raise RuntimeError("Denali GitHub App is not configured")
+            collector = self._legacy
+        return collector.collect_resumable(
+            tenant_id=tenant_id,
+            connection=connection,
+            repository=repository,
+            checkpoint=checkpoint,
+            save_checkpoint=save_checkpoint,
+        )

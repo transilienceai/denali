@@ -806,3 +806,39 @@ def test_shared_source_collector_uses_existing_bounded_metadata_analysis(monkeyp
     )
     assert result["repository_count"] == 1 and result["failed_count"] == 0
     assert "ghs_" not in str(result)
+
+
+def test_resumable_router_keeps_native_and_shared_identity_paths_separate(monkeypatch):
+    from denali.integrations import shared_github
+
+    calls = []
+
+    class Resumable:
+        def __init__(self, app=None):
+            self.app = app
+
+        def collect_resumable(self, **values):
+            calls.append((self.app, values))
+            return {"resume_pending": True}
+
+    monkeypatch.setattr(shared_github, "GitHubRepositoryCollector", Resumable)
+    platform = Platform()
+    checkpoint = {"boundary_hash": "fixture"}
+
+    def save(_value):
+        return True
+
+    router = GitHubCollectorRouter(Resumable("native-app"), platform)
+    native = {"id": "native", "credential_type": "github_app_installation"}
+    assert router.collect_resumable(
+        tenant_id="tenant", connection=native, repository=None,
+        checkpoint=checkpoint, save_checkpoint=save,
+    ) == {"resume_pending": True}
+    assert calls[-1][0] == "native-app"
+    assert router.collect_resumable(
+        tenant_id="tenant", connection=target(), repository=None,
+        checkpoint=checkpoint, save_checkpoint=save,
+    ) == {"resume_pending": True}
+    assert isinstance(calls[-1][0], SharedGitHubAppClient)
+    assert calls[-1][1]["checkpoint"] is checkpoint
+    assert calls[-1][1]["save_checkpoint"] is save

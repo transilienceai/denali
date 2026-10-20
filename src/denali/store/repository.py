@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -66,6 +67,7 @@ END
 _TENANT_EVIDENCE_LOCK_NAMESPACE = "denali-tenant-evidence"
 _MAX_DETECTION_ACTIVITIES = 50_000
 _MAX_DETECTION_ASSETS = 100_000
+_MAX_COLLECTION_CHECKPOINT_BYTES = 2_000_000
 _RUNTIME_RESPONSE_TARGET_KINDS = {
     "disable_agent_runtime": "ai_agent",
     "revoke_tool_access": "ai_tool",
@@ -76,6 +78,51 @@ _RUNTIME_RESPONSE_TARGET_KINDS = {
 
 class GatewayConnectionJobCooldown(Exception):
     """A fresh gateway job is too soon after the previous completed action."""
+
+
+def _collection_checkpoint_json(value: dict[str, Any]) -> str:
+    if not isinstance(value, dict):
+        raise ValueError("collection checkpoint must be an object")
+    try:
+        encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        raise ValueError("collection checkpoint must contain JSON metadata") from None
+    if len(encoded.encode()) > _MAX_COLLECTION_CHECKPOINT_BYTES:
+        raise ValueError("collection checkpoint metadata exceeds its safety limit")
+    return encoded
+
+
+def _collection_delay(delay_seconds: int) -> None:
+    if type(delay_seconds) is not int or not 0 <= delay_seconds <= 86_400:
+        raise ValueError("invalid collection continuation delay")
+
+
+def _collection_progress(active: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Expose only aggregate counters, never the private resumable checkpoint."""
+
+    if active is None or not isinstance(active.get("result"), dict):
+        return None
+    result = active["result"]
+    progress: dict[str, Any] = {"state": "running"}
+    for key in (
+        "repository_count",
+        "completed_repository_count",
+        "failed_count",
+        "partial_count",
+        "github_requests",
+        "github_request_limit",
+    ):
+        value = result.get(key)
+        if type(value) is int and 0 <= value <= 50_000_000:
+            progress[key] = value
+    delay = max(0, math.ceil((active["available_at"] - datetime.now(UTC)).total_seconds()))
+    progress.update(
+        resume_pending=active["state"] == "queued",
+        retry_after_seconds=delay,
+        updated_at=active["updated_at"].isoformat(),
+        continuation_count=active["continuation_count"],
+    )
+    return progress
 
 
 def _activity_session_key(batch: ActivityBatch, activity: Any) -> str | None:
@@ -213,6 +260,51 @@ def _deployment_identity_from_attributes(
 class PostgresInventoryRepository:
     def __init__(self, dsn: str):
         self._dsn = dsn
+        self._collection_claim: tuple[str, int] | None = None
+
+    def for_collection_claim(self, job_id: str, attempt_count: int) -> PostgresInventoryRepository:
+        """Fence GitHub evidence transactions to one live durable worker generation."""
+
+        if type(attempt_count) is not int or attempt_count < 1:
+            raise ValueError("invalid collection claim generation")
+        scoped = PostgresInventoryRepository(self._dsn)
+        scoped._collection_claim = (job_id, attempt_count)
+        return scoped
+
+    def _assert_collection_claim(
+        self, connection: psycopg.Connection[Any], tenant_id: str, connection_id: str
+    ) -> None:
+        if self._collection_claim is None:
+            return
+        job_id, generation = self._collection_claim
+        # Match queue/disable lock order: provider first, then job. Holding both
+        # locks through ingestion prevents a stale worker from committing writes.
+        provider = connection.execute(
+            """
+            SELECT id FROM provider_connection
+            WHERE tenant_id = %s::uuid AND id = %s::uuid
+              AND provider = 'github' AND lifecycle_state = 'active'
+            FOR SHARE
+            """,
+            (tenant_id, connection_id),
+        ).fetchone()
+        current = (
+            None
+            if provider is None
+            else connection.execute(
+                """
+            SELECT id FROM connection_collection_job
+            WHERE id = %s::uuid AND tenant_id = %s::uuid AND connection_id = %s::uuid
+              AND collection_kind = 'github_source' AND state = 'running'
+              AND attempt_count = %s AND lease_expires_at > now()
+              AND created_at > now() - interval '48 hours'
+            FOR UPDATE
+            """,
+                (job_id, tenant_id, connection_id, generation),
+            ).fetchone()
+        )
+        if current is None:
+            raise RuntimeError("collection worker claim is no longer current")
 
     def claim_gateway_connection_action(
         self,
@@ -320,6 +412,7 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                self._assert_collection_claim(connection, tenant_id, batch.connection_id)
                 _lock_tenant_evidence_mutation(connection, tenant_id)
                 self._insert_run(connection, tenant_id, batch)
                 asset_ids: dict[AssetRef, str] = {}
@@ -390,6 +483,7 @@ class PostgresInventoryRepository:
 
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
             with connection.transaction():
+                self._assert_collection_claim(connection, tenant_id, batch.connection_id)
                 _lock_tenant_evidence_mutation(connection, tenant_id)
                 self._insert_run(connection, tenant_id, batch)
                 persisted_findings = 0
@@ -3006,19 +3100,20 @@ class PostgresInventoryRepository:
                     if collection_kind is None
                     else (tenant_id, connection_id, collection_kind)
                 )
-                connection.execute(
-                    f"""
-                    UPDATE {table}
-                    SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
-                        error_summary = CASE WHEN state = 'queued'
-                          THEN 'Job dispatch timed out.' ELSE 'Worker lease expired.' END
-                    WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
-                      {kind_filter}
-                      AND ((state = 'running' AND lease_expires_at < now())
-                        OR (state = 'queued' AND created_at < now() - interval '30 minutes'))
-                    """,
-                    job_params,
-                )
+                if collection_kind != "github_source":
+                    connection.execute(
+                        f"""
+                        UPDATE {table}
+                        SET state = 'failed', completed_at = now(), lease_expires_at = NULL,
+                            error_summary = CASE WHEN state = 'queued'
+                              THEN 'Job dispatch timed out.' ELSE 'Worker lease expired.' END
+                        WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
+                          {kind_filter}
+                          AND ((state = 'running' AND lease_expires_at < now())
+                            OR (state = 'queued' AND created_at < now() - interval '30 minutes'))
+                        """,
+                        job_params,
+                    )
                 active = connection.execute(
                     f"""
                     SELECT id, state, modal_call_id FROM {table}
@@ -3274,6 +3369,7 @@ class PostgresInventoryRepository:
                         END
                     WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
                       AND collection_kind = %s
+                      AND collection_kind <> 'github_source'
                       AND (
                         (state = 'running' AND lease_expires_at < now())
                         OR (state = 'queued' AND created_at < now() - interval '30 minutes')
@@ -3447,23 +3543,291 @@ class PostgresInventoryRepository:
     def claim_connection_collection_job(
         self, job_id: str, *, lease_seconds: int
     ) -> dict[str, Any] | None:
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 86_400:
+            raise ValueError("invalid collection worker lease")
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            # The provider lock precedes the job lock, as in evidence writes and
+            # disable. Other providers retain their established claim behavior.
+            provider = connection.execute(
+                """
+                SELECT provider.id, provider.provider, provider.lifecycle_state, job.collection_kind
+                FROM provider_connection provider
+                JOIN connection_collection_job job
+                  ON job.tenant_id = provider.tenant_id AND job.connection_id = provider.id
+                WHERE job.id = %s::uuid
+                FOR SHARE OF provider
+                """,
+                (job_id,),
+            ).fetchone()
+            if provider is None:
+                return None
+            if provider["collection_kind"] == "github_source" and provider["provider"] != "github":
+                connection.execute(
+                    """
+                    UPDATE connection_collection_job
+                    SET state = 'failed', completed_at = now(), updated_at = now(),
+                        lease_expires_at = NULL,
+                        error_summary =
+                          'Collection kind does not belong to the connection provider.'
+                    WHERE id = %s::uuid AND collection_kind = 'github_source'
+                      AND state IN ('queued', 'running')
+                    """,
+                    (job_id,),
+                )
+                return None
+            connection.execute(
+                """
+                UPDATE connection_collection_job
+                SET state = 'failed', completed_at = now(), updated_at = now(),
+                    lease_expires_at = NULL,
+                    error_summary = 'GitHub collection exceeded its resumable run window.'
+                WHERE id = %s::uuid AND collection_kind = 'github_source'
+                  AND state IN ('queued', 'running')
+                  AND created_at <= now() - interval '48 hours'
+                """,
+                (job_id,),
+            )
+            if provider["lifecycle_state"] != "active":
+                connection.execute(
+                    """
+                    UPDATE connection_collection_job
+                    SET state = 'failed', completed_at = now(), updated_at = now(),
+                        lease_expires_at = NULL,
+                        error_summary = 'Connection is unavailable for collection.'
+                    WHERE id = %s::uuid AND collection_kind = 'github_source'
+                      AND state IN ('queued', 'running')
+                    """,
+                    (job_id,),
+                )
+            connection.execute(
+                """
+                UPDATE connection_collection_job
+                SET state = 'failed', completed_at = now(), updated_at = now(),
+                    lease_expires_at = NULL, retry_count = retry_count + 1,
+                    error_summary = 'Collection worker lease repeatedly expired.'
+                WHERE id = %s::uuid AND collection_kind = 'github_source'
+                  AND state = 'running' AND lease_expires_at < now() AND retry_count >= 2
+                """,
+                (job_id,),
+            )
             row = connection.execute(
                 """
                 UPDATE connection_collection_job
                 SET state = 'running', started_at = COALESCE(started_at, now()),
                     attempt_count = attempt_count + 1,
+                    retry_count = retry_count + CASE
+                      WHEN collection_kind = 'github_source' AND state = 'running' THEN 1
+                      ELSE 0 END,
+                    updated_at = now(),
                     lease_expires_at = now() + make_interval(secs => %s)
                 WHERE id = %s::uuid
+                  AND available_at <= now()
+                  AND (collection_kind <> 'github_source' OR %s)
                   AND (
                     state = 'queued'
                     OR (state = 'running' AND lease_expires_at < now())
                   )
                 RETURNING *
                 """,
-                (lease_seconds, job_id),
+                (lease_seconds, job_id, provider["lifecycle_state"] == "active"),
             ).fetchone()
         return None if row is None else dict(row)
+
+    def collection_job_is_current(self, job_id: str, attempt_count: int) -> bool:
+        with psycopg.connect(self._dsn) as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM connection_collection_job job
+                JOIN provider_connection provider
+                  ON provider.tenant_id = job.tenant_id AND provider.id = job.connection_id
+                WHERE job.id = %s::uuid AND job.attempt_count = %s
+                  AND job.collection_kind = 'github_source' AND job.state = 'running'
+                  AND job.lease_expires_at > now()
+                  AND job.created_at > now() - interval '48 hours'
+                  AND provider.provider = 'github' AND provider.lifecycle_state = 'active'
+                """,
+                (job_id, attempt_count),
+            ).fetchone()
+        return row is not None
+
+    def _update_resumable_collection(
+        self, job_id: str, attempt_count: int, assignments: str, params: tuple[Any, ...]
+    ) -> dict[str, Any] | None:
+        if type(attempt_count) is not int or attempt_count < 1:
+            raise ValueError("invalid collection claim generation")
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            provider = connection.execute(
+                """
+                SELECT provider.id FROM provider_connection provider
+                JOIN connection_collection_job job
+                  ON provider.tenant_id = job.tenant_id AND provider.id = job.connection_id
+                WHERE job.id = %s::uuid AND provider.provider = 'github'
+                  AND provider.lifecycle_state = 'active'
+                FOR SHARE OF provider
+                """,
+                (job_id,),
+            ).fetchone()
+            if provider is None:
+                return None
+            return connection.execute(
+                f"""
+                UPDATE connection_collection_job
+                SET {assignments}, updated_at = now()
+                WHERE id = %s::uuid AND collection_kind = 'github_source'
+                  AND state = 'running' AND attempt_count = %s AND lease_expires_at > now()
+                  AND created_at > now() - interval '48 hours'
+                RETURNING state
+                """,
+                (*params, job_id, attempt_count),
+            ).fetchone()
+
+    def save_collection_checkpoint(
+        self, job_id: str, attempt_count: int, checkpoint: dict[str, Any]
+    ) -> bool:
+        encoded = _collection_checkpoint_json(checkpoint)
+        repositories = checkpoint.get("repositories")
+        completed = [
+            value["result"]
+            for value in (repositories.values() if isinstance(repositories, dict) else ())
+            if isinstance(value, dict)
+            and isinstance(value.get("result"), dict)
+            and value["result"].get("state") in {"complete", "partial", "failed"}
+        ]
+        return (
+            self._update_resumable_collection(
+                job_id,
+                attempt_count,
+                """checkpoint = %s::jsonb,
+               retry_count = CASE WHEN %s >
+                 COALESCE((result->>'completed_repository_count')::int, 0)
+                 THEN 0 ELSE retry_count END,
+               result = COALESCE(result, '{}'::jsonb) || jsonb_build_object(
+                 'state', 'running', 'completed_repository_count', %s::int,
+                 'failed_count', %s::int, 'partial_count', %s::int,
+                 'repository_count', (
+                   SELECT CASE WHEN jsonb_typeof(configuration->'repositories') = 'array'
+                     THEN jsonb_array_length(configuration->'repositories') ELSE 0 END
+                   FROM provider_connection
+                   WHERE tenant_id = connection_collection_job.tenant_id
+                     AND id = connection_collection_job.connection_id))""",
+                (
+                    encoded,
+                    len(completed),
+                    len(completed),
+                    sum(item.get("state") == "failed" for item in completed),
+                    sum(item.get("state") == "partial" for item in completed),
+                ),
+            )
+            is not None
+        )
+
+    def defer_connection_collection_job(
+        self,
+        job_id: str,
+        attempt_count: int,
+        checkpoint: dict[str, Any],
+        result: dict[str, Any],
+        delay_seconds: int = 0,
+    ) -> bool:
+        _collection_delay(delay_seconds)
+        return (
+            self._update_resumable_collection(
+                job_id,
+                attempt_count,
+                """checkpoint = %s::jsonb, result = %s::jsonb, state = 'queued',
+               continuation_count = continuation_count + 1,
+               available_at = now() + make_interval(secs => %s),
+               lease_expires_at = NULL, modal_call_id = NULL, error_summary = NULL""",
+                (
+                    _collection_checkpoint_json(checkpoint),
+                    _collection_checkpoint_json(result),
+                    delay_seconds,
+                ),
+            )
+            is not None
+        )
+
+    def complete_resumable_collection_job(
+        self, job_id: str, attempt_count: int, result: dict[str, Any]
+    ) -> bool:
+        return (
+            self._update_resumable_collection(
+                job_id,
+                attempt_count,
+                """state = 'succeeded', result = %s::jsonb, completed_at = now(),
+               lease_expires_at = NULL, error_summary = NULL""",
+                (_collection_checkpoint_json(result),),
+            )
+            is not None
+        )
+
+    def retry_resumable_collection_job(
+        self,
+        job_id: str,
+        attempt_count: int,
+        summary: str,
+        *,
+        max_attempts: int = 3,
+        delay_seconds: int = 30,
+    ) -> bool:
+        if type(max_attempts) is not int or not 1 <= max_attempts <= 5:
+            raise ValueError("collection attempts must be between 1 and 5")
+        _collection_delay(delay_seconds)
+        row = self._update_resumable_collection(
+            job_id,
+            attempt_count,
+            """retry_count = retry_count + 1,
+               state = CASE WHEN retry_count + 1 < %s THEN 'queued' ELSE 'failed' END,
+               completed_at = CASE WHEN retry_count + 1 < %s THEN NULL ELSE now() END,
+               available_at = now() + make_interval(secs => %s),
+               lease_expires_at = NULL, modal_call_id = NULL, error_summary = %s""",
+            (max_attempts, max_attempts, delay_seconds, summary[:500]),
+        )
+        return row is not None and row["state"] == "queued"
+
+    def list_due_github_collection_jobs(self, *, limit: int = 100) -> list[str]:
+        """Identifier-only recovery for lost dispatches and expired worker leases."""
+
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("collection recovery limit must be between 1 and 500")
+        with psycopg.connect(self._dsn) as connection:
+            connection.execute(
+                """
+                UPDATE connection_collection_job job
+                SET state = 'failed', completed_at = now(), updated_at = now(),
+                    lease_expires_at = NULL,
+                    error_summary = CASE WHEN job.created_at <= now() - interval '48 hours'
+                      THEN 'GitHub collection exceeded its resumable run window.'
+                      ELSE 'Connection is unavailable for collection.' END
+                WHERE job.id IN (
+                  SELECT candidate.id FROM connection_collection_job candidate
+                  JOIN provider_connection provider
+                    ON provider.tenant_id = candidate.tenant_id
+                    AND provider.id = candidate.connection_id
+                  WHERE candidate.collection_kind = 'github_source'
+                    AND candidate.state IN ('queued', 'running')
+                    AND (provider.lifecycle_state <> 'active' OR provider.provider <> 'github'
+                      OR candidate.created_at <= now() - interval '48 hours')
+                  ORDER BY candidate.updated_at, candidate.id LIMIT %s
+                ) AND job.state IN ('queued', 'running')
+                """,
+                (limit,),
+            )
+            rows = connection.execute(
+                """
+                SELECT job.id FROM connection_collection_job job
+                JOIN provider_connection provider
+                  ON provider.tenant_id = job.tenant_id AND provider.id = job.connection_id
+                WHERE job.collection_kind = 'github_source' AND available_at <= now()
+                  AND job.created_at > now() - interval '48 hours'
+                  AND provider.provider = 'github' AND provider.lifecycle_state = 'active'
+                  AND (job.state = 'queued'
+                    OR (job.state = 'running' AND job.lease_expires_at < now()))
+                ORDER BY job.available_at, job.updated_at, job.id LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def set_connection_collection_call_id(self, job_id: str, call_id: str) -> None:
         with psycopg.connect(self._dsn) as connection:
@@ -3533,6 +3897,7 @@ class PostgresInventoryRepository:
                     END
                 WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
                   AND collection_kind = %s
+                  AND collection_kind <> 'github_source'
                   AND (
                     (state = 'running' AND lease_expires_at < now())
                     OR (state = 'queued' AND created_at < now() - interval '30 minutes')
@@ -3542,7 +3907,8 @@ class PostgresInventoryRepository:
             )
             active = connection.execute(
                 """
-                SELECT 1 FROM connection_collection_job
+                SELECT result, available_at, updated_at, continuation_count, state
+                FROM connection_collection_job
                 WHERE tenant_id = %s::uuid AND connection_id = %s::uuid
                   AND collection_kind = %s AND state IN ('queued', 'running')
                 LIMIT 1
@@ -3563,11 +3929,21 @@ class PostgresInventoryRepository:
         if latest is not None:
             last_result = dict(latest["result"] or {})
             last_result.setdefault("state", "failed" if latest["state"] == "failed" else "complete")
+            if collection_kind == "github_source" and latest["state"] == "failed":
+                last_result["state"] = "failed"
+                last_result["resume_pending"] = False
             if latest["error_summary"]:
                 last_result["detail"] = latest["error_summary"]
             if latest["completed_at"]:
                 last_result.setdefault("completed_at", latest["completed_at"].isoformat())
-        return {"state": "running" if active is not None else "idle", "last_result": last_result}
+                if collection_kind == "github_source" and latest["state"] == "failed":
+                    last_result["completed_at"] = latest["completed_at"].isoformat()
+        progress = _collection_progress(active) if collection_kind == "github_source" else None
+        return {
+            "state": "running" if active is not None else "idle",
+            "last_result": last_result,
+            "progress": progress,
+        }
 
     def create_vulnerability_import_job(
         self,

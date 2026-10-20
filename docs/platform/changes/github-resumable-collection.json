@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Repair internal GitHub source job execution with fenced PostgreSQL checkpoints, bounded per-repository slices, quota-aware continuation and browser-only running progress. Existing named collection, job polling, results and idempotency operations retain their request/response projections, scopes and repository boundaries. No provider grant, saved connection configuration or new public operation is introduced.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "Existing generic and typed collection/job/result commands and login scopes are unchanged; resumability is internal durable execution."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "The fixed Platform adapter continues to use the same guarded collect/job/results operations and safe projections. No Platform source, schema or app-specific enhancement is needed."
+  }
+}
