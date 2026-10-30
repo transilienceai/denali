@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Add a private organization migration selector so only explicitly selected organizations use the Clerk settings backing lookup. Unselected organizations retain Platform; selected snapshot failures never fall back. Public capability schemas, product authorization, native records and provider brokering are unchanged.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {"impact": "none", "reason": "Existing authenticated receiver and sanitized response contract are unchanged."},
+  "gateway": {"impact": "none", "reason": "No registration, product contract, provider grant or public scope change."}
+}
