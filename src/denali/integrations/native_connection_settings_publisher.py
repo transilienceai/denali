@@ -113,11 +113,20 @@ def _guard(config: NativePublisherConfig, expected_clerk_org_id: str) -> None:
         _reject()
 
 
-def _configure_read_transaction(connection: Any, organization_id: str) -> None:
+def _configure_read_transaction(
+    connection: Any, organization_id: str, *, post_commit_lock: bool = False,
+) -> None:
     connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
     connection.execute("SET LOCAL statement_timeout='5s'")
     connection.execute("SET LOCAL lock_timeout='500ms'")
     connection.execute("SET LOCAL idle_in_transaction_session_timeout='30s'")
+    if post_commit_lock:
+        # A just-committed identifier write may race the normal tick. Wait once,
+        # within a fixed bound; never retry the HTTP request or mutate health.
+        connection.execute("SET LOCAL lock_timeout='3s'")
+        connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                           ("denali_native_connection_settings:" + organization_id,))
+        return
     locked = connection.execute(
         "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) AS locked",
         ("denali_native_connection_settings:" + organization_id,),
@@ -335,6 +344,7 @@ def prepare_or_publish_native_settings(
     expected_clerk_org_id: str, *, publish: bool = False,
     config: NativePublisherConfig | None = None, connection_factory=None,
     transport: httpx.BaseTransport | None = None, now: datetime | None = None,
+    _post_commit_lock: bool = False,
 ) -> dict[str, Any]:
     """No PATCH in preflight. Explicit publication retains the org lock through ACK."""
     if config is None:
@@ -349,7 +359,8 @@ def prepare_or_publish_native_settings(
     ) == "clerk")
     try:
         with factory(config.database_url, row_factory=dict_row, connect_timeout=3) as connection:
-            _configure_read_transaction(connection, config.organization_id)
+            _configure_read_transaction(connection, config.organization_id,
+                                        post_commit_lock=_post_commit_lock)
             tenant_id, targets = read_enrolled_native_targets(
                 connection, config, require_complete=strict,
             )
@@ -421,7 +432,7 @@ def publish_after_native_identifier_write(
         if row is None or row["clerk_organization_id"] != config.organization_id:
             return
         (publish or prepare_or_publish_native_settings)(
-            config.organization_id, publish=True, config=config,
+            config.organization_id, publish=True, config=config, _post_commit_lock=True,
         )
     except Exception:
         raise NativeConnectionSettingsUnavailable() from None

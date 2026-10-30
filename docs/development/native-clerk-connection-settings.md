@@ -71,7 +71,10 @@ completion, GitHub installation return, GitHub completion and Azure Repos
 completion) publish after their database commit and before the API's next consumer
 read. This is limited to the enrolled org/ID while source is Clerk and publication
 is enabled; no provider or health mutation is added. Normal successful setup does
-not wait for the periodic tick. A publication outage is fixed settings
+not wait for the periodic tick. Their fresh read-only publication transaction can
+wait up to three seconds for the ordinary tick's org lock, with the existing
+five-second statement bound and no HTTP retry. Tick/manual/preflight keep immediate
+try-lock behavior. A publication outage is fixed settings
 unavailability, never a provider-credential failure. Validation itself only writes
 health/evidence/timestamps and does not change the selected identifiers.
 

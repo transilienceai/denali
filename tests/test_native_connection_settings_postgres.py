@@ -276,3 +276,95 @@ def test_callback_commit_survives_publication_failure_and_cannot_replay_consumed
     assert saved["credential_reference"]["oauth_state_sha256"] == "f" * 64
     assert saved["health_state"] == "unknown" and jobs["count"] == 0
     assert repository.record_github_install_return(tenant, github["id"], **options) is None
+
+
+@pytest.mark.parametrize("release", [True, False])
+def test_postcommit_lock_wait_is_bounded_and_never_changes_jobs_or_health(monkeypatch, release):
+    import json
+    from threading import Event, Thread
+    from time import monotonic
+
+    from test_native_connection_settings_publisher import merge_patch
+
+    _repository, tenant, targets, config = records(monkeypatch)
+    env = {
+        "DENALI_DSN": DSN, "CLERK_SECRET_KEY": config.secret_key,
+        "MODAL_ENVIRONMENT": "denali-dev",
+        "DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT": "development",
+        "DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE": "clerk",
+        "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": "true",
+        "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CLERK_ORG_IDS": config.organization_id,
+        "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS":
+            ",".join(sorted(config.connection_ids)),
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    waiting, released = Event(), Event()
+    organization = {"id": config.organization_id, "private_metadata": {}, "public_metadata": {}}
+    requests = []
+
+    def clerk(request):
+        requests.append(request.method)
+        assert released.is_set()
+        if request.method == "PATCH":
+            merge_patch(organization, json.loads(request.content))
+        return httpx.Response(200, json=copy.deepcopy(organization))
+
+    class Connection:
+        def __init__(self, *args, **options):
+            self.connection = psycopg.connect(*args, **options)
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+        def execute(self, query, parameters=()):
+            if "SELECT pg_advisory_xact_lock" in query:
+                waiting.set()
+            return self.connection.execute(query, parameters)
+
+    def publish(*args, **options):
+        assert options["_post_commit_lock"] is True
+        return publisher.prepare_or_publish_native_settings(
+            *args, **options, connection_factory=Connection, transport=httpx.MockTransport(clerk),
+        )
+
+    with psycopg.connect(DSN, row_factory=dict_row) as locker:
+        publisher._configure_read_transaction(locker, config.organization_id)
+
+        def unlock():
+            if waiting.wait(timeout=2):
+                released.set()
+                locker.commit()
+
+        thread = Thread(target=unlock) if release else None
+        if thread:
+            thread.start()
+        started = monotonic()
+        if release:
+            publisher.publish_after_native_identifier_write(
+                tenant, targets[0]["id"], DSN, environ=env, publish=publish,
+            )
+            thread.join(timeout=2)
+            assert released.is_set() and requests == ["GET", "PATCH"]
+            assert monotonic() - started < 3
+        else:
+            with pytest.raises(native.NativeConnectionSettingsUnavailable,
+                               match="^native connection settings unavailable$"):
+                publisher.publish_after_native_identifier_write(
+                    tenant, targets[0]["id"], DSN, environ=env, publish=publish,
+                )
+            assert 2.5 <= monotonic() - started < 5
+            assert requests == []
+    with psycopg.connect(DSN, row_factory=dict_row) as connection:
+        states = connection.execute(
+            "SELECT health_state FROM provider_connection WHERE tenant_id=%s", (tenant,),
+        ).fetchall()
+        jobs = connection.execute(
+            "SELECT count(*) AS count FROM connection_validation_job WHERE tenant_id=%s", (tenant,),
+        ).fetchone()
+    assert all(row["health_state"] == "unknown" for row in states) and len(states) == 6
+    assert jobs["count"] == 0
