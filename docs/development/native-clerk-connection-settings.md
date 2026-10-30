@@ -100,8 +100,11 @@ observation.
   canonical UUIDs. New connections stay on their existing path until separately
   reviewed/enrolled; changing this pilot's scope requires another decision.
 - `DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT`: the matching production or
-  development environment, replayed by the Modal deployment's application selector.
-  The runtime Modal environment and Clerk key prefix must agree.
+  development environment. Configuration replay derives it from the recognized
+  runtime Modal environment before falling back to the deploy-shell application
+  selector, preserving the same anonymous configuration during remote re-import.
+  The runtime Modal environment and Clerk key prefix must agree; selected native
+  lookup/publication reject an unknown nonempty Modal environment.
 - `DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED=true|false`: separate,
   default-false **deployment** selector for the 60-second refresh scheduler and
   manual publication permission. It does not select the native consumer.

@@ -394,10 +394,10 @@ def enrolled_native_settings(
 
 def native_environment(environ: Mapping[str, str]) -> str:
     environment = environ.get("DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT", "")
-    expected = {"denali-prod": "production", "denali-dev": "development"}.get(
-        environ.get("MODAL_ENVIRONMENT", "")
-    )
+    modal_environment = environ.get("MODAL_ENVIRONMENT", "")
+    expected = {"denali-prod": "production", "denali-dev": "development"}.get(modal_environment)
     if (environment not in {"production", "development"}
+            or modal_environment and expected is None
             or expected is not None and environment != expected):
         _reject()
     return environment

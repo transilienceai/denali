@@ -29,6 +29,15 @@ native_settings_publish_flag = os.environ.get(
 )
 if native_settings_publish_flag not in {"true", "false"}:
     raise ValueError("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED must be true or false")
+native_settings_environment = {
+    "denali-prod": "production", "denali-dev": "development",
+}.get(os.environ.get("MODAL_ENVIRONMENT", ""))
+if native_settings_environment is None:
+    # Deploy-shell app names are absent during remote module re-import. The
+    # actual Modal environment must take precedence when rebuilding this graph.
+    native_settings_environment = (
+        "production" if APP_NAME == "denali-production" else "development"
+    )
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -47,9 +56,7 @@ shared_connections_config = {
     "DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin,
     "DENALI_ENABLE_SHARED_JIRA_READS": shared_jira_reads_flag,
     "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": native_settings_publish_flag,
-    "DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT": (
-        "production" if APP_NAME == "denali-production" else "development"
-    ),
+    "DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT": native_settings_environment,
 }
 for native_setting_name in (
     "DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE",

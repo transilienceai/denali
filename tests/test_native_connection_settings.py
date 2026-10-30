@@ -276,6 +276,7 @@ def test_native_alias_is_only_its_existing_backend_key_and_environment_is_exact(
     for change in (
         {"CLERK_SECRET_KEY": "sk_live_synthetic"},
         {"MODAL_ENVIRONMENT": "denali-prod"},
+        {"MODAL_ENVIRONMENT": "unrecognized-modal-environment"},
         {"DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT": "unknown"},
         {"DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE": "unknown"},
         {"DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS": IDS[0]},
@@ -285,6 +286,16 @@ def test_native_alias_is_only_its_existing_backend_key_and_environment_is_exact(
             native.resolve_native_connection_settings(
                 TENANT, target, environ={**environment(), **change}, reader_factory=factory,
             )
+    # Local/non-Modal consumers remain supported with the explicit native env.
+    native.resolve_native_connection_settings(TENANT, target,
+        environ={**environment(), "MODAL_ENVIRONMENT": ""}, reader_factory=factory)
+    for bypass_target, source in ((target, "database"),
+                                 ({**target, "clerk_organization_id": "org_OtherSynthetic"},
+                                  "clerk")):
+        assert native.resolve_native_connection_settings(TENANT, bypass_target,
+            environ={**environment(source), "MODAL_ENVIRONMENT": "unknown"},
+            reader_factory=lambda *_a: pytest.fail("unselected native path called Clerk"),
+        ) is bypass_target
 
 
 def test_real_repository_consumer_hook_runs_after_scoped_database_context_closed(monkeypatch):

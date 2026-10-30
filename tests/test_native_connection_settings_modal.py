@@ -43,6 +43,36 @@ def test_native_publication_requires_literal_flag_and_preserves_empty_core_pins(
     assert len(module["runtime_secrets"]) == 3
 
 
+@pytest.mark.parametrize("app_name,modal_environment,expected", [
+    ("denali-dev", "denali-dev", "development"),
+    ("denali-production", "denali-prod", "production"),
+])
+def test_native_config_is_identical_on_remote_reimport_without_deploy_app_name(
+    monkeypatch, app_name, modal_environment, expected,
+):
+    monkeypatch.setenv("DENALI_MODAL_APP_NAME", app_name)
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED", "true")
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "database")
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CLERK_ORG_IDS",
+                       "org_NativeSynthetic")
+    connection_ids = [f"{index:08d}-1111-4111-8111-111111111111" for index in range(1, 7)]
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS",
+                       ",".join(connection_ids))
+    local = runpy.run_path(str(ROOT / "modal_app.py"))
+    local_config = local["shared_connections_config"]
+    assert local_config["DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT"] == expected
+    for name, value in local_config.items():
+        if value is not None:
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("DENALI_MODAL_APP_NAME")
+    monkeypatch.setenv("MODAL_ENVIRONMENT", modal_environment)
+    remote = runpy.run_path(str(ROOT / "modal_app.py"))
+    assert remote["shared_connections_config"] == local_config
+    assert "native_connection_settings_tick" in remote
+    assert len(remote["runtime_secrets"]) == len(local["runtime_secrets"]) == 3
+
+
 @pytest.mark.parametrize("flag", ["TRUE", "1", "yes", " false "])
 def test_native_publisher_invalid_flag_fails_before_modal_resources(monkeypatch, flag):
     monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED", flag)
