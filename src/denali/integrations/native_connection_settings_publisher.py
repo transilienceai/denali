@@ -37,6 +37,7 @@ from denali.integrations.native_connection_settings import (
     project_native_settings,
     validate_native_snapshot,
 )
+from denali.native_connection_settings_config import native_candidate_connection
 
 
 class NativeSettingsPublicationUnavailable(RuntimeError):
@@ -129,7 +130,9 @@ _RAW_TARGET_SQL = """
 SELECT c.id,c.tenant_id,c.provider,c.credential_type,c.declared_scopes,c.lifecycle_state,
        c.health_state,t.clerk_organization_id,
        (SELECT COALESCE(jsonb_object_agg(entry.key,entry.value),'{}'::jsonb)
-        FROM jsonb_each(c.credential_reference) entry WHERE entry.key=ANY(%s::text[]))
+        FROM jsonb_each(CASE WHEN jsonb_typeof(c.credential_reference)='object'
+                            THEN c.credential_reference ELSE '{}'::jsonb END) entry
+        WHERE entry.key=ANY(%s::text[]))
          AS credential_reference,
        (SELECT COALESCE(jsonb_object_agg(entry.key,
           CASE WHEN entry.key IN ('projects','subscriptions','repositories')
@@ -138,7 +141,9 @@ SELECT c.id,c.tenant_id,c.provider,c.credential_type,c.declared_scopes,c.lifecyc
                                   ORDER BY item.ordinality),'[]'::jsonb)
                      FROM jsonb_array_elements(entry.value) WITH ORDINALITY item(value,ordinality))
                ELSE entry.value END),'{}'::jsonb)
-        FROM jsonb_each(c.configuration) entry WHERE entry.key=ANY(%s::text[])) AS configuration
+        FROM jsonb_each(CASE WHEN jsonb_typeof(c.configuration)='object'
+                            THEN c.configuration ELSE '{}'::jsonb END) entry
+        WHERE entry.key=ANY(%s::text[])) AS configuration
 FROM provider_connection c JOIN denali_tenant t ON t.id=c.tenant_id
 WHERE t.clerk_organization_id=%s AND c.id=ANY(%s::uuid[])
 ORDER BY c.provider,c.id LIMIT 7
@@ -146,7 +151,7 @@ ORDER BY c.provider,c.id LIMIT 7
 
 
 def read_enrolled_native_targets(
-    connection: Any, config: NativePublisherConfig,
+    connection: Any, config: NativePublisherConfig, *, require_complete: bool = True,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Raw *identifier projection* only, deliberately bypassing the consumer hook.
 
@@ -159,15 +164,25 @@ def read_enrolled_native_targets(
     rows = connection.execute(_RAW_TARGET_SQL, (
         reference_keys, configuration_keys, config.organization_id, sorted(config.connection_ids),
     )).fetchall()
-    if (len(rows) != NATIVE_PILOT_CONNECTION_COUNT
-            or {str(row["id"]) for row in rows} != set(config.connection_ids)
+    identifiers = {str(row["id"]) for row in rows}
+    if (len(rows) > NATIVE_PILOT_CONNECTION_COUNT or len(identifiers) != len(rows)
+            or not identifiers <= set(config.connection_ids)
+            or require_complete and identifiers != set(config.connection_ids)
             or any(row.get("clerk_organization_id") != config.organization_id for row in rows)):
         _reject()
     tenants = {str(row["tenant_id"]) for row in rows}
+    if not rows:
+        tenant = connection.execute(
+            "SELECT id FROM denali_tenant WHERE clerk_organization_id=%s LIMIT 1",
+            (config.organization_id,),
+        ).fetchone()
+        if tenant:
+            tenants.add(str(tenant["id"]))
     if len(tenants) != 1:
         _reject()
     for row in rows:
-        if NATIVE_CREDENTIAL_TYPES.get(row.get("provider")) != row.get("credential_type"):
+        if (require_complete
+                and NATIVE_CREDENTIAL_TYPES.get(row.get("provider")) != row.get("credential_type")):
             _reject()
     return next(iter(tenants)), [dict(row) for row in rows]
 
@@ -203,19 +218,82 @@ def _measure(current: dict[str, Any], snapshot: dict[str, Any]) -> tuple[dict[st
 
 def _receipt(
     snapshot: dict[str, Any], combined_bytes: int, *, published: bool,
+    omissions: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     bindings = [
         [provider, record["id"], record["binding_sha256"]]
         for provider, records in sorted(snapshot["sources"].items()) for record in records
     ]
     return {
-        "ready": True, "expected_org_match": True, "organization_count": 1,
+        "ready": len(bindings) == NATIVE_PILOT_CONNECTION_COUNT,
+        "partial": len(bindings) != NATIVE_PILOT_CONNECTION_COUNT,
+        "expected_org_match": True, "organization_count": 1,
+        "configured_connection_count": NATIVE_PILOT_CONNECTION_COUNT,
         "enrollment_count": len(bindings), "provider_count": len(snapshot["sources"]),
+        "published_connection_count": len(bindings),
+        "omitted_connection_count": NATIVE_PILOT_CONNECTION_COUNT - len(bindings),
         "namespace_bytes": len(_bytes(snapshot)), "combined_metadata_bytes": combined_bytes,
+        "metadata_headroom_bytes": MAX_METADATA_BYTES - combined_bytes,
         "binding_digest": hashlib.sha256(_bytes(bindings)).hexdigest(),
         "write_attempted": published, "publication_acknowledged": published,
         "provider_requests": 0,
+        **(omissions or {}),
     }
+
+
+def _snapshot_for_targets(
+    tenant_id: str, targets: list[dict[str, Any]], config: NativePublisherConfig, *,
+    strict: bool, now: datetime | None,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    valid = []
+    invalid = 0
+    for target in targets:
+        try:
+            native_binding_sha256(tenant_id, target)
+            valid.append(target)
+        except NativeConnectionSettingsUnavailable:
+            if strict:
+                raise
+            invalid += 1
+    snapshot = build_native_snapshot(
+        tenant_id, config.organization_id, valid, config.environment, now=now, enforce_budget=False,
+    )
+    return snapshot, {
+        "missing_connection_count": NATIVE_PILOT_CONNECTION_COUNT - len(targets),
+        "invalid_connection_count": invalid, "budget_omitted_connection_count": 0,
+    }
+
+
+def _fit_snapshot(
+    current: dict[str, Any], snapshot: dict[str, Any], *, strict: bool,
+) -> tuple[dict[str, Any], int, int]:
+    """Drop largest complete records deterministically; never truncate selections."""
+    private, public = current.get("private_metadata"), current.get("public_metadata")
+    if not isinstance(private, dict) or not isinstance(public, dict):
+        _reject()
+    # The entire empty envelope must fit even when every native row is omitted.
+    empty = {**snapshot, "sources": {}}
+    _measure(current, empty)
+    candidates = sorted(
+        ((len(_bytes(record)), provider, record["id"])
+         for provider, records in snapshot["sources"].items() for record in records),
+        key=lambda item: (-item[0], item[1], item[2]),
+    )
+    omitted = 0
+    while True:
+        try:
+            private, combined = _measure(current, snapshot)
+            return private, combined, omitted
+        except NativeSettingsPublicationUnavailable:
+            if strict or not candidates:
+                raise
+            _, provider, identifier = candidates.pop(0)
+            snapshot["sources"][provider] = [
+                record for record in snapshot["sources"][provider] if record["id"] != identifier
+            ]
+            if not snapshot["sources"][provider]:
+                del snapshot["sources"][provider]
+            omitted += 1
 
 
 def _existing_snapshot_status(
@@ -237,7 +315,7 @@ def _existing_snapshot_status(
         )
         status.update({
             "existing_snapshot_fresh": True,
-            "existing_binding_parity": existing["sources"] == desired["sources"],
+            "existing_binding_parity": _bytes(existing["sources"]) == _bytes(desired["sources"]),
             "existing_revision_digest": hashlib.sha256(existing["revision"].encode()).hexdigest(),
             "existing_published_at": existing["published_at"],
             "existing_published_age_seconds": int(
@@ -266,17 +344,23 @@ def prepare_or_publish_native_settings(
                 "publication_acknowledged": False, "provider_requests": 0}
     _guard(config, expected_clerk_org_id)
     factory = connection_factory or psycopg.connect
+    strict = not (publish and os.environ.get(
+        "DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "database",
+    ) == "clerk")
     try:
         with factory(config.database_url, row_factory=dict_row, connect_timeout=3) as connection:
             _configure_read_transaction(connection, config.organization_id)
-            tenant_id, targets = read_enrolled_native_targets(connection, config)
-            snapshot = build_native_snapshot(
-                tenant_id, config.organization_id, targets, config.environment, now=now,
+            tenant_id, targets = read_enrolled_native_targets(
+                connection, config, require_complete=strict,
+            )
+            snapshot, omissions = _snapshot_for_targets(
+                tenant_id, targets, config, strict=strict, now=now,
             )
             with httpx.Client(trust_env=False, follow_redirects=False,
                               transport=transport or httpx.HTTPTransport(retries=0)) as client:
                 current = _organization(client, config)
-                private, combined = _measure(current, snapshot)
+                private, combined, budget_omitted = _fit_snapshot(current, snapshot, strict=strict)
+                omissions["budget_omitted_connection_count"] = budget_omitted
                 existing_status = _existing_snapshot_status(current, snapshot, config, now=now)
                 if publish:
                     acknowledged = bounded_json_request(
@@ -289,7 +373,8 @@ def prepare_or_publish_native_settings(
                     )
                     if (acknowledged.get("id") != config.organization_id
                             or not isinstance(acknowledged.get("private_metadata"), dict)
-                            or acknowledged["private_metadata"].get(NATIVE_NAMESPACE) != snapshot):
+                            or _bytes(acknowledged["private_metadata"].get(NATIVE_NAMESPACE))
+                            != _bytes(snapshot)):
                         _reject()
                     validate_native_snapshot(
                         acknowledged["private_metadata"][NATIVE_NAMESPACE],
@@ -298,12 +383,48 @@ def prepare_or_publish_native_settings(
                     existing_status = _existing_snapshot_status(
                         acknowledged, snapshot, config, now=now,
                     )
-            return {**_receipt(snapshot, combined, published=publish), **existing_status}
+            return {**_receipt(snapshot, combined, published=publish, omissions=omissions),
+                    **existing_status}
     except NativeSettingsPublicationUnavailable:
         raise
     except Exception:
         # A failed/timeout PATCH is unconfirmed, not a claim that no write occurred.
         raise NativeSettingsPublicationUnavailable() from None
+
+
+def publish_after_native_identifier_write(
+    tenant_id: str, connection_id: str, database_url: str, *,
+    environ: Mapping[str, str] | None = None, connection_factory=None, publish=None,
+) -> None:
+    """After commit only: refresh selected native IDs before post-save validation.
+
+    No provider is contacted and no health/state mutation occurs. A Clerk outage
+    is reported as fixed lookup unavailability, never as invalid provider access.
+    """
+    env = os.environ if environ is None else environ
+    if (env.get("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "database") != "clerk"
+            or env.get("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED", "false") != "true"
+            or not native_candidate_connection(env, connection_id)):
+        return
+    try:
+        config = NativePublisherConfig.from_environment(env)
+        if config is None or config.database_url != database_url:
+            _reject()
+        factory = connection_factory or psycopg.connect
+        with factory(database_url, row_factory=dict_row, connect_timeout=3) as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+            connection.execute("SET LOCAL statement_timeout='5s'")
+            row = connection.execute(
+                "SELECT clerk_organization_id FROM denali_tenant WHERE id=%s::uuid",
+                (tenant_id,),
+            ).fetchone()
+        if row is None or row["clerk_organization_id"] != config.organization_id:
+            return
+        (publish or prepare_or_publish_native_settings)(
+            config.organization_id, publish=True, config=config,
+        )
+    except Exception:
+        raise NativeConnectionSettingsUnavailable() from None
 
 
 def native_settings_manifest(

@@ -48,13 +48,14 @@ def test_native_publication_requires_literal_flag_and_preserves_empty_core_pins(
     ("denali-dev", "denali-dev", "development"),
     ("denali-production", "denali-prod", "production"),
 ])
+@pytest.mark.parametrize("source", ["database", "clerk"])
 def test_native_config_is_identical_on_remote_reimport_without_deploy_app_name(
-    monkeypatch, app_name, modal_environment, expected,
+    monkeypatch, app_name, modal_environment, expected, source,
 ):
     monkeypatch.setenv("DENALI_MODAL_APP_NAME", app_name)
     monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
     monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED", "true")
-    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "database")
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", source)
     monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CLERK_ORG_IDS",
                        "org_NativeSynthetic")
     connection_ids = [f"{index:08d}-1111-4111-8111-111111111111" for index in range(1, 7)]
@@ -80,6 +81,55 @@ def test_native_publisher_invalid_flag_fails_before_modal_resources(monkeypatch,
     monkeypatch.setattr(modal.Image, "debian_slim", lambda **_kwargs: pytest.fail("image created"))
     with pytest.raises(ValueError, match="PUBLISH_ENABLED must be true or false"):
         runpy.run_path(str(ROOT / "modal_app.py"))
+
+
+@pytest.mark.parametrize("failure", ["publisher-off", "short-manifest", "duplicate-manifest"])
+def test_clerk_source_requires_publisher_and_valid_pins_before_modal_resources(
+    monkeypatch, failure,
+):
+    from test_native_connection_settings import environment
+
+    env = {**environment(), "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": "true"}
+    if failure == "publisher-off":
+        env["DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED"] = "false"
+    elif failure == "short-manifest":
+        env["DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS"] = ""
+    else:
+        env["DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS"] += (
+            "," + env["DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS"].split(",")[0]
+        )
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(modal.Image, "debian_slim", lambda **_kwargs: pytest.fail("image created"))
+    with pytest.raises(ValueError):
+        runpy.run_path(str(ROOT / "modal_app.py"))
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_native_tick_records_failed_runs_with_fixed_errors(monkeypatch, partial, caplog):
+    from test_native_connection_settings_publisher import config
+
+    from denali.integrations import native_connection_settings_publisher as publisher
+
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED", "true")
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "database")
+    module = runpy.run_path(str(ROOT / "modal_app.py"))
+    monkeypatch.setattr(publisher.NativePublisherConfig, "from_environment",
+                        classmethod(lambda _cls: config(enabled=True)))
+
+    def publish(*_args, **_options):
+        if not partial:
+            raise RuntimeError("private-provider-payload")
+        return {"partial": True, "published_connection_count": 5,
+                "missing_connection_count": 1, "invalid_connection_count": 0,
+                "budget_omitted_connection_count": 0}
+
+    monkeypatch.setattr(publisher, "prepare_or_publish_native_settings", publish)
+    with pytest.raises(RuntimeError, match=("partial after acknowledgement" if partial
+                                           else "publication unconfirmed")):
+        module["native_connection_settings_tick"].local()
+    assert "private-provider-payload" not in caplog.text
+    assert "RuntimeError" in caplog.text if not partial else "partial" in caplog.text
 
 
 @pytest.mark.parametrize("workflow", [

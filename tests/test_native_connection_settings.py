@@ -183,14 +183,12 @@ def test_selected_native_metadata_errors_fail_closed(failure):
     assert len(calls) == 1
 
 
-def test_database_scope_or_target_change_fences_an_old_snapshot():
+def test_database_identity_or_target_change_fences_an_old_snapshot():
     client, _ = reader()
-    for mutation in ("scope", "id", "tenant", "reference", "type"):
+    for mutation in ("id", "tenant", "reference", "type"):
         target = native_targets()[0]
         tenant = TENANT
-        if mutation == "scope":
-            target["declared_scopes"].append("aws.another_scope")
-        elif mutation == "id":
+        if mutation == "id":
             target["id"] = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
         elif mutation == "tenant":
             tenant = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
@@ -200,6 +198,46 @@ def test_database_scope_or_target_change_fences_an_old_snapshot():
             target["credential_type"] = "platform_shared_aws"
         with pytest.raises(native.NativeConnectionSettingsUnavailable):
             client.resolve(tenant, target)
+
+
+def test_live_database_scopes_remain_authoritative_without_snapshot_refresh():
+    client, _ = reader()
+    target = native_targets()[0]
+    original_binding = native.native_binding_sha256(TENANT, target)
+    target["declared_scopes"] = ["aws.current_database_scope"]
+    assert native.native_binding_sha256(TENANT, target) == original_binding
+    assert client.resolve(TENANT, target)["declared_scopes"] == target["declared_scopes"]
+
+
+@pytest.mark.parametrize("malformed", ["short", "duplicate", "uppercase"])
+def test_invalid_pins_never_affect_shared_inactive_or_unselected_targets(malformed):
+    values = IDS[:-1] if malformed == "short" else IDS + [IDS[0]]
+    if malformed == "uppercase":
+        values = ["aaaaaaaa-1111-4111-8111-111111111111".upper(), *IDS[1:]]
+    env = {**environment(), "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS":
+           ",".join(values)}
+    original = native_targets()[0]
+    for change in ({"credential_type": "platform_shared_aws"},
+                   {"lifecycle_state": "disabled"},
+                   {"id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"}):
+        target = {**original, **change}
+        assert native.resolve_native_connection_settings(TENANT, target, environ=env,
+            reader_factory=lambda *_a: pytest.fail("unselected target read Clerk")) is target
+    if malformed == "uppercase":
+        original["id"] = "aaaaaaaa-1111-4111-8111-111111111111"
+    with pytest.raises(native.NativeConnectionSettingsUnavailable):
+        native.resolve_native_connection_settings(TENANT, original, environ=env)
+
+
+@pytest.mark.parametrize("coerced", [True, 1.0])
+def test_clerk_optional_value_cannot_coerce_database_integer(coerced):
+    target = native_targets()[0]
+    target["configuration"]["regions"] = [1]
+    document = snapshot([target, *native_targets()[1:]])
+    document["sources"]["aws"][0]["settings"]["regions"] = [coerced]
+    client, _ = reader(document)
+    with pytest.raises(native.NativeConnectionSettingsUnavailable):
+        client.resolve(TENANT, target)
 
 
 @pytest.mark.parametrize("response", [
@@ -356,3 +394,63 @@ def test_missing_tenant_scoped_row_never_queries_clerk(monkeypatch):
     assert PostgresInventoryRepository("synthetic-unused").get_connection_validation_target(
         TENANT, IDS[0],
     ) is None
+
+
+@pytest.mark.parametrize("method", [
+    "complete_azure_connection_setup", "complete_gcp_connection_setup",
+    "record_github_install_return", "complete_github_connection_setup",
+    "complete_azure_repos_connection_setup",
+])
+def test_identifier_write_hooks_execute_only_after_database_commit(monkeypatch, method):
+    state = {"open": False, "calls": 0}
+
+    class Database:
+        def __enter__(self):
+            state["open"] = True
+            return self
+
+        def __exit__(self, *_args):
+            state["open"] = False
+
+        def execute(self, *_args):
+            return self
+
+        def fetchone(self):
+            return {"id": IDS[0]}
+
+    def published(tenant_id, connection_id):
+        assert (tenant_id, connection_id) == (TENANT, IDS[0])
+        assert state["open"] is False
+        state["calls"] += 1
+
+    monkeypatch.setattr("denali.store.repository.psycopg.connect", lambda *_a, **_k: Database())
+    repository = PostgresInventoryRepository("synthetic-unused")
+    monkeypatch.setattr(repository, "get_connection", lambda *_a: {"unchanged": True})
+    monkeypatch.setattr(repository, "_publish_native_identifier_write", published)
+    options = {
+        "complete_azure_connection_setup": {
+            "expected_setup_token_sha256": "0" * 64, "service_principal_id": CLIENT,
+            "subscriptions": [{"id": SUBSCRIPTION}], "coverage_plan": [], "completed_at": NOW,
+        },
+        "complete_gcp_connection_setup": {
+            "expected_setup_token_sha256": "0" * 64, "projects": [{"id": "example-project"}],
+            "coverage_plan": [], "completed_at": NOW,
+        },
+        "record_github_install_return": {
+            "expected_install_state_sha256": "0" * 64, "installation_id": 456,
+            "oauth": {"state_sha256": "0" * 64, "pkce_verifier": "synthetic",
+                      "expires_at": NOW.isoformat()},
+        },
+        "complete_github_connection_setup": {
+            "expected_oauth_state_sha256": "0" * 64,
+            "installation": {"account_id": 789, "account_login": "example",
+                             "account_type": "Organization", "repository_selection": "selected"},
+            "installer": {}, "repositories": [{"id": 101}], "coverage_plan": [],
+            "completed_at": NOW,
+        },
+        "complete_azure_repos_connection_setup": {
+            "repositories": [{"id": CLIENT}], "coverage_plan": [], "completed_at": NOW,
+        },
+    }
+    assert getattr(repository, method)(TENANT, IDS[0], **options[method]) == {"unchanged": True}
+    assert state["calls"] == 1

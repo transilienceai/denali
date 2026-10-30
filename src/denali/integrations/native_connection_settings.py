@@ -25,10 +25,16 @@ from denali.integrations.clerk_connection_settings import (
     _timestamp,
     bounded_json_request,
 )
+from denali.native_connection_settings_config import (
+    NATIVE_PILOT_CONNECTION_COUNT as NATIVE_PILOT_CONNECTION_COUNT,
+)
+from denali.native_connection_settings_config import (
+    native_candidate_connection,
+    native_enrollment,
+)
 
 NATIVE_NAMESPACE = "transilience_native_connections"
 NATIVE_SNAPSHOT_TTL_SECONDS = 300
-NATIVE_PILOT_CONNECTION_COUNT = 6
 NATIVE_CREDENTIAL_TYPES = {
     "aws": "aws_assume_role",
     "gcp": "gcp_service_account",
@@ -205,19 +211,15 @@ def project_native_settings(target: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def native_binding_sha256(tenant_id: str, target: Mapping[str, Any]) -> str:
-    """Fence the snapshot to current database identity/scopes, never trust its hash alone."""
+    """Fence database identity and identifiers; scopes remain live database authority."""
     organization_id = target.get("clerk_organization_id")
     if not isinstance(organization_id, str) or not _ORG.fullmatch(organization_id):
-        _reject()
-    scopes = target.get("declared_scopes")
-    if (not isinstance(scopes, list) or any(not isinstance(scope, str) for scope in scopes)
-            or len(scopes) > 100 or len(set(scopes)) != len(scopes)):
         _reject()
     value = {
         "version": 1, "source_app_id": "denali", "organization_id": organization_id,
         "tenant_id": _uuid(tenant_id), "id": _uuid(target.get("id")),
         "provider": _native_provider(target), "credential_type": target["credential_type"],
-        "declared_scopes": scopes, "settings": project_native_settings(target),
+        "settings": project_native_settings(target),
     }
     _safe(value)
     return hashlib.sha256(_canonical(value)).hexdigest()
@@ -225,12 +227,12 @@ def native_binding_sha256(tenant_id: str, target: Mapping[str, Any]) -> str:
 
 def build_native_snapshot(
     tenant_id: str, organization_id: str, targets: list[Mapping[str, Any]], environment: str, *,
-    now: datetime | None = None, revision: str | None = None,
+    now: datetime | None = None, revision: str | None = None, enforce_budget: bool = True,
 ) -> dict[str, Any]:
     """Build identifiers only. Does not read Clerk, write metadata, or invoke providers."""
     if (environment not in {"production", "development"}
             or not isinstance(organization_id, str) or not _ORG.fullmatch(organization_id)
-            or not 1 <= len(targets) <= 100):
+            or not 0 <= len(targets) <= 100):
         _reject()
     _uuid(tenant_id)
     clock = now or datetime.now(UTC)
@@ -256,11 +258,13 @@ def build_native_snapshot(
         "expires_at": (clock + timedelta(seconds=NATIVE_SNAPSHOT_TTL_SECONDS)).isoformat(),
         "sources": sources,
     }
-    return validate_native_snapshot(result, organization_id, environment, now=clock)
+    return validate_native_snapshot(result, organization_id, environment, now=clock,
+                                    enforce_budget=enforce_budget)
 
 
 def validate_native_snapshot(
     value: Any, organization_id: str, environment: str, *, now: datetime | None = None,
+    enforce_budget: bool = True,
 ) -> dict[str, Any]:
     if (not isinstance(value, dict) or set(value) != _ROOT_FIELDS
             or type(value.get("version")) is not int or value["version"] != 1
@@ -269,7 +273,7 @@ def validate_native_snapshot(
             or value.get("environment") != environment
             or value.get("organization_id") != organization_id
             or not isinstance(organization_id, str) or not _ORG.fullmatch(organization_id)
-            or len(_canonical(value)) > MAX_METADATA_BYTES):
+            or enforce_budget and len(_canonical(value)) > MAX_METADATA_BYTES):
         _reject()
     _uuid(value.get("revision"))
     try:
@@ -366,7 +370,8 @@ class NativeConnectionSettingsReader:
             record = matches[0]
             if (not hmac.compare_digest(record["binding_sha256"],
                                         native_binding_sha256(tenant_id, target))
-                    or record["settings"] != project_native_settings(target)):
+                    or _canonical(record["settings"])
+                    != _canonical(project_native_settings(target))):
                 _reject()
             return NativeResolvedTarget(_overlay(target, record["settings"]))
         except NativeConnectionSettingsUnavailable:
@@ -378,18 +383,10 @@ class NativeConnectionSettingsReader:
 def enrolled_native_settings(
     environ: Mapping[str, str],
 ) -> tuple[frozenset[str], frozenset[str]]:
-    def values(name: str) -> list[str]:
-        result = [item.strip() for item in environ.get(name, "").split(",") if item.strip()]
-        if len(set(result)) != len(result):
-            _reject()
-        return result
-
-    organizations = values("DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CLERK_ORG_IDS")
-    connections = values("DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS")
-    if (len(organizations) != 1 or not _ORG.fullmatch(organizations[0])
-            or len(connections) != NATIVE_PILOT_CONNECTION_COUNT):
-        _reject()
-    return frozenset(organizations), frozenset(_uuid(value) for value in connections)
+    try:
+        return native_enrollment(environ)
+    except ValueError:
+        raise NativeConnectionSettingsUnavailable() from None
 
 
 def native_environment(environ: Mapping[str, str]) -> str:
@@ -428,13 +425,15 @@ def resolve_native_connection_settings(
     if target.get("clerk_organization_id") not in configured_orgs:
         # A selected organization's configuration failure cannot affect another org.
         return target
+    if (str(target.get("credential_type", "")).startswith("platform_shared_")
+            or target.get("lifecycle_state") != "active"
+            or not native_candidate_connection(env, str(target.get("id")))):
+        return target
     if source != "clerk":
         _reject()
     organizations, connections = enrolled_native_settings(env)
     if (target.get("clerk_organization_id") not in organizations
-            or str(target.get("id")) not in connections
-            or str(target.get("credential_type", "")).startswith("platform_shared_")
-            or target.get("lifecycle_state") != "active"):
+            or str(target.get("id")) not in connections):
         return target
     environment = native_environment(env)
     key = native_backend_key(env, environment)

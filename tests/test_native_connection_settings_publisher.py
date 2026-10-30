@@ -15,6 +15,9 @@ from test_native_connection_settings import (
     native_targets,
     snapshot,
 )
+from test_native_connection_settings import (
+    reader as native_reader,
+)
 
 from denali.integrations import native_connection_settings as native
 from denali.integrations import native_connection_settings_publisher as publisher
@@ -45,6 +48,10 @@ class Database:
         return self
 
     def fetchone(self):
+        if "SELECT id FROM denali_tenant" in self.queries[-1][0]:
+            return {"id": TENANT}
+        if "SELECT clerk_organization_id" in self.queries[-1][0]:
+            return {"clerk_organization_id": ORG}
         return {"locked": self.locked}
 
     def fetchall(self):
@@ -238,6 +245,106 @@ def test_preflight_stages_publication_before_consumer_cutover():
         publisher.NativePublisherConfig.from_environment(
             {**env, "MODAL_ENVIRONMENT": "unrecognized-modal-environment"}, require_enabled=False,
         )
+
+
+@pytest.mark.parametrize("failure", ["deleted", "malformed", "all-deleted", "scalar"])
+def test_steady_publication_isolates_missing_or_invalid_records(monkeypatch, failure):
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "clerk")
+    rows = native_targets()
+    if failure == "deleted":
+        rows.pop(0)
+    elif failure == "malformed":
+        rows[0]["configuration"]["selected_resource"] = None
+    elif failure == "scalar":
+        rows[0]["credential_reference"] = []
+    else:
+        rows = []
+    database = Database(rows)
+    clerk = Clerk(database=database)
+    receipt = publisher.prepare_or_publish_native_settings(
+        ORG, publish=True, config=config(enabled=True),
+        connection_factory=lambda *_a, **_k: database,
+        transport=httpx.MockTransport(clerk), now=NOW,
+    )
+    published = 0 if failure == "all-deleted" else 5
+    assert receipt["partial"] is True and receipt["ready"] is False
+    assert receipt["published_connection_count"] == published
+    assert receipt["enrollment_count"] == published
+    assert receipt["omitted_connection_count"] == 6 - published
+    assert receipt["publication_acknowledged"] is True
+    if failure in {"deleted", "all-deleted"}:
+        assert receipt["missing_connection_count"] == 6 - published
+    else:
+        assert receipt["invalid_connection_count"] == 1
+    document = clerk.value["private_metadata"][native.NATIVE_NAMESPACE]
+    client, _ = native_reader(document)
+    if published:
+        resolved = client.resolve(TENANT, native_targets()[1])
+        assert resolved.native_connection_settings_source == "clerk"
+    with pytest.raises(native.NativeConnectionSettingsUnavailable):
+        client.resolve(TENANT, native_targets()[0])
+
+
+def test_steady_budget_omits_largest_whole_record_without_truncation(monkeypatch):
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "clerk")
+    rows = native_targets()
+    github = next(row for row in rows if row["provider"] == "github")
+    repositories = [{"id": 10**12 + index} for index in range(500)]
+    github["configuration"]["repositories"] = repositories
+    database = Database(rows)
+    clerk = Clerk(private={"other": "x" * 1200}, database=database)
+    receipt = publisher.prepare_or_publish_native_settings(
+        ORG, publish=True, config=config(enabled=True),
+        connection_factory=lambda *_a, **_k: database,
+        transport=httpx.MockTransport(clerk), now=NOW,
+    )
+    assert receipt["budget_omitted_connection_count"] == 1
+    assert receipt["published_connection_count"] == 5 and receipt["partial"] is True
+    assert receipt["combined_metadata_bytes"] <= 8192
+    document = clerk.value["private_metadata"][native.NATIVE_NAMESPACE]
+    assert "github" not in document["sources"]
+    assert len(document["sources"]["aws"]) == 2
+    assert github["configuration"]["repositories"] == repositories
+    assert clerk.value["private_metadata"]["other"] == "x" * 1200
+
+
+def test_postcommit_publication_is_scoped_and_closes_tenant_read_first():
+    env = {**environment(), "DENALI_DSN": config().database_url,
+           "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": "true"}
+    database = Database()
+    calls = []
+
+    def publish(organization_id, **options):
+        assert database.open is False
+        assert organization_id == ORG and options["publish"] is True
+        calls.append(organization_id)
+
+    publisher.publish_after_native_identifier_write(TENANT, IDS[0], config().database_url,
+        environ=env, connection_factory=lambda *_a, **_k: database, publish=publish)
+    assert calls == [ORG]
+    cases = (({"DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE": "database"}, IDS[0]),
+             ({"DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": "false"}, IDS[0]),
+             ({}, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"))
+    for change, connection_id in cases:
+        publisher.publish_after_native_identifier_write(
+            TENANT, connection_id, config().database_url,
+            environ={**env, **change}, connection_factory=lambda *_a, **_k: pytest.fail("read DB"),
+            publish=lambda *_a, **_k: pytest.fail("published outside selected path"))
+
+
+def test_postcommit_publication_failure_is_fixed_without_provider_or_health_mutation():
+    env = {**environment(), "DENALI_DSN": config().database_url,
+           "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": "true"}
+    database = Database()
+
+    def failed(*_args, **_options):
+        raise RuntimeError("private-provider-payload")
+
+    with pytest.raises(native.NativeConnectionSettingsUnavailable,
+                       match="^native connection settings unavailable$"):
+        publisher.publish_after_native_identifier_write(TENANT, IDS[0], config().database_url,
+            environ=env, connection_factory=lambda *_a, **_k: database, publish=failed)
+    assert all("UPDATE" not in sql and "INSERT" not in sql for sql, _ in database.queries)
 
 
 def test_operator_manifest_selects_and_returns_ids_only():

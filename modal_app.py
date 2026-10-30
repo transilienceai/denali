@@ -8,6 +8,7 @@ from pathlib import Path
 
 import modal
 
+from denali.native_connection_settings_config import native_enrollment
 from denali.worker_limits import (
     COLLECTION_WORKER_TIMEOUT_SECONDS,
     VALIDATION_WORKER_TIMEOUT_SECONDS,
@@ -29,6 +30,13 @@ native_settings_publish_flag = os.environ.get(
 )
 if native_settings_publish_flag not in {"true", "false"}:
     raise ValueError("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED must be true or false")
+native_settings_source = os.environ.get("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "database")
+if native_settings_source not in {"database", "clerk"}:
+    raise ValueError("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE must be database or clerk")
+if native_settings_source == "clerk":
+    if native_settings_publish_flag != "true":
+        raise ValueError("native Clerk lookup requires enabled publication")
+    native_enrollment(os.environ)
 native_settings_environment = {
     "denali-prod": "production", "denali-dev": "development",
 }.get(os.environ.get("MODAL_ENVIRONMENT", ""))
@@ -65,8 +73,9 @@ for native_setting_name in (
 ):
     native_setting_value = os.environ.get(native_setting_name)
     if native_setting_value:
-        # Public reviewed pins only. Empty deploy variables must not shadow an
-        # existing core Secret's consumer selection or enrollment.
+        # Public reviewed pins only. Protected workflows always supply SOURCE
+        # (default database); that variable is the lookup control plane. Empty
+        # org/ID pins must not shadow enrollment already present in a core Secret.
         shared_connections_config[native_setting_name] = native_setting_value
 workspace_flag = os.environ.get("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED", "false")
 if workspace_flag not in {"true", "false"}:
@@ -151,14 +160,24 @@ if native_settings_publish_flag == "true":
             config = NativePublisherConfig.from_environment()
             if config is None:
                 return {"enabled": False, "publication_acknowledged": False}
-            return prepare_or_publish_native_settings(
+            receipt = prepare_or_publish_native_settings(
                 config.organization_id, publish=True, config=config,
             )
-        except Exception:
+        except Exception as error:
             # A timed-out PATCH may have committed; never claim zero writes.
-            logger.warning("native connection settings publication unconfirmed", exc_info=False)
-            return {"failed": 1, "publication_acknowledged": False,
-                    "write_outcome": "unconfirmed", "provider_requests": 0}
+            logger.error("native connection settings publication unconfirmed (%s)",
+                         type(error).__name__, exc_info=False)
+            raise RuntimeError("native connection settings publication unconfirmed") from None
+        if receipt.get("partial"):
+            logger.error("native connection settings publication partial after acknowledgement",
+                         extra={key: receipt[key] for key in (
+                             "published_connection_count", "missing_connection_count",
+                             "invalid_connection_count", "budget_omitted_connection_count",
+                         )})
+            raise RuntimeError(
+                "native connection settings publication partial after acknowledgement"
+            )
+        return receipt
 
 
 @app.function(image=image, secrets=shared_connections_secrets, **_region_options())

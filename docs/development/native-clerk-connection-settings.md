@@ -42,10 +42,12 @@ change; an unhealthy/partial connection must remain represented honestly.
 `src/denali/integrations/native_connection_settings.py` are the canonical projection
 and binding implementation used by both writer and consumer. Hash inputs include
 the current server-resolved tenant/organization, connection ID, provider, native
-credential type, database-declared scopes and projected settings. The consumer
-checks both this hash and exact projected-setting equality against the current
-database row. A stale or edited Clerk document therefore cannot retarget the
-connection, change credential type, add scopes or select another tenant.
+credential type and projected settings. The consumer checks both this hash and
+canonical JSON bytes against the current database projection, including value
+types. Clerk booleans/floats cannot substitute for database integer identifiers.
+Declared scopes remain live database authority and are never obtained from Clerk;
+a scope-only edit therefore does not need an identifier refresh. Clerk cannot
+retarget the connection, change credential type, add scopes or select another tenant.
 
 Passwords, access/refresh tokens, private keys, raw source payloads, setup-state
 hashes, PKCE verifiers, onboarding state and GCP operator credential profiles or
@@ -63,6 +65,21 @@ Lifecycle, scopes, coverage plan, setup/onboarding data, operator-profile choice
 repository/project display metadata and durable job state remain database-owned.
 Disabled connections retain their database lifecycle denial without requiring a
 remote lookup.
+
+The five existing identifier-changing setup methods (Azure completion, GCP
+completion, GitHub installation return, GitHub completion and Azure Repos
+completion) publish after their database commit and before the API's next consumer
+read. This is limited to the enrolled org/ID while source is Clerk and publication
+is enabled; no provider or health mutation is added. Normal successful setup does
+not wait for the periodic tick. A publication outage is fixed settings
+unavailability, never a provider-credential failure. Validation itself only writes
+health/evidence/timestamps and does not change the selected identifiers.
+
+Publication happens after the durable write: a one-time callback capability may
+already be consumed if Clerk then fails. The existing callback failure redirect or
+fixed API error is retained; replay of that consumed callback is not promised. The
+committed state remains intact, no validation job is created by publication, and
+the normal fresh setup flow can resume after identifier publication recovers.
 
 The shared getter covers the existing API setup/validation paths, durable native
 validation and collection workers, runtime collection and internal native bridge
@@ -84,7 +101,7 @@ sanitized failure handling. Another organization's settings or failures do not
 change an unselected organization's native path.
 
 Each selected active target resolution makes one Clerk GET. A normal publication
-refresh makes one GET plus one PATCH; provider-free verification resolves the six
+refresh or selected identifier write makes one GET plus one PATCH; provider-free verification resolves the six
 targets and performs a final metadata GET. There is no process cache or HTTP retry.
 Clerk latency, availability and rate limiting therefore become runtime dependencies
 for the enrolled native path; their production workload impact still requires live
@@ -107,7 +124,9 @@ observation.
   lookup/publication reject an unknown nonempty Modal environment.
 - `DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED=true|false`: separate,
   default-false **deployment** selector for the 60-second refresh scheduler and
-  manual publication permission. It does not select the native consumer.
+  manual publication permission. It does not select the native consumer. Deployment
+  refuses source Clerk unless publication is enabled and exact-six pins are valid;
+  this check uses a standard-library-only parser before Modal resources are built.
 - The existing Denali-owned `CLERK_SECRET_KEY` is the native reader/writer's backend
   credential. An optional `DENALI_NATIVE_CONNECTION_SETTINGS_SECRET_KEY` may
   explicitly override it inside Denali only. These remain Modal secrets and never
@@ -144,12 +163,23 @@ Use the exact already-approved Clerk organization as the expected-org argument.
    separate publication flag. It holds a PostgreSQL read-only repeatable-read
    transaction/advisory org lock through Clerk PATCH acknowledgement. The raw SQL
    selects only allowlisted identifier fields and reduces nested selections to
-   IDs; it never recursively invokes the consumer. Provider arrays replace in
-   full, obsolete object keys are deleted, and unrelated namespaces are preserved.
+   IDs; it never recursively invokes the consumer. Initial preflight and staged
+   source-database publication require all six complete bindings. In steady source
+   Clerk operation, deleted/malformed rows are omitted independently; if the combined
+   budget is exceeded, the largest whole record is omitted first, with provider/ID
+   tie ordering. Lists are never truncated. Remaining valid records are refreshed;
+   omitted IDs fail closed independently. Receipts distinguish missing, invalid,
+   budget-omitted and published counts and mark partial publication honestly.
+   Provider arrays replace in full, obsolete object keys are deleted, and unrelated
+   namespaces are preserved. If even the empty native envelope cannot fit alongside
+   other metadata, publication fails visibly. Reported headroom describes the current
+   measurement and cannot reserve capacity against future Platform writes.
 4. `native_connection_settings_tick` exists/schedules only when explicitly enabled:
    every 60 seconds, timeout 60 seconds, retries zero. Its fixed manifest is the
-   same exact org/six IDs. Failures are unconfirmed, not silently retried or
-   certified as successful. No failure extends a saved snapshot's expiry.
+   same exact org/six IDs. Failures raise a fixed unconfirmed error so Modal records
+   a failed run; partial acknowledged publication also raises a fixed partial-after-ACK
+   error with counts-only logging. Neither condition starts an automatic retry.
+   No failed publication extends expiry or changes provider health.
 5. `verify_native_connection_settings_lookup(expected_clerk_org_id)` is unscheduled
    and read-only. After closing its raw SQL context, it resolves each enrolled
    target through the real repository consumer hook, without invoking a validator,

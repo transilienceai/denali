@@ -4923,6 +4923,13 @@ class PostgresInventoryRepository:
 
         return resolve_native_connection_settings(tenant_id, dict(row))
 
+    def _publish_native_identifier_write(self, tenant_id: str, connection_id: str) -> None:
+        from denali.integrations.native_connection_settings_publisher import (
+            publish_after_native_identifier_write,
+        )
+
+        publish_after_native_identifier_write(tenant_id, connection_id, self._dsn)
+
     def record_connection_validation(
         self,
         tenant_id: str,
@@ -5095,6 +5102,8 @@ class PostgresInventoryRepository:
                     expected_setup_token_sha256,
                 ),
             ).fetchone()
+        if row is not None:
+            self._publish_native_identifier_write(tenant_id, connection_id)
         return None if row is None else self.get_connection(tenant_id, connection_id)
 
     def record_entra_consent_launch(
@@ -5337,6 +5346,8 @@ class PostgresInventoryRepository:
                     expected_setup_token_sha256,
                 ),
             ).fetchone()
+        if row is not None:
+            self._publish_native_identifier_write(tenant_id, connection_id)
         return None if row is None else self.get_connection(tenant_id, connection_id)
 
     def record_github_install_launch(
@@ -5421,6 +5432,8 @@ class PostgresInventoryRepository:
                     expected_install_state_sha256,
                 ),
             ).fetchone()
+        if row is not None:
+            self._publish_native_identifier_write(tenant_id, connection_id)
         return None if row is None else self.get_connection(tenant_id, connection_id)
 
     def complete_github_connection_setup(
@@ -5474,6 +5487,8 @@ class PostgresInventoryRepository:
                     expected_oauth_state_sha256,
                 ),
             ).fetchone()
+        if row is not None:
+            self._publish_native_identifier_write(tenant_id, connection_id)
         return None if row is None else self.get_connection(tenant_id, connection_id)
 
     def record_azure_repos_oauth_launch(
@@ -5614,6 +5629,8 @@ class PostgresInventoryRepository:
                     connection_id,
                 ),
             ).fetchone()
+        if row is not None:
+            self._publish_native_identifier_write(tenant_id, connection_id)
         return None if row is None else self.get_connection(tenant_id, connection_id)
 
     def disable_connection(self, tenant_id: str, connection_id: str) -> dict[str, Any] | None:

@@ -68,7 +68,7 @@ def test_real_readonly_sql_projects_native_identifiers_not_setup_or_operator_mat
         targets[0]["id"]) is None
 
 
-def test_real_repository_hook_preserves_native_auth_data_and_fences_stale_scope(monkeypatch):
+def test_real_repository_hook_preserves_native_auth_data_and_uses_live_scope(monkeypatch):
     repository, tenant, targets, config = records(monkeypatch)
     now = datetime.now(UTC)
     document = native.build_native_snapshot(
@@ -105,8 +105,8 @@ def test_real_repository_hook_preserves_native_auth_data_and_fences_stale_scope(
         connection.execute("UPDATE provider_connection SET declared_scopes=%s::jsonb "
                            "WHERE tenant_id=%s AND id=%s",
                            ('["aws.changed_scope"]', tenant, targets[0]["id"]))
-    with pytest.raises(native.NativeConnectionSettingsUnavailable):
-        repository.get_connection_validation_target(tenant, targets[0]["id"])
+    resolved = repository.get_connection_validation_target(tenant, targets[0]["id"])
+    assert resolved["declared_scopes"] == ["aws.changed_scope"]
     # The failed read cannot mutate any saved authentication or setup state.
     with psycopg.connect(DSN, row_factory=dict_row) as connection:
         saved = connection.execute(
@@ -143,3 +143,136 @@ def test_real_publication_holds_org_lock_through_ack_and_preserves_platform_name
     assert receipt["publication_acknowledged"] is True
     assert receipt["enrollment_count"] == 6
     assert organization["private_metadata"]["transilience_connections"] == {"unrelated": True}
+
+
+def test_real_postcommit_gcp_setup_publishes_before_immediate_consumer_read(monkeypatch):
+    import json
+
+    from test_native_connection_settings_publisher import merge_patch
+
+    repository, tenant, targets, config = records(monkeypatch)
+    gcp = next(target for target in targets if target["provider"] == "gcp")
+    now = datetime.now(UTC)
+    organization = {"id": config.organization_id, "private_metadata": {
+        native.NATIVE_NAMESPACE: native.build_native_snapshot(
+            tenant, config.organization_id, targets, "development", now=now,
+        ),
+    }, "public_metadata": {}}
+    requests = []
+
+    def clerk(request):
+        requests.append(request.method)
+        # A separate session must already see the completed write before HTTP.
+        with psycopg.connect(DSN, row_factory=dict_row) as connection:
+            saved = connection.execute(
+                "SELECT configuration FROM provider_connection WHERE tenant_id=%s AND id=%s",
+                (tenant, gcp["id"]),
+            ).fetchone()
+        assert saved["configuration"]["projects"][0]["id"] == "new-example-project"
+        if request.method == "PATCH":
+            merge_patch(organization, json.loads(request.content))
+        return httpx.Response(200, json=copy.deepcopy(organization))
+
+    transport = httpx.MockTransport(clerk)
+    original_publish = publisher.prepare_or_publish_native_settings
+    monkeypatch.setattr(publisher, "prepare_or_publish_native_settings", lambda *args, **options:
+        original_publish(*args, **options, transport=transport))
+    original_reader = native.NativeConnectionSettingsReader
+    monkeypatch.setattr(native, "NativeConnectionSettingsReader", lambda key, environment:
+        original_reader(key, environment, client=httpx.Client(transport=transport)))
+    for name, value in {
+        "DENALI_DSN": DSN,
+        "DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE": "clerk",
+        "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": "true",
+        "DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT": "development",
+        "MODAL_ENVIRONMENT": "denali-dev", "CLERK_SECRET_KEY": config.secret_key,
+        "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CLERK_ORG_IDS": config.organization_id,
+        "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS":
+            ",".join(sorted(config.connection_ids)),
+    }.items():
+        monkeypatch.setenv(name, value)
+    changed = repository.complete_gcp_connection_setup(
+        tenant, gcp["id"], expected_setup_token_sha256="0" * 64,
+        projects=[{"id": "new-example-project", "name": "Database display label"}],
+        coverage_plan=[], completed_at=now,
+    )
+    assert changed is not None
+    resolved = repository.get_connection_validation_target(tenant, gcp["id"])
+    assert resolved.native_connection_settings_source == "clerk"
+    assert resolved["configuration"]["projects"][0]["id"] == "new-example-project"
+    assert resolved["credential_reference"]["operator_credential_profile"] == "native_gcp_wif_v1"
+    assert requests == ["GET", "PATCH", "GET"]
+    # Existing setup transition, never a provider failure caused by publication.
+    assert changed["health_state"] == "unknown"
+    with psycopg.connect(DSN) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM connection_validation_job WHERE tenant_id=%s", (tenant,),
+        ).fetchone()[0] == 0
+
+
+def test_real_steady_sql_omits_deleted_and_scalar_rows_without_stalling_other_bindings(monkeypatch):
+    import json
+
+    from test_native_connection_settings_publisher import merge_patch
+
+    repository, tenant, targets, config = records(monkeypatch)
+    repository.disable_connection(tenant, targets[0]["id"])
+    assert repository.delete_connection(tenant, targets[0]["id"]) == "deleted"
+    with psycopg.connect(DSN) as connection:
+        connection.execute(
+            "UPDATE provider_connection SET credential_reference='[]'::jsonb "
+            "WHERE tenant_id=%s AND id=%s", (tenant, targets[1]["id"]),
+        )
+    organization = {"id": config.organization_id, "private_metadata": {}, "public_metadata": {}}
+
+    def clerk(request):
+        if request.method == "PATCH":
+            merge_patch(organization, json.loads(request.content))
+        return httpx.Response(200, json=copy.deepcopy(organization))
+
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "clerk")
+    receipt = publisher.prepare_or_publish_native_settings(
+        config.organization_id, publish=True, config=config, transport=httpx.MockTransport(clerk),
+    )
+    assert receipt["publication_acknowledged"] is True
+    assert receipt["missing_connection_count"] == receipt["invalid_connection_count"] == 1
+    assert receipt["published_connection_count"] == 4 and receipt["partial"] is True
+    snapshot = organization["private_metadata"][native.NATIVE_NAMESPACE]
+    assert "aws" not in snapshot["sources"]
+    assert set(snapshot["sources"]) == {"gcp", "github", "azure", "entra"}
+
+
+def test_callback_commit_survives_publication_failure_and_cannot_replay_consumed_state(monkeypatch):
+    repository, tenant, targets, _config = records(monkeypatch)
+    github = next(target for target in targets if target["provider"] == "github")
+    with psycopg.connect(DSN) as connection:
+        connection.execute(
+            "UPDATE provider_connection SET credential_reference="
+            "credential_reference || jsonb_build_object('install_state_sha256',%s::text) "
+            "WHERE tenant_id=%s AND id=%s", ("0" * 64, tenant, github["id"]),
+        )
+
+    def unavailable(*_args):
+        raise native.NativeConnectionSettingsUnavailable()
+
+    monkeypatch.setattr(repository, "_publish_native_identifier_write", unavailable)
+    options = {
+        "expected_install_state_sha256": "0" * 64, "installation_id": 987,
+        "oauth": {"state_sha256": "f" * 64, "pkce_verifier": "synthetic-new-state",
+                  "expires_at": datetime.now(UTC).isoformat()},
+    }
+    with pytest.raises(native.NativeConnectionSettingsUnavailable):
+        repository.record_github_install_return(tenant, github["id"], **options)
+    with psycopg.connect(DSN, row_factory=dict_row) as connection:
+        saved = connection.execute(
+            "SELECT credential_reference,health_state FROM provider_connection "
+            "WHERE tenant_id=%s AND id=%s", (tenant, github["id"]),
+        ).fetchone()
+        jobs = connection.execute(
+            "SELECT count(*) AS count FROM connection_validation_job WHERE tenant_id=%s", (tenant,),
+        ).fetchone()
+    assert "install_state_sha256" not in saved["credential_reference"]
+    assert saved["credential_reference"]["installation_id"] == 987
+    assert saved["credential_reference"]["oauth_state_sha256"] == "f" * 64
+    assert saved["health_state"] == "unknown" and jobs["count"] == 0
+    assert repository.record_github_install_return(tenant, github["id"], **options) is None

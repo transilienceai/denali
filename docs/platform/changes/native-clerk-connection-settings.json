@@ -2,7 +2,7 @@
   "version": 1,
   "product": "denali",
   "change": "no_external_change",
-  "reason": "A default-off, exact-org/six-connection native identifier lookup uses Denali-owned Clerk private metadata, guarded by current database identity/scope hashes and exact identifier parity. Native provider authentication/operator identities, IAM, Platform broker admission, tenant mapping, lifecycle, jobs, unselected organizations and public receiver schemas remain unchanged. Separate operator preflight/publication/provider-free verification are not public capabilities.",
+  "reason": "A default-off, exact-org/six-connection native identifier lookup uses Denali-owned Clerk private metadata, guarded by current database identity/identifier binding and canonical parity. Scopes remain live database authority. Native provider authentication/operator identities, IAM, Platform broker admission, tenant mapping, lifecycle, jobs, unselected organizations and public receiver schemas remain unchanged. Separate operator preflight/publication/provider-free verification and post-commit identifier publication are not public capabilities.",
   "capabilities": [],
   "contract_files": [],
   "documentation_files": [],
