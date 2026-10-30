@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "An opt-in server-only shared connection settings reader uses the versioned Clerk private projection instead of the Platform listing endpoint. Existing product membership, organization allowlists, tenant mapping, sanitized receiver schemas, native jobs, cloud credential brokering and capabilities are unchanged. Missing or invalid Clerk metadata fails closed without fallback.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "The existing CLI/MCP calls the same authenticated product receiver and receives the same sanitized listing shape; no private settings or Clerk backend key is exposed and no login scope/package change is needed."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "The paired Platform implementation publishes internal metadata only. Public Denali capability and gateway contracts do not change; token issuance, provider reads and execution-time authorization remain on the broker."
+  }
+}
