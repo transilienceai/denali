@@ -47,6 +47,7 @@ class SharedConnectionsClient:
         *,
         allowed_clerk_org_ids: frozenset[str] | None = None,
         connection_settings_reader: Any | None = None,
+        connection_settings_org_ids: frozenset[str] | None = None,
     ):
         origin = origin.rstrip("/")
         parsed = urlsplit(origin)
@@ -66,6 +67,13 @@ class SharedConnectionsClient:
         self._clerk = Clerk(bearer_auth=machine_secret_key)
         self._allowed_clerk_org_ids = allowed_clerk_org_ids
         self._connection_settings_reader = connection_settings_reader
+        if connection_settings_reader is not None and (
+            not connection_settings_org_ids or len(connection_settings_org_ids) > 20
+            or any(not re.fullmatch(r"org_[A-Za-z0-9]{1,124}", org)
+                   for org in connection_settings_org_ids)
+        ):
+            raise ValueError("Clerk connection-settings migration selection invalid")
+        self._connection_settings_org_ids = connection_settings_org_ids or frozenset()
 
     @staticmethod
     def allowed_org_ids_from_environment() -> frozenset[str]:
@@ -77,6 +85,16 @@ class SharedConnectionsClient:
 
     def allows_org(self, clerk_org_id: str) -> bool:
         return self._allowed_clerk_org_ids is None or clerk_org_id in self._allowed_clerk_org_ids
+
+    @staticmethod
+    def settings_org_ids_from_environment() -> frozenset[str]:
+        values = [value.strip() for value in os.environ.get(
+            "DENALI_CLERK_CONNECTION_SETTINGS_ORG_IDS", "",
+        ).split(",") if value.strip()]
+        if (not 1 <= len(values) <= 20 or len(values) != len(set(values))
+                or any(not re.fullmatch(r"org_[A-Za-z0-9]{1,124}", org) for org in values)):
+            raise ValueError("Clerk connection-settings migration selection invalid")
+        return frozenset(values)
 
     @property
     def origin(self) -> str:
@@ -105,6 +123,9 @@ class SharedConnectionsClient:
             allowed_clerk_org_ids=cls.allowed_org_ids_from_environment(),
             connection_settings_reader=(
                 cls._settings_reader_from_environment() if source == "clerk" else None
+            ),
+            connection_settings_org_ids=(
+                cls.settings_org_ids_from_environment() if source == "clerk" else None
             ),
         )
 
@@ -147,7 +168,8 @@ class SharedConnectionsClient:
             ):
                 raise ValueError("invalid bounded shared response selection")
         if (method == "GET" and path in _SETTINGS_LIST_PROVIDERS
-                and self._connection_settings_reader is not None):
+                and self._connection_settings_reader is not None
+                and clerk_org_id in self._connection_settings_org_ids):
             if expect_text or payload is not None:
                 raise ValueError("unexpected connection-settings list options")
             try:

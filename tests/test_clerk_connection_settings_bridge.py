@@ -37,6 +37,7 @@ def settings_client(monkeypatch, reader):
         "https://platform.example", "test-machine-key",
         allowed_clerk_org_ids=frozenset({"org_server"}),
         connection_settings_reader=reader,
+        connection_settings_org_ids=frozenset({"org_server"}),
     )
 
 
@@ -139,6 +140,7 @@ def test_broker_operations_keep_using_platform(monkeypatch, method, path):
     reader = SettingsReader(error=AssertionError("broker operation must not read Clerk settings"))
     client = bridge.SharedConnectionsClient(
         "https://platform.example", "test-machine-key", connection_settings_reader=reader,
+        connection_settings_org_ids=frozenset({"org_server"}),
     )
     assert client.request(method, path, clerk_org_id="org_server") == {"ok": True}
     assert reader.calls == []
@@ -161,6 +163,7 @@ def test_environment_switch_is_explicit_and_preserves_legacy_default(monkeypatch
     assert legacy is not None and legacy._connection_settings_reader is None
     assert called == []
     monkeypatch.setenv("DENALI_CONNECTION_SETTINGS_SOURCE", "clerk")
+    monkeypatch.setenv("DENALI_CLERK_CONNECTION_SETTINGS_ORG_IDS", "org_server")
     selected = bridge.SharedConnectionsClient.from_environment()
     assert selected is not None and selected._connection_settings_reader is reader
     assert called == [True]
@@ -202,3 +205,66 @@ def test_request_serialization_never_contains_private_settings(monkeypatch):
     assert "settings" not in encoded
     assert "external_id" not in encoded
     assert "role_arn" not in encoded
+
+
+def test_unselected_authorized_org_keeps_platform_lookup(monkeypatch):
+    calls = []
+
+    class MachineClerk:
+        def __init__(self, **_options):
+            self.m2m = self
+
+        def create_token(self, **_options):
+            calls.append("machine-token")
+            return type("Token", (), {"token": "synthetic-short-lived-token"})()
+
+    class Client:
+        def __init__(self, **_options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, method, url, **options):
+            calls.append((method, url, options["params"]["clerk_org_id"]))
+            return type("Response", (), {
+                "status_code": 200, "json": lambda _self: {"items": [{"provider": "aws"}]},
+            })()
+
+    monkeypatch.setattr(bridge, "Clerk", MachineClerk)
+    monkeypatch.setattr(bridge.httpx, "Client", Client)
+    reader = SettingsReader(error=AssertionError("unselected org must not query Clerk"))
+    client = bridge.SharedConnectionsClient(
+        "https://platform.example", "test-machine-key",
+        allowed_clerk_org_ids=frozenset({"org_canary", "org_unchanged"}),
+        connection_settings_reader=reader,
+        connection_settings_org_ids=frozenset({"org_canary"}),
+    )
+    assert client.request("GET", "/v1/connections", clerk_org_id="org_unchanged") == {
+        "items": [{"provider": "aws"}],
+    }
+    assert reader.calls == []
+    assert calls[-1] == ("GET", "https://platform.example/v1/connections", "org_unchanged")
+
+
+@pytest.mark.parametrize("selection", ["", "org_one,org_one", "invalid", ",".join(
+    "org_test" + str(value) for value in range(21)
+)])
+def test_missing_duplicate_invalid_or_oversized_migration_selection_is_rejected(
+    monkeypatch, selection,
+):
+    monkeypatch.setenv("DENALI_CLERK_CONNECTION_SETTINGS_ORG_IDS", selection)
+    with pytest.raises(ValueError, match="migration selection invalid"):
+        bridge.SharedConnectionsClient.settings_org_ids_from_environment()
+
+
+def test_migration_selector_never_grants_broker_admission(monkeypatch):
+    reader = SettingsReader()
+    client = settings_client(monkeypatch, reader)
+    client._connection_settings_org_ids = frozenset({"org_other"})
+    with pytest.raises(bridge.SharedConnectionsError) as caught:
+        client.request("GET", "/v1/connections", clerk_org_id="org_other")
+    assert caught.value.status_code == 404 and reader.calls == []
