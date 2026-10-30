@@ -12,7 +12,7 @@ import re
 import time
 from collections.abc import Callable, Collection
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID
 
 import httpx
@@ -80,7 +80,7 @@ class ConnectionSettingsUnavailable(RuntimeError):
         super().__init__("connection settings unavailable")
 
 
-def _reject() -> None:
+def _reject() -> NoReturn:
     raise ConnectionSettingsUnavailable()
 
 
@@ -98,7 +98,8 @@ def _timestamp(value: Any) -> datetime:
         result = datetime.fromisoformat(value)
     except ValueError:
         raise ConnectionSettingsUnavailable() from None
-    if result.tzinfo is None or result.utcoffset().total_seconds() != 0:
+    offset = result.utcoffset()
+    if result.tzinfo is None or offset is None or offset.total_seconds() != 0:
         _reject()
     return result
 
@@ -168,7 +169,7 @@ def validate_document(
                     or not {"id", "settings", "applications"} <= set(record)
                     or set(record) - {"id", "settings", "applications", "owner_user_id"}):
                 _reject()
-            seen.add(connection_id)
+            seen.add(str(connection_id))
             settings, applications = record["settings"], record["applications"]
             if (not isinstance(settings, dict) or not set(settings) <= _SETTINGS_FIELDS
                     or not isinstance(applications, dict) or len(applications) > 20):
