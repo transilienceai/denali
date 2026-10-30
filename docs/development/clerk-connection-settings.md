@@ -86,6 +86,13 @@ in the migration selector must not bypass that admission or silently migrate its
 native Denali connections. Positive shared-lookup acceptance therefore also needs
 an already-authorized shared connection; native settings migration is a distinct
 product-owned workflow, not a reason to alter IAM or broaden broker access.
+Clerk lookups share the existing eight-slot outbound capacity bound. Failures log
+only a fixed category (`capacity`, `snapshot_unavailable`, `response_bound`, or
+`reader_error`), without metadata, transport errors, credentials or tenant IDs.
+The public error remains unavailable; there is no Platform retry on these paths.
+Synthetic compatibility tests exercise the real reader for all four listing
+envelopes and provider filters. They do not establish production freshness or
+promise ordering between historically interleaved shared and legacy AWS rows.
 Exercise organization switching, expired/missing metadata, an empty snapshot,
 per-app scope visibility and removal/disable propagation. Confirm cloud broker
 revocation and native jobs still work independently. Roll back only the source

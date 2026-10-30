@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import re
@@ -16,6 +17,9 @@ import httpx
 from clerk_backend_api import Clerk
 from clerk_backend_api.models import ClerkBaseError
 
+from denali.integrations.clerk_connection_settings import ConnectionSettingsUnavailable
+
+_LOGGER = logging.getLogger(__name__)
 _BOUNDED_RPC_SLOTS = threading.BoundedSemaphore(8)
 _BOUNDED_RPC_SECONDS = 60
 _SETTINGS_LIST_PROVIDERS = {
@@ -172,17 +176,29 @@ class SharedConnectionsClient:
                 and clerk_org_id in self._connection_settings_org_ids):
             if expect_text or payload is not None:
                 raise ValueError("unexpected connection-settings list options")
+            if not _BOUNDED_RPC_SLOTS.acquire(blocking=False):
+                _LOGGER.warning("connection_settings_lookup_failed code=capacity")
+                raise SharedConnectionsError(502)
+            failure_code = "reader_error"
             try:
                 result = self._connection_settings_reader.list_connections(
                     clerk_org_id, providers=_SETTINGS_LIST_PROVIDERS[path],
                 )
                 if (max_response_bytes is not None
                         and len(json.dumps(result).encode("utf-8")) > max_response_bytes):
-                    raise ValueError("connection-settings response exceeds bound")
-                return result
-            except Exception:
-                # Never retry through Platform or expose Clerk metadata/transport diagnostics.
-                raise SharedConnectionsError(502) from None
+                    failure_code = "response_bound"
+                else:
+                    return result
+            except ConnectionSettingsUnavailable:
+                failure_code = "snapshot_unavailable"
+            except Exception:  # noqa: BLE001 - never log credential-owning diagnostics.
+                pass
+            finally:
+                _BOUNDED_RPC_SLOTS.release()
+            # Fixed codes only; raise after exception unwinding so raw transport
+            # exceptions are not retained as this bridge error's context.
+            _LOGGER.warning("connection_settings_lookup_failed code=%s", failure_code)
+            raise SharedConnectionsError(502)
         if max_response_bytes is not None:
             return self._bounded_request(method, path, clerk_org_id, payload, max_response_bytes)
         try:
