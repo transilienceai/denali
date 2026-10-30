@@ -36,6 +36,8 @@ if native_settings_source not in {"database", "clerk"}:
 if native_settings_source == "clerk":
     if native_settings_publish_flag != "true":
         raise ValueError("native Clerk lookup requires enabled publication")
+    if os.environ.get("MODAL_ENVIRONMENT", "") not in {"", "denali-prod", "denali-dev"}:
+        raise ValueError("native Clerk lookup requires a recognized Modal environment")
     native_enrollment(os.environ)
 native_settings_environment = {
     "denali-prod": "production", "denali-dev": "development",
@@ -64,18 +66,20 @@ shared_connections_config = {
     "DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin,
     "DENALI_ENABLE_SHARED_JIRA_READS": shared_jira_reads_flag,
     "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": native_settings_publish_flag,
+    # Always pin the validated source, including its database default. A core
+    # Secret cannot silently select Clerk only during remote module re-import.
+    "DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE": native_settings_source,
     "DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT": native_settings_environment,
 }
 for native_setting_name in (
-    "DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE",
     "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CLERK_ORG_IDS",
     "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS",
 ):
     native_setting_value = os.environ.get(native_setting_name)
     if native_setting_value:
-        # Public reviewed pins only. Protected workflows always supply SOURCE
-        # (default database); that variable is the lookup control plane. Empty
-        # org/ID pins must not shadow enrollment already present in a core Secret.
+        # Source Clerk requires explicit deploy-time pins above, so the gate and
+        # runtime always see the same validated enrollment. Source database can
+        # retain dormant core enrollment when deploy-time org/ID pins are empty.
         shared_connections_config[native_setting_name] = native_setting_value
 workspace_flag = os.environ.get("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED", "false")
 if workspace_flag not in {"true", "false"}:

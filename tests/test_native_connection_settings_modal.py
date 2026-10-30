@@ -83,7 +83,9 @@ def test_native_publisher_invalid_flag_fails_before_modal_resources(monkeypatch,
         runpy.run_path(str(ROOT / "modal_app.py"))
 
 
-@pytest.mark.parametrize("failure", ["publisher-off", "short-manifest", "duplicate-manifest"])
+@pytest.mark.parametrize("failure", [
+    "publisher-off", "short-manifest", "duplicate-manifest", "unknown-runtime",
+])
 def test_clerk_source_requires_publisher_and_valid_pins_before_modal_resources(
     monkeypatch, failure,
 ):
@@ -94,6 +96,8 @@ def test_clerk_source_requires_publisher_and_valid_pins_before_modal_resources(
         env["DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED"] = "false"
     elif failure == "short-manifest":
         env["DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS"] = ""
+    elif failure == "unknown-runtime":
+        env["MODAL_ENVIRONMENT"] = "unknown"
     else:
         env["DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS"] += (
             "," + env["DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS"].split(",")[0]
@@ -103,6 +107,23 @@ def test_clerk_source_requires_publisher_and_valid_pins_before_modal_resources(
     monkeypatch.setattr(modal.Image, "debian_slim", lambda **_kwargs: pytest.fail("image created"))
     with pytest.raises(ValueError):
         runpy.run_path(str(ROOT / "modal_app.py"))
+
+
+def test_database_default_masks_core_only_clerk_selection_on_remote_import(monkeypatch):
+    monkeypatch.delenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", raising=False)
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED", "false")
+    local = runpy.run_path(str(ROOT / "modal_app.py"))
+    source = local["shared_connections_config"]["DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE"]
+    assert source == "database"
+    # Core values are overlaid by the deployment config before remote import.
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "clerk")
+    monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS", "malformed")
+    for name, value in local["shared_connections_config"].items():
+        if value is not None:
+            monkeypatch.setenv(name, value)
+    remote = runpy.run_path(str(ROOT / "modal_app.py"))
+    assert remote["shared_connections_config"]["DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE"] == source
+    assert "native_connection_settings_tick" not in remote
 
 
 @pytest.mark.parametrize("partial", [False, True])

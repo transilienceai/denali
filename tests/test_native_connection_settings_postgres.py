@@ -324,6 +324,10 @@ def test_postcommit_lock_wait_is_bounded_and_never_changes_jobs_or_health(monkey
         def execute(self, query, parameters=()):
             if "SELECT pg_advisory_xact_lock" in query:
                 waiting.set()
+            if "FROM provider_connection c JOIN" in query:
+                assert self.connection.execute("SHOW lock_timeout").fetchone()["lock_timeout"] == (
+                    "500ms"
+                )
             return self.connection.execute(query, parameters)
 
     def publish(*args, **options):

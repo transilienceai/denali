@@ -126,6 +126,7 @@ def _configure_read_transaction(
         connection.execute("SET LOCAL lock_timeout='3s'")
         connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                            ("denali_native_connection_settings:" + organization_id,))
+        connection.execute("SET LOCAL lock_timeout='500ms'")
         return
     locked = connection.execute(
         "SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0)) AS locked",

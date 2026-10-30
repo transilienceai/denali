@@ -247,7 +247,7 @@ def test_preflight_stages_publication_before_consumer_cutover():
         )
 
 
-@pytest.mark.parametrize("failure", ["deleted", "malformed", "all-deleted", "scalar"])
+@pytest.mark.parametrize("failure", ["deleted", "malformed", "all-deleted", "scalar", "shared"])
 def test_steady_publication_isolates_missing_or_invalid_records(monkeypatch, failure):
     monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "clerk")
     rows = native_targets()
@@ -257,6 +257,8 @@ def test_steady_publication_isolates_missing_or_invalid_records(monkeypatch, fai
         rows[0]["configuration"]["selected_resource"] = None
     elif failure == "scalar":
         rows[0]["credential_reference"] = []
+    elif failure == "shared":
+        rows[0]["credential_type"] = "platform_shared_aws"
     else:
         rows = []
     database = Database(rows)

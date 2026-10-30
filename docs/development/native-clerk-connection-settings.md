@@ -74,7 +74,9 @@ is enabled; no provider or health mutation is added. Normal successful setup doe
 not wait for the periodic tick. Their fresh read-only publication transaction can
 wait up to three seconds for the ordinary tick's org lock, with the existing
 five-second statement bound and no HTTP retry. Tick/manual/preflight keep immediate
-try-lock behavior. A publication outage is fixed settings
+try-lock behavior. The post-commit lock timeout returns to 500 ms after acquisition.
+Its repeatable-read view begins at wait start and includes the triggering committed
+write; later writers publish afterward and the tick reconciles. A publication outage is fixed settings
 unavailability, never a provider-credential failure. Validation itself only writes
 health/evidence/timestamps and does not change the selected identifiers.
 
@@ -140,6 +142,10 @@ Both protected deployment workflows forward GitHub variables for the publish
 selector, source selector and org/six-ID manifest. Publish defaults false and
 source defaults database. A protected exact-main workflow dispatch can therefore
 stage publication and lookup independently without editing any provider secret.
+The validated source is always replayed, even if the deploy variable was absent;
+a core Secret cannot switch a database-default deployment to Clerk at remote import.
+Selecting Clerk requires explicit valid deploy-time org/ID pins, never hidden
+core-only enrollment, and a recognized runtime Modal environment when present.
 Public deployment selectors/pins are replayed into workers. Existing core/provider
 secret names and mount counts remain unchanged; no extra provider identity is
 introduced. A source selection in GitHub variables is authoritative for that
