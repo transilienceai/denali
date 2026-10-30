@@ -18,6 +18,12 @@ from clerk_backend_api.models import ClerkBaseError
 
 _BOUNDED_RPC_SLOTS = threading.BoundedSemaphore(8)
 _BOUNDED_RPC_SECONDS = 60
+_SETTINGS_LIST_PROVIDERS = {
+    "/v1/connections": frozenset({"aws", "github", "gcp", "azure", "entra", "azure_repos"}),
+    "/internal/v1/connections/jira": frozenset({"jira"}),
+    "/internal/v1/connections/google-workspace": frozenset({"google_workspace"}),
+    "/internal/v1/connections/azure-repos": frozenset({"azure_repos"}),
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,7 @@ class SharedConnectionsClient:
         machine_secret_key: str,
         *,
         allowed_clerk_org_ids: frozenset[str] | None = None,
+        connection_settings_reader: Any | None = None,
     ):
         origin = origin.rstrip("/")
         parsed = urlsplit(origin)
@@ -58,6 +65,7 @@ class SharedConnectionsClient:
         self._origin = origin
         self._clerk = Clerk(bearer_auth=machine_secret_key)
         self._allowed_clerk_org_ids = allowed_clerk_org_ids
+        self._connection_settings_reader = connection_settings_reader
 
     @staticmethod
     def allowed_org_ids_from_environment() -> frozenset[str]:
@@ -77,10 +85,15 @@ class SharedConnectionsClient:
 
     @classmethod
     def from_environment(cls) -> SharedConnectionsClient | None:
+        source = os.environ.get("DENALI_CONNECTION_SETTINGS_SOURCE", "platform")
+        if source not in {"platform", "clerk"}:
+            raise ValueError("invalid Denali connection-settings source")
         origin = os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "")
         key = os.environ.get("DENALI_PLATFORM_MACHINE_SECRET_KEY", "")
         # Provisioning the sender secret alone must not activate the bridge.
         if not origin:
+            if source == "clerk":
+                raise ValueError("Clerk settings require the existing shared-connections bridge")
             return None
         if not key:
             raise ValueError(
@@ -90,6 +103,26 @@ class SharedConnectionsClient:
             origin,
             key,
             allowed_clerk_org_ids=cls.allowed_org_ids_from_environment(),
+            connection_settings_reader=(
+                cls._settings_reader_from_environment() if source == "clerk" else None
+            ),
+        )
+
+    @staticmethod
+    def _settings_reader_from_environment():
+        from denali.integrations.clerk_connection_settings import ClerkConnectionSettingsReader
+
+        environment = os.environ.get("DENALI_CONNECTION_SETTINGS_ENVIRONMENT", "")
+        modal_environment = os.environ.get("MODAL_ENVIRONMENT")
+        expected = {"denali-prod": "production", "denali-dev": "development"}.get(
+            modal_environment or ""
+        )
+        if expected is not None and environment != expected:
+            raise ValueError("Denali connection-settings environment differs")
+        return ClerkConnectionSettingsReader(
+            os.environ.get("CLERK_CONNECTION_SETTINGS_SECRET_KEY", ""),
+            environment,
+            "denali",
         )
 
     def request(
@@ -113,6 +146,22 @@ class SharedConnectionsClient:
                 or expect_text
             ):
                 raise ValueError("invalid bounded shared response selection")
+        if (method == "GET" and path in _SETTINGS_LIST_PROVIDERS
+                and self._connection_settings_reader is not None):
+            if expect_text or payload is not None:
+                raise ValueError("unexpected connection-settings list options")
+            try:
+                result = self._connection_settings_reader.list_connections(
+                    clerk_org_id, providers=_SETTINGS_LIST_PROVIDERS[path],
+                )
+                if (max_response_bytes is not None
+                        and len(json.dumps(result).encode("utf-8")) > max_response_bytes):
+                    raise ValueError("connection-settings response exceeds bound")
+                return result
+            except Exception:
+                # Never retry through Platform or expose Clerk metadata/transport diagnostics.
+                raise SharedConnectionsError(502) from None
+        if max_response_bytes is not None:
             return self._bounded_request(method, path, clerk_org_id, payload, max_response_bytes)
         try:
             token = self._clerk.m2m.create_token(
