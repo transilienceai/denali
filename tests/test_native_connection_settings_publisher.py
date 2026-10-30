@@ -234,6 +234,10 @@ def test_preflight_stages_publication_before_consumer_cutover():
     })
     assert result.publication_enabled is True
     assert result.secret_key == env["CLERK_SECRET_KEY"]
+    with pytest.raises(publisher.NativeSettingsPublicationUnavailable):
+        publisher.NativePublisherConfig.from_environment(
+            {**env, "MODAL_ENVIRONMENT": "unrecognized-modal-environment"}, require_enabled=False,
+        )
 
 
 def test_operator_manifest_selects_and_returns_ids_only():

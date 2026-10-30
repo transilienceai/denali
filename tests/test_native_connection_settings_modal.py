@@ -29,6 +29,7 @@ def test_native_publisher_default_off_with_same_existing_secret_graph(monkeypatc
 
 
 def test_native_publication_requires_literal_flag_and_preserves_empty_core_pins(monkeypatch):
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
     monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED", "true")
     monkeypatch.setenv("DENALI_MODAL_APP_NAME", "denali-dev")
     monkeypatch.setenv("DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE", "database")
