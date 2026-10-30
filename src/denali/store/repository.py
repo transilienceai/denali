@@ -1088,19 +1088,22 @@ class PostgresInventoryRepository:
                         ELSE 'unknown' END AS outcome,
                    (SELECT count(DISTINCT entity.asset_id)
                     FROM activity_entity entity
-                    JOIN scoped event ON event.id = entity.activity_id
+                    JOIN scoped event ON event.tenant_id = entity.tenant_id
+                                     AND event.id = entity.activity_id
                     WHERE entity.tenant_id = %s::uuid
                       AND event.session_key = grouped.session_key
                       AND entity.asset_id IS NOT NULL) AS correlated_entity_count,
                    (SELECT count(DISTINCT link.detection_id)
                     FROM runtime_detection_activity link
-                    JOIN scoped event ON event.id = link.activity_id
+                    JOIN scoped event ON event.tenant_id = link.tenant_id
+                                     AND event.id = link.activity_id
                     WHERE link.tenant_id = %s::uuid
                       AND event.session_key = grouped.session_key) AS detection_count,
                    (SELECT array_agg(DISTINCT COALESCE(view.display_name, entity.display_name)
                                      ORDER BY COALESCE(view.display_name, entity.display_name))
                     FROM activity_entity entity
-                    JOIN scoped event ON event.id = entity.activity_id
+                    JOIN scoped event ON event.tenant_id = entity.tenant_id
+                                     AND event.id = entity.activity_id
                     LEFT JOIN LATERAL (
                         SELECT assertion.display_name
                         FROM asset_assertion assertion
@@ -5834,8 +5837,8 @@ class PostgresInventoryRepository:
                        t.id AS target_id, t.kind AS target_kind,
                        t.natural_key AS target_natural_key
                 FROM relationship_assertion r
-                JOIN asset s ON s.id = r.source_asset_id
-                JOIN asset t ON t.id = r.target_asset_id
+                JOIN asset s ON s.tenant_id = r.tenant_id AND s.id = r.source_asset_id
+                JOIN asset t ON t.tenant_id = r.tenant_id AND t.id = r.target_asset_id
                 WHERE r.tenant_id = %s::uuid
                   AND (r.source_asset_id = %s::uuid OR r.target_asset_id = %s::uuid)
                 ORDER BY r.withdrawn_at NULLS FIRST, r.kind, s.natural_key, t.natural_key
@@ -6086,19 +6089,26 @@ class PostgresInventoryRepository:
         ).fetchall()
         activity_rows = connection.execute(
             """
-            SELECT detection_id, activity_id
-            FROM runtime_detection_activity
-            WHERE tenant_id = %s::uuid
-            ORDER BY detection_id, activity_id
+            SELECT link.detection_id, link.activity_id
+            FROM runtime_detection_activity link
+            JOIN runtime_detection detection
+              ON detection.tenant_id = link.tenant_id AND detection.id = link.detection_id
+            JOIN activity_event event
+              ON event.tenant_id = link.tenant_id AND event.id = link.activity_id
+            WHERE link.tenant_id = %s::uuid
+            ORDER BY link.detection_id, link.activity_id
             """,
             (tenant_id,),
         ).fetchall()
         asset_rows = connection.execute(
             """
-            SELECT detection_id, asset_id
-            FROM runtime_detection_asset
-            WHERE tenant_id = %s::uuid
-            ORDER BY detection_id, asset_id
+            SELECT link.detection_id, link.asset_id
+            FROM runtime_detection_asset link
+            JOIN runtime_detection detection
+              ON detection.tenant_id = link.tenant_id AND detection.id = link.detection_id
+            JOIN asset ON asset.tenant_id = link.tenant_id AND asset.id = link.asset_id
+            WHERE link.tenant_id = %s::uuid
+            ORDER BY link.detection_id, link.asset_id
             """,
             (tenant_id,),
         ).fetchall()
@@ -6374,8 +6384,8 @@ class PostgresInventoryRepository:
             SELECT r.id, r.source_asset_id, r.target_asset_id, r.kind, r.category,
                    r.assertion_type, r.confidence, r.attributes
             FROM relationship_assertion r
-            JOIN asset source ON source.id = r.source_asset_id
-            JOIN asset target ON target.id = r.target_asset_id
+            JOIN asset source ON source.tenant_id = r.tenant_id AND source.id = r.source_asset_id
+            JOIN asset target ON target.tenant_id = r.tenant_id AND target.id = r.target_asset_id
             WHERE r.tenant_id = %s::uuid AND r.withdrawn_at IS NULL
               AND source.lifecycle_state = 'active' AND target.lifecycle_state = 'active'
             """,

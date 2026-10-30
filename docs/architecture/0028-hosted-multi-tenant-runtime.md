@@ -59,7 +59,7 @@ instance's policy. The UI can retain the submitted password in browser memory lo
 admin to copy it once, then clears it when the result or workflow is dismissed.
 
 On the first approved authenticated request, the API maps the active Clerk Organization ID to one
-random Denali tenant UUID in the `tenant` table. This mapping is permanent. All existing tenant
+random Denali tenant UUID in the `denali_tenant` table. This mapping is permanent. All existing tenant
 foreign keys and predicates continue to use the Denali UUID; Clerk identifiers do not become
 domain primary keys.
 
@@ -141,6 +141,13 @@ authenticated, tenant-scoped API. Azure's metadata-only contract and production 
 - A schema change always adds a new numbered SQL migration. Applied migrations are immutable.
 - Tenant-owned tables, jobs, connections, inventory, findings, and governance records must retain
   database-enforced tenant relationships where practical and tenant predicates in every query.
+
+Tenant-qualified joins and composite tenant/record foreign keys strengthen the
+application boundary without changing the hosted topology or customer connection
+configuration. They do not replace authorization or imply PostgreSQL RLS is
+enabled. The [tenant isolation and retention runbook](../development/tenant-isolation-and-retention.md)
+separates this integrity hardening and read-only history reporting from future
+RLS activation and separately approved destructive retention work.
 
 ## Configuration and secret ownership
 
