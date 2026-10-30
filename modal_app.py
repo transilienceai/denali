@@ -24,6 +24,11 @@ SHASTA_BRIDGE_SECRET_NAME = "shasta-denali-bridge"
 shared_jira_reads_flag = os.environ.get("DENALI_ENABLE_SHARED_JIRA_READS", "false")
 if shared_jira_reads_flag not in {"true", "false"}:
     raise ValueError("DENALI_ENABLE_SHARED_JIRA_READS must be true or false")
+native_settings_publish_flag = os.environ.get(
+    "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED", "false",
+)
+if native_settings_publish_flag not in {"true", "false"}:
+    raise ValueError("DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED must be true or false")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -41,7 +46,21 @@ shared_connections_allowed_org_ids = os.environ.get("DENALI_PLATFORM_ALLOWED_CLE
 shared_connections_config = {
     "DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin,
     "DENALI_ENABLE_SHARED_JIRA_READS": shared_jira_reads_flag,
+    "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": native_settings_publish_flag,
+    "DENALI_NATIVE_CONNECTION_SETTINGS_ENVIRONMENT": (
+        "production" if APP_NAME == "denali-production" else "development"
+    ),
 }
+for native_setting_name in (
+    "DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE",
+    "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CLERK_ORG_IDS",
+    "DENALI_NATIVE_CONNECTION_SETTINGS_ALLOWED_CONNECTION_IDS",
+):
+    native_setting_value = os.environ.get(native_setting_name)
+    if native_setting_value:
+        # Public reviewed pins only. Empty deploy variables must not shadow an
+        # existing core Secret's consumer selection or enrollment.
+        shared_connections_config[native_setting_name] = native_setting_value
 workspace_flag = os.environ.get("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED", "false")
 if workspace_flag not in {"true", "false"}:
     raise ValueError("DENALI_PLATFORM_GOOGLE_WORKSPACE_ENABLED must be true or false")
@@ -69,6 +88,70 @@ logger = logging.getLogger(__name__)
 def _region_options() -> dict[str, str]:
     region = os.environ.get("DENALI_MODAL_REGION", "").strip()
     return {"region": region} if region else {}
+
+
+@app.function(image=image, secrets=runtime_secrets, timeout=60, retries=0, **_region_options())
+def native_connection_settings_manifest(expected_clerk_org_id: str) -> dict:
+    """Unscheduled operator-only IDs; no provider calls or connection references."""
+    from denali.integrations.native_connection_settings_publisher import native_settings_manifest
+
+    return native_settings_manifest(expected_clerk_org_id)
+
+
+@app.function(image=image, secrets=runtime_secrets, timeout=60, retries=0, **_region_options())
+def preflight_native_connection_settings(expected_clerk_org_id: str) -> dict:
+    """Read-only DB/Clerk capacity and binding check, never a metadata write."""
+    from denali.integrations.native_connection_settings_publisher import (
+        prepare_or_publish_native_settings,
+    )
+
+    return prepare_or_publish_native_settings(expected_clerk_org_id, publish=False)
+
+
+@app.function(image=image, secrets=runtime_secrets, timeout=60, retries=0, **_region_options())
+def publish_native_connection_settings(expected_clerk_org_id: str) -> dict:
+    """Explicit manifest-scoped publication; disabled unless separately enabled."""
+    from denali.integrations.native_connection_settings_publisher import (
+        prepare_or_publish_native_settings,
+    )
+
+    return prepare_or_publish_native_settings(expected_clerk_org_id, publish=True)
+
+
+@app.function(image=image, secrets=runtime_secrets, timeout=120, retries=0, **_region_options())
+def verify_native_connection_settings_lookup(expected_clerk_org_id: str) -> dict:
+    """Exercise the real native lookup without creating a job or calling a provider."""
+    from denali.integrations.native_connection_settings_publisher import (
+        verify_native_settings_lookup,
+    )
+
+    return verify_native_settings_lookup(expected_clerk_org_id)
+
+
+if native_settings_publish_flag == "true":
+    @app.function(
+        image=image, secrets=runtime_secrets, schedule=modal.Period(seconds=60),
+        timeout=60, retries=0, **_region_options(),
+    )
+    def native_connection_settings_tick() -> dict:
+        """Refresh the one explicit native six-ID manifest, without running collection."""
+        from denali.integrations.native_connection_settings_publisher import (
+            NativePublisherConfig,
+            prepare_or_publish_native_settings,
+        )
+
+        try:
+            config = NativePublisherConfig.from_environment()
+            if config is None:
+                return {"enabled": False, "publication_acknowledged": False}
+            return prepare_or_publish_native_settings(
+                config.organization_id, publish=True, config=config,
+            )
+        except Exception:
+            # A timed-out PATCH may have committed; never claim zero writes.
+            logger.warning("native connection settings publication unconfirmed", exc_info=False)
+            return {"failed": 1, "publication_acknowledged": False,
+                    "write_outcome": "unconfirmed", "provider_requests": 0}
 
 
 @app.function(image=image, secrets=shared_connections_secrets, **_region_options())

@@ -4913,7 +4913,15 @@ class PostgresInventoryRepository:
                 """,
                 (tenant_id, connection_id),
             ).fetchone()
-        return None if row is None else dict(row)
+        if row is None:
+            return None
+        # The scoped database read is closed before any optional Clerk lookup.
+        # Native identifiers may move to Clerk; lifecycle, scopes and jobs do not.
+        from denali.integrations.native_connection_settings import (
+            resolve_native_connection_settings,
+        )
+
+        return resolve_native_connection_settings(tenant_id, dict(row))
 
     def record_connection_validation(
         self,

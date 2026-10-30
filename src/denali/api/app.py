@@ -1545,6 +1545,17 @@ def create_app(
         allow_headers=["Authorization", "Content-Type"],
     )
 
+    from denali.integrations.native_connection_settings import NativeConnectionSettingsUnavailable
+
+    @app.exception_handler(NativeConnectionSettingsUnavailable)
+    async def native_connection_settings_unavailable(
+        request: Request, error: NativeConnectionSettingsUnavailable,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503, content={"detail": "native connection settings unavailable"},
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.exception_handler(RequestValidationError)
     async def validation_error_without_capability_material(
         request: Request, error: RequestValidationError
