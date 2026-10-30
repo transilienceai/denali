@@ -5,7 +5,8 @@ production environment or native Denali connection is changed by this PR.
 
 ## Lookup boundary
 
-When `DENALI_CONNECTION_SETTINGS_SOURCE=clerk`, the existing server-only shared
+When `DENALI_CONNECTION_SETTINGS_SOURCE=clerk` and the authenticated organization
+is explicitly listed in `DENALI_CLERK_CONNECTION_SETTINGS_ORG_IDS`, the server-only shared
 connection client obtains shared listing items directly from Clerk Organization
 private metadata at `transilience_connections`. The provider-grouped version-1
 projection is published by Platform. Denali returns only its sanitized application
@@ -14,6 +15,12 @@ unrelated private metadata never reach the browser, CLI or MCP results. Existing
 allowlisted identifier fields remain unchanged: an exact-resource AWS view may
 already contain its role/resource ARN. This change does not add those private
 settings to a view that did not previously expose them.
+
+Unselected organizations explicitly retain their existing Platform lookup. This
+is routing selection, not error fallback: a selected organization's missing or
+invalid Clerk snapshot still fails unavailable. The migration selector never
+adds an organization to `DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS` or grants cloud
+access. Existing admission is checked before either lookup.
 
 `src/denali/integrations/clerk_connection_settings.py` is an exact vendored copy
 of Platform's internal `src/transilience_platform/clerk_connection_settings.py`,
@@ -43,6 +50,10 @@ for broker operations; a Clerk settings key does not activate a dark bridge.
   `DENALI_CONNECTION_SETTINGS_ENVIRONMENT=production|development` and the
   server-only `CLERK_CONNECTION_SETTINGS_SECRET_KEY`. Its Clerk key type and,
   when present, Modal environment must match the selected environment.
+- `DENALI_CLERK_CONNECTION_SETTINGS_ORG_IDS` is a separate explicit migration
+  selector: 1–20 unique valid Clerk organization IDs. Missing, duplicate, invalid
+  or oversized selections fail configuration in Clerk mode. Do not use a wildcard
+  or change the authorization allowlist to stage this migration.
 - The backend key remains in Modal Secrets. It is not a machine token and must
   not be put in Vercel, `VITE_*`, a browser, local CLI configuration, session claims
   or metadata itself. This implementation does not create or broaden that key.
@@ -61,12 +72,27 @@ there is no new discovery permission, token export or CLI package requirement.
 The paired Platform change owns publication and refresh of the private projection
 under the same version-1 contract, defined in its `docs/clerk-connection-settings.md`.
 No activation follows merely from merging the code. Separately review the exact
-environment/org/provider publisher allowlist and backend credential, publish and
-compare fresh snapshots for **every currently allowed shared-connection
-organization**, then select Clerk mode for the approved Denali instance. The
-source switch is instance-wide, not a per-organization canary switch. Do not
-narrow the existing organization allowlist to activate this lookup, because that
-would also change broker access for other organizations.
+environment/org/provider publisher allowlist and backend credential, then publish
+and compare fresh snapshots for the explicitly selected organizations before
+selecting Clerk mode. This per-organization migration selector supersedes the
+initial instance-wide rollout prerequisite. Other organizations keep their
+existing lookup and metadata; do not narrow or widen the authorization allowlist.
+
+The authorized production canary is NI-prod only:
+`org_3JoVReI1Py1wD4FS8qPkJ0qXlA2`. No other organization may be selected or receive
+a new settings snapshot under that approval. Existing production shared-broker
+admission currently names Transilience Prod, not NI-prod. Merely putting NI-prod
+in the migration selector must not bypass that admission or silently migrate its
+native Denali connections. Positive shared-lookup acceptance therefore also needs
+an already-authorized shared connection; native settings migration is a distinct
+product-owned workflow, not a reason to alter IAM or broaden broker access.
+Clerk lookups share the existing eight-slot outbound capacity bound. Failures log
+only a fixed category (`capacity`, `snapshot_unavailable`, `response_bound`, or
+`reader_error`), without metadata, transport errors, credentials or tenant IDs.
+The public error remains unavailable; there is no Platform retry on these paths.
+Synthetic compatibility tests exercise the real reader for all four listing
+envelopes and provider filters. They do not establish production freshness or
+promise ordering between historically interleaved shared and legacy AWS rows.
 Exercise organization switching, expired/missing metadata, an empty snapshot,
 per-app scope visibility and removal/disable propagation. Confirm cloud broker
 revocation and native jobs still work independently. Roll back only the source

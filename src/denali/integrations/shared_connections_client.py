@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import re
@@ -16,6 +17,9 @@ import httpx
 from clerk_backend_api import Clerk
 from clerk_backend_api.models import ClerkBaseError
 
+from denali.integrations.clerk_connection_settings import ConnectionSettingsUnavailable
+
+_LOGGER = logging.getLogger(__name__)
 _BOUNDED_RPC_SLOTS = threading.BoundedSemaphore(8)
 _BOUNDED_RPC_SECONDS = 60
 _SETTINGS_LIST_PROVIDERS = {
@@ -47,6 +51,7 @@ class SharedConnectionsClient:
         *,
         allowed_clerk_org_ids: frozenset[str] | None = None,
         connection_settings_reader: Any | None = None,
+        connection_settings_org_ids: frozenset[str] | None = None,
     ):
         origin = origin.rstrip("/")
         parsed = urlsplit(origin)
@@ -66,6 +71,13 @@ class SharedConnectionsClient:
         self._clerk = Clerk(bearer_auth=machine_secret_key)
         self._allowed_clerk_org_ids = allowed_clerk_org_ids
         self._connection_settings_reader = connection_settings_reader
+        if connection_settings_reader is not None and (
+            not connection_settings_org_ids or len(connection_settings_org_ids) > 20
+            or any(not re.fullmatch(r"org_[A-Za-z0-9]{1,124}", org)
+                   for org in connection_settings_org_ids)
+        ):
+            raise ValueError("Clerk connection-settings migration selection invalid")
+        self._connection_settings_org_ids = connection_settings_org_ids or frozenset()
 
     @staticmethod
     def allowed_org_ids_from_environment() -> frozenset[str]:
@@ -77,6 +89,16 @@ class SharedConnectionsClient:
 
     def allows_org(self, clerk_org_id: str) -> bool:
         return self._allowed_clerk_org_ids is None or clerk_org_id in self._allowed_clerk_org_ids
+
+    @staticmethod
+    def settings_org_ids_from_environment() -> frozenset[str]:
+        values = [value.strip() for value in os.environ.get(
+            "DENALI_CLERK_CONNECTION_SETTINGS_ORG_IDS", "",
+        ).split(",") if value.strip()]
+        if (not 1 <= len(values) <= 20 or len(values) != len(set(values))
+                or any(not re.fullmatch(r"org_[A-Za-z0-9]{1,124}", org) for org in values)):
+            raise ValueError("Clerk connection-settings migration selection invalid")
+        return frozenset(values)
 
     @property
     def origin(self) -> str:
@@ -105,6 +127,9 @@ class SharedConnectionsClient:
             allowed_clerk_org_ids=cls.allowed_org_ids_from_environment(),
             connection_settings_reader=(
                 cls._settings_reader_from_environment() if source == "clerk" else None
+            ),
+            connection_settings_org_ids=(
+                cls.settings_org_ids_from_environment() if source == "clerk" else None
             ),
         )
 
@@ -147,20 +172,33 @@ class SharedConnectionsClient:
             ):
                 raise ValueError("invalid bounded shared response selection")
         if (method == "GET" and path in _SETTINGS_LIST_PROVIDERS
-                and self._connection_settings_reader is not None):
+                and self._connection_settings_reader is not None
+                and clerk_org_id in self._connection_settings_org_ids):
             if expect_text or payload is not None:
                 raise ValueError("unexpected connection-settings list options")
+            if not _BOUNDED_RPC_SLOTS.acquire(blocking=False):
+                _LOGGER.warning("connection_settings_lookup_failed code=capacity")
+                raise SharedConnectionsError(502)
+            failure_code = "reader_error"
             try:
                 result = self._connection_settings_reader.list_connections(
                     clerk_org_id, providers=_SETTINGS_LIST_PROVIDERS[path],
                 )
                 if (max_response_bytes is not None
                         and len(json.dumps(result).encode("utf-8")) > max_response_bytes):
-                    raise ValueError("connection-settings response exceeds bound")
-                return result
-            except Exception:
-                # Never retry through Platform or expose Clerk metadata/transport diagnostics.
-                raise SharedConnectionsError(502) from None
+                    failure_code = "response_bound"
+                else:
+                    return result
+            except ConnectionSettingsUnavailable:
+                failure_code = "snapshot_unavailable"
+            except Exception:  # noqa: BLE001 - never log credential-owning diagnostics.
+                pass
+            finally:
+                _BOUNDED_RPC_SLOTS.release()
+            # Fixed codes only; raise after exception unwinding so raw transport
+            # exceptions are not retained as this bridge error's context.
+            _LOGGER.warning("connection_settings_lookup_failed code=%s", failure_code)
+            raise SharedConnectionsError(502)
         if max_response_bytes is not None:
             return self._bounded_request(method, path, clerk_org_id, payload, max_response_bytes)
         try:

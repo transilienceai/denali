@@ -61,6 +61,7 @@ def shared_client(monkeypatch, *, metadata=True):
     shared = bridge.SharedConnectionsClient(
         "https://platform.example", "synthetic-machine-key",
         allowed_clerk_org_ids=frozenset({"org_alpha"}), connection_settings_reader=reader,
+        connection_settings_org_ids=frozenset({"org_alpha"}),
     )
     return shared, calls, view
 
