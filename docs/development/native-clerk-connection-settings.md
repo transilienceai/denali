@@ -83,6 +83,13 @@ or fallback for an enrolled active connection. Direct API requests receive a fix
 sanitized failure handling. Another organization's settings or failures do not
 change an unselected organization's native path.
 
+Each selected active target resolution makes one Clerk GET. A normal publication
+refresh makes one GET plus one PATCH; provider-free verification resolves the six
+targets and performs a final metadata GET. There is no process cache or HTTP retry.
+Clerk latency, availability and rate limiting therefore become runtime dependencies
+for the enrolled native path; their production workload impact still requires live
+observation.
+
 ## Configuration (names only; no values belong here)
 
 - `DENALI_NATIVE_CONNECTION_SETTINGS_SOURCE=database|clerk`: compatible default
