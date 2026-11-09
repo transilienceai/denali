@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Browser-only connector safety corrections: native creation selects and closes setup in one existing navigation transition; active AWS retries present persisted earlier validation as explicitly historical; every provider's journey keeps Verify current rather than reusing historical healthy or exact-resource proof during a running validation; AWS setup guidance preserves existing stacks and roles and requires operator review of exact-role caller permission without automatic widening. API routes, request/response schemas, provider permissions, saved identities, validation/collection jobs and CLI/MCP contracts remain unchanged. No provider resource or stored validation/collection evidence is changed by these presentation fixes.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {"impact": "none", "reason": "No command, option, login scope or public operation changes."},
+  "gateway": {"impact": "none", "reason": "No receiver, adapter or external response contract changes; fixes are confined to browser navigation, historical-result presentation and setup guidance."}
+}

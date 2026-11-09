@@ -11,6 +11,7 @@ if (!import.meta.env.DEV || !["localhost", "127.0.0.1", "::1"].includes(window.l
 
 const params = new URLSearchParams(window.location.search);
 const native = params.get("source") === "native";
+const validating = params.get("validating") === "1";
 const empty = params.get("empty") === "1";
 const readOnly = params.get("member") === "1";
 const slow = params.get("slow") === "1";
@@ -49,6 +50,7 @@ function nativeCredential(provider: Provider): Connection["credential_reference"
 }
 const rows: Connection[] = providers.map((provider, index) => ({
   id:id(101+index), provider, display_name:`Example ${labels[provider]}`, lifecycle_state:provider==="github"?"disabled":"active", health_state:"healthy",
+  validation_state:native && provider==="aws" && validating?"running":"idle",
   credential_reference:native ? nativeCredential(provider) : provider==="github"?{type:"platform_shared_github",platform_connection_id:id(5),installation_id:1}:{type:`platform_shared_${provider}`,platform_connection_id:id(index+1)},
   declared_scopes:scopes[provider],coverage_plan:[],configuration:{account_id:"123456789012",partition:"aws",coverage_mode:provider==="aws"?"selected":undefined,regions:["us-east-1"],deployment_region:"us-east-1",tenant_id:id(31),subscriptions:[{id:id(33),name:"Example production"}],projects:[{id:"example-project",number:"123456789012",name:"Example project"}],domain:workspace.domain,customer_id:workspace.customer_id,admin_email:workspace.admin_email,platform_binding:{target_id:workspace.target_id,customer_id:workspace.customer_id,domain:workspace.domain,admin_email:workspace.admin_email,service_account:workspace.service_account,oauth_client_id:workspace.oauth_client_id,binding_revision:1},account_login:"example",organization:"example",repositories:provider==="azure_repos"?adoRepositories.slice(0,2):repositories.slice(0,1)},
   setup_capabilities:{cloudformation_quick_create:false,azure_cloud_shell:false,gcp_cloud_shell:false,github_app:false,azure_repos_oauth:false,entra_admin_consent:false,google_workspace_admin_authorization:false},
