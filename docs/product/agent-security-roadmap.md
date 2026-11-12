@@ -111,7 +111,7 @@ authoritative.
 | Google Workspace | Implementation, durable jobs, fixed-scope validation, and automated contracts exist | Complete and retain the first hosted production lifecycle and collection record |
 | GitHub | Production installation is healthy across five exact repositories and all 15 validation planes; a 2026-09-17 collection completed source, inventory, and posture for all five | Retain a complete hosted lifecycle record; Shasta code-to-cloud coverage remains explicitly partial because one Terraform deployment name is computed rather than one literal |
 | Azure Repos | Hosted lifecycle and code-to-cloud acceptance passed on 2026-09-10 | Preserve a dedicated dated acceptance record with the complete evidence fields above |
-| Tenancy | Two real non-empty Clerk Organizations now contain separately scoped evidence; hosted switching and UI read isolation passed in both directions | Complete direct API read/mutation and member/admin outcomes in both directions |
+| Tenancy | Two real non-empty Clerk Organizations contain separately scoped evidence; the current Clerk user can select both, and hosted admin switching plus member read-only UI behavior passed | Complete the browser-token direct API `403`/`404` matrix without weakening authorized-party verification |
 | Neon operations | Runtime and migration roles are split, the rotated runtime is active, and the obsolete owner CRUD compatibility grant has been removed | Project control-plane access is absent from the signed-in Neon identity; enable managed alerts/backups and complete a restore drill after the owner grants access |
 | Runtime operations | Modal timeout alerting passed; privacy-safe Vercel Web Analytics code is merged and deployed; protected production and Vercel deployment checks are succeeding | The GitHub identity is not linked to the existing Vercel account; log in with that account, link GitHub, then enable Web Analytics and exercise the dashboard/runtime path |
 
@@ -133,6 +133,12 @@ CRUD compatibility grant was removed before the deployed status function again s
 the rotated runtime DSN. See the [dated least-privilege record](neon-role-split-2026-09-15.md).
 Managed backup, alert, and restore controls remain open because the available Neon dashboard
 identity has no access to the production project.
+
+The P0 software revision was merged and deployed through protected production workflow
+`35302266387` at `16b49a082c242694cf58038b2dcdfad8fc2935f9`. The release gate first failed closed
+on the one missing Azure Repos callback and passed only after that configuration was supplied.
+The operator/administrator actions that remain are maintained in the
+[P0 external-action handoff](../handoffs/2026-09-17-p0-operator-admin-actions.md).
 
 ## P1 — trusted agent execution evidence
 

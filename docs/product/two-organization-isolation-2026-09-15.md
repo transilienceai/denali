@@ -45,26 +45,42 @@ session tokens, authorization headers, provider credentials, and provider payloa
 - [x] Switching between the two now non-empty Organizations preserved distinct connection and
       inventory views.
 
+## Follow-up evidence — 2026-09-17
+
+- [x] Identified that the new Google SSO session belonged to a newer Clerk user record, while the
+      evidence Organizations retained the prior user's memberships.
+- [x] Added the current Clerk user as `org:admin` to both evidence Organizations without creating
+      a password or changing either tenant mapping.
+- [x] Repeated hosted switching with non-empty evidence: `alternatetransilience` exposed its nine
+      connections and the isolation Organization exposed only `P0 Isolation Tenant AWS`.
+- [x] Temporarily changed the current isolation membership to `org:member`. Read access to its one
+      connection remained, the read-only banner appeared, connection creation disappeared, and
+      lifecycle controls were non-interactive.
+- [x] Restored the current isolation membership to `org:admin` and verified that creation controls
+      returned.
+- [x] A backend-minted Clerk token reflected the temporary `member` role. It did not contain the
+      browser-issued `azp` claim, so Denali correctly rejected it before the direct API matrix.
+      Clerk also rejected backend session creation in its production instance. Authorized-party
+      verification was not weakened to make the probe pass.
+
 ## Remaining acceptance steps
 
 - [ ] Record direct authenticated API `404` outcomes for cross-Organization detail and mutation
       attempts in both directions; the hosted UI read-isolation checks above passed.
-- [ ] Exercise `org:member` read access and `403` setup, validation, collection, disable, and delete
-      outcomes in both Organizations.
-- [ ] Repeat the non-empty switching test using an `org:member` session after the role matrix is
-      available.
+- [ ] Exercise browser-token direct API `403` setup, validation, collection, disable, and delete
+      outcomes in both Organizations when a supported harness can obtain a browser-issued token
+      without exposing it.
+- [x] Repeat the non-empty switching and read-only UI test using an `org:member` session.
 
-On 2026-09-17 the Clerk backend was checked for a non-administrator test identity before any
-membership change was attempted. The isolation Organization has one membership and the existing
-Organization has three; every membership is `org:admin`. There is therefore no existing real
-`org:member` session with which to complete the role matrix. Completing this gate requires an
-explicitly authorized temporary role change with guaranteed restoration, or a bounded test member
-created through the normal invitation/user-provisioning path. No administrator access was changed
-during this check.
+The temporary role change was explicitly authorized, restricted to the current isolation
+membership, and restored. The production account now has both the prior and current Clerk user
+memberships; this is intentional until the older identity is reviewed separately and must not be
+silently deleted as part of this acceptance.
 
 ## Result
 
 - Real Clerk Organizations and admin switching: passed
 - Empty-side cross-tenant read isolation: passed
 - Non-empty two-Organization read isolation: passed
-- Cross-tenant direct API mutation and member-role matrix: pending
+- Hosted `org:member` read-only UI: passed
+- Cross-tenant browser-token direct API mutation matrix: pending supported harness
