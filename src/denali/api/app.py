@@ -3116,7 +3116,7 @@ def create_app(
     def start_shared_github_setup(
         request: Request, response: Response, payload: SharedGitHubSetupInput | None = None
     ) -> dict[str, str]:
-        _shared_github_context(request)
+        platform, _ = _shared_github_context(request)
         repo, tenant = _context(request)
         payload = payload or SharedGitHubSetupInput()
         platform_connection_id = payload.platform_connection_id
@@ -3173,6 +3173,7 @@ def create_app(
                 if isinstance(result, dict)
                 else None,
                 existing_installation=platform_connection_id is not None,
+                broker_origin=platform.origin if platform_connection_id else None,
             )
         except (ValueError, HTTPException) as error:
             repo.fail_connection_onboarding(tenant, str(workflow["id"]), return_state_sha256=digest)

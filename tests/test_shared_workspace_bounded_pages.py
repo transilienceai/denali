@@ -31,6 +31,8 @@ from denali.integrations.shared_google_workspace import (
     WorkspaceCollectorRouter,
 )
 
+_BROKER_ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
+
 
 def record(operation, ordinal, when):
     application = "token" if operation == "oauth_activity" else "gemini_in_workspace_apps"
@@ -95,8 +97,8 @@ def real_client(monkeypatch, handler):
         transport_module.httpx, "HTTPTransport", lambda **_: httpx.MockTransport(handler)
     )
     return SharedConnectionsClient(
-        "https://broker.example.test",
-        "synthetic-machine-key",
+        _BROKER_ORIGIN,
+        "synthetic-machine-key", modal_proxy_key="wk-synthetic", modal_proxy_secret="ws-synthetic",
         allowed_clerk_org_ids=frozenset({"org_alpha"}),
     )
 

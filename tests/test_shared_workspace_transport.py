@@ -16,7 +16,9 @@ from denali.integrations.shared_connections_client import (
     SharedConnectionsError,
 )
 
-ORIGIN = "https://broker.example.test"
+_BROKER_ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
+
+ORIGIN = _BROKER_ORIGIN
 ROOT = "/internal/v1/connections/google-workspace"
 ORG = "org_alpha"
 PRIVATE = "synthetic-private-marker"
@@ -50,7 +52,9 @@ def transport(monkeypatch, handler):
 
 def client():
     return SharedConnectionsClient(
-        ORIGIN, "synthetic-machine-key", allowed_clerk_org_ids=frozenset({ORG})
+        ORIGIN, "synthetic-machine-key",
+            modal_proxy_key="wk-synthetic",
+            modal_proxy_secret="ws-synthetic", allowed_clerk_org_ids=frozenset({ORG})
     )
 
 
@@ -88,11 +92,13 @@ def test_real_client_signature_uses_fixed_origin_and_server_resolved_org(monkeyp
     assert result == {"items": []}
     assert len(seen) == 1
     outbound = seen[0]
-    assert outbound.url.scheme == "https" and outbound.url.host == "broker.example.test"
+    assert outbound.url.scheme == "https" and str(outbound.url).startswith(ORIGIN + "/")
     assert outbound.url.path == ROOT + "/config"
     assert json.loads(outbound.content)["clerk_org_id"] == ORG
     assert dict(outbound.url.params) == ({"clerk_org_id": ORG} if method == "GET" else {})
     assert outbound.headers["authorization"] == "Bearer synthetic-m2m-token"
+    assert outbound.headers["modal-key"] == "wk-synthetic"
+    assert outbound.headers["modal-secret"] == "ws-synthetic"
     assert outbound.headers["accept-encoding"] == "identity"
     assert options == [{"retries": 0}]
     assert mint == [{"seconds_until_expiration": 120, "min_remaining_ttl_seconds": 90}]
@@ -101,7 +107,9 @@ def test_real_client_signature_uses_fixed_origin_and_server_resolved_org(monkeyp
 def test_query_encoding_is_owned_by_httpx_and_payload_cannot_replace_org(monkeypatch, mint):
     seen = []
     transport(monkeypatch, lambda out: (seen.append(out), httpx.Response(200, json={}))[1])
-    broker = SharedConnectionsClient(ORIGIN, "synthetic-machine-key")
+    broker = SharedConnectionsClient(ORIGIN, "synthetic-machine-key",
+        modal_proxy_key="wk-synthetic",
+        modal_proxy_secret="ws-synthetic")
     selection = "org_test+ &?=/%"
     broker.request("GET", ROOT + "/config", clerk_org_id=selection, max_response_bytes=64)
     assert seen[0].url.params["clerk_org_id"] == selection

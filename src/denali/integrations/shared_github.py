@@ -22,14 +22,19 @@ from denali.connections.github import (
     _repository_boundary,
 )
 from denali.connectors.github_repository import GitHubRepositoryCollector
-from denali.integrations.shared_connections_client import SharedConnectionsClient
+from denali.integrations.shared_connections_client import (
+    SharedConnectionsClient,
+    shared_callback_origins,
+)
 
 
 def shared_github_enabled() -> bool:
     return os.environ.get("DENALI_PLATFORM_GITHUB_ENABLED", "false").lower() == "true"
 
 
-def safe_install_url(value: Any, *, existing_installation: bool = False) -> str:
+def safe_install_url(
+    value: Any, *, existing_installation: bool = False, broker_origin: str | None = None,
+) -> str:
     if not isinstance(value, str) or len(value) > 2048:
         raise ValueError("shared GitHub installation URL is invalid")
     parsed = urlsplit(value)
@@ -46,6 +51,7 @@ def safe_install_url(value: Any, *, existing_installation: bool = False) -> str:
         raise ValueError("shared GitHub installation URL is invalid")
     if existing_installation:
         try:
+            allowed_origins = shared_callback_origins(broker_origin or "")
             pairs = parse_qsl(
                 parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=6
             )
@@ -74,6 +80,7 @@ def safe_install_url(value: Any, *, existing_installation: bool = False) -> str:
                 or callback.port is not None
                 or callback.query
                 or callback.fragment
+                or f"https://{callback.netloc}" not in allowed_origins
                 or callback.path != "/v1/connections/github/oauth/callback"
             ):
                 raise ValueError("invalid OAuth contract")

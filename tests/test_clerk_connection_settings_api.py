@@ -8,6 +8,8 @@ from test_shared_connections_api import make_client
 from denali.integrations import shared_connections_client as bridge
 from denali.integrations.clerk_connection_settings import ClerkConnectionSettingsReader
 
+_BROKER_ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
+
 
 def shared_client(monkeypatch, *, metadata=True):
     calls = []
@@ -59,7 +61,9 @@ def shared_client(monkeypatch, *, metadata=True):
 
     monkeypatch.setattr(bridge, "Clerk", NoMachineTokens)
     shared = bridge.SharedConnectionsClient(
-        "https://platform.example", "synthetic-machine-key",
+        _BROKER_ORIGIN, "synthetic-machine-key",
+            modal_proxy_key="wk-synthetic",
+            modal_proxy_secret="ws-synthetic",
         allowed_clerk_org_ids=frozenset({"org_alpha"}), connection_settings_reader=reader,
         connection_settings_org_ids=frozenset({"org_alpha"}),
     )

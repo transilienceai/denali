@@ -14,6 +14,8 @@ from denali.integrations.clerk_connection_settings import (
     ConnectionSettingsUnavailable,
 )
 
+_BROKER_ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
+
 
 class SettingsReader:
     def __init__(self, result=None, *, error=None):
@@ -43,7 +45,9 @@ def settings_client(monkeypatch, reader):
     monkeypatch.setattr(bridge, "Clerk", NoMachineTokens)
     monkeypatch.setattr(bridge.httpx, "Client", no_platform_http)
     return bridge.SharedConnectionsClient(
-        "https://platform.example", "test-machine-key",
+        _BROKER_ORIGIN, "test-machine-key",
+            modal_proxy_key="wk-synthetic",
+            modal_proxy_secret="ws-synthetic",
         allowed_clerk_org_ids=frozenset({"org_server"}),
         connection_settings_reader=reader,
         connection_settings_org_ids=frozenset({"org_server"}),
@@ -262,18 +266,22 @@ def test_broker_operations_keep_using_platform(monkeypatch, method, path):
     monkeypatch.setattr(bridge.httpx, "Client", Client)
     reader = SettingsReader(error=AssertionError("broker operation must not read Clerk settings"))
     client = bridge.SharedConnectionsClient(
-        "https://platform.example", "test-machine-key", connection_settings_reader=reader,
+        _BROKER_ORIGIN, "test-machine-key",
+            modal_proxy_key="wk-synthetic",
+            modal_proxy_secret="ws-synthetic", connection_settings_reader=reader,
         connection_settings_org_ids=frozenset({"org_server"}),
     )
     assert client.request(method, path, clerk_org_id="org_server") == {"ok": True}
     assert reader.calls == []
-    assert requests[0][:2] == (method, "https://platform.example" + path)
+    assert requests[0][:2] == (method, _BROKER_ORIGIN + path)
     assert requests[0][2]["headers"]["Authorization"] == "Bearer synthetic-short-lived-token"
 
 
 def test_environment_switch_is_explicit_and_preserves_legacy_default(monkeypatch):
-    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", _BROKER_ORIGIN)
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "synthetic-machine-key")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_KEY", "wk-synthetic")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_SECRET", "ws-synthetic")
     monkeypatch.setenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "org_server")
     monkeypatch.delenv("DENALI_CONNECTION_SETTINGS_SOURCE", raising=False)
     called = []
@@ -361,7 +369,9 @@ def test_unselected_authorized_org_keeps_platform_lookup(monkeypatch):
     monkeypatch.setattr(bridge.httpx, "Client", Client)
     reader = SettingsReader(error=AssertionError("unselected org must not query Clerk"))
     client = bridge.SharedConnectionsClient(
-        "https://platform.example", "test-machine-key",
+        _BROKER_ORIGIN, "test-machine-key",
+            modal_proxy_key="wk-synthetic",
+            modal_proxy_secret="ws-synthetic",
         allowed_clerk_org_ids=frozenset({"org_canary", "org_unchanged"}),
         connection_settings_reader=reader,
         connection_settings_org_ids=frozenset({"org_canary"}),
@@ -370,7 +380,7 @@ def test_unselected_authorized_org_keeps_platform_lookup(monkeypatch):
         "items": [{"provider": "aws"}],
     }
     assert reader.calls == []
-    assert calls[-1] == ("GET", "https://platform.example/v1/connections", "org_unchanged")
+    assert calls[-1] == ("GET", _BROKER_ORIGIN + "/v1/connections", "org_unchanged")
 
 
 @pytest.mark.parametrize("selection", ["", "org_one,org_one", "invalid", ",".join(

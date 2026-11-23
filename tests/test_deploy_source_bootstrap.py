@@ -32,7 +32,8 @@ class App:
 
 sys.modules['modal'] = SimpleNamespace(
     Image=SimpleNamespace(debian_slim=lambda **kwargs: Image()),
-    Secret=SimpleNamespace(from_name=lambda *args: object(), from_dict=lambda *args: object()),
+    Secret=SimpleNamespace(from_name=lambda *args, **kwargs: object(),
+                           from_dict=lambda *args: object()),
     App=lambda *args: App(), Period=lambda **kwargs: object(),
     asgi_app=lambda **kwargs: lambda function: function,
 )

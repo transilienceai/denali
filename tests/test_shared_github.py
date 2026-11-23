@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 import httpx
@@ -20,11 +21,13 @@ from denali.integrations.shared_github import (
 )
 
 CONNECTION_ID = "11111111-1111-1111-1111-111111111111"
-OAUTH_URL = (
-    "https://github.com/login/oauth/authorize?client_id=Iv1.test&"
-    "redirect_uri=https%3A%2F%2Fplatform.example%2Fv1%2Fconnections%2Fgithub%2Foauth%2Fcallback"
-    f"&state={'s' * 64}&code_challenge={'c' * 43}&code_challenge_method=S256&allow_signup=false"
-)
+_BROKER_ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
+OAUTH_URL = "https://github.com/login/oauth/authorize?" + urlencode({
+    "client_id": "Iv1.test",
+    "redirect_uri": _BROKER_ORIGIN + "/v1/connections/github/oauth/callback",
+    "state": "s" * 64, "code_challenge": "c" * 43,
+    "code_challenge_method": "S256", "allow_signup": "false",
+})
 SCOPES = ["github.repository_metadata", "github.repository_contents", "github.actions_workflows"]
 REPOSITORY = {
     "id": 42,
@@ -57,6 +60,7 @@ def enabled(monkeypatch):
 
 
 class Platform:
+    origin = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
     def __init__(self):
         self.calls = []
         self.ready = True
@@ -370,7 +374,9 @@ def test_existing_catalog_reverification_pins_platform_context_and_rejects_legac
 
 def test_oauth_link_is_accepted_only_for_explicit_existing_installation():
     oauth = OAUTH_URL
-    assert safe_install_url(oauth, existing_installation=True) == oauth
+    assert safe_install_url(
+        oauth, existing_installation=True, broker_origin=_BROKER_ORIGIN,
+    ) == oauth
     with pytest.raises(ValueError):
         safe_install_url(oauth)
     for url in (
@@ -386,14 +392,31 @@ def test_oauth_link_is_accepted_only_for_explicit_existing_installation():
         OAUTH_URL.replace(f"state={'s' * 64}", "state=short"),
         OAUTH_URL.replace("allow_signup=false", "allow_signup=true"),
         OAUTH_URL.replace("oauth%2Fcallback", "other%2Fcallback"),
-        OAUTH_URL.replace("https%3A%2F%2Fplatform.example", "http%3A%2F%2Fplatform.example"),
+        OAUTH_URL.replace(quote(_BROKER_ORIGIN, safe=""), "http%3A%2F%2Fplatform.example"),
         OAUTH_URL.replace(
-            "https%3A%2F%2Fplatform.example", "https%3A%2F%2Fuser%3Asecret%40platform.example"
+            quote(_BROKER_ORIGIN, safe=""), "https%3A%2F%2Fuser%3Asecret%40platform.example"
         ),
         OAUTH_URL.replace("Iv1.test", ""),
     ):
         with pytest.raises(ValueError):
-            safe_install_url(url, existing_installation=True)
+            safe_install_url(url, existing_installation=True, broker_origin=_BROKER_ORIGIN)
+
+
+@pytest.mark.parametrize("callback,allowed", [
+    ("https://mcp-dev.transilience.cloud", True),
+    (_BROKER_ORIGIN, True),
+    ("https://mcp.transilience.cloud", False),
+    ("https://mcp-dev.transilience.cloud.evil.test", False),
+])
+def test_existing_github_callback_is_bound_to_broker_environment(callback, allowed):
+    value = OAUTH_URL.replace(quote(_BROKER_ORIGIN, safe=""), quote(callback, safe=""))
+    if allowed:
+        assert safe_install_url(
+            value, existing_installation=True, broker_origin=_BROKER_ORIGIN,
+        ) == value
+    else:
+        with pytest.raises(ValueError):
+            safe_install_url(value, existing_installation=True, broker_origin=_BROKER_ORIGIN)
 
 
 def test_shared_member_reads_and_admin_disable_are_server_authorized():

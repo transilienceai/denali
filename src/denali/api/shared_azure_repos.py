@@ -336,7 +336,13 @@ def register_shared_azure_repos_routes(
             params = parse_qs(
                 parsed.query, strict_parsing=True, keep_blank_values=True, max_num_fields=16
             )
-            expected_callback = f"{platform.origin}{ROOT}/setup/callback"
+            from denali.integrations.shared_connections_client import shared_callback_origins
+
+            allowed_callbacks = {
+                f"{origin}{ROOT}/setup/callback"
+                for origin in shared_callback_origins(platform.origin)
+            }
+            callback = params.get("redirect_uri", [None])[0]
             if (
                 any(len(values) != 1 for values in params.values())
                 or set(params)
@@ -354,8 +360,8 @@ def register_shared_azure_repos_routes(
                 or params.get("client_id") != [source["application_client_id"]]
                 or params.get("code_challenge_method") != ["S256"]
                 or params.get("response_type") != ["code"]
-                or params.get("redirect_uri") != [expected_callback]
-                or value.get("callback_url") != expected_callback
+                or callback not in allowed_callbacks
+                or value.get("callback_url") != callback
                 or params.get("scope") != ["https://app.vssps.visualstudio.com/.default"]
                 or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", params.get("state", [""])[0])
                 or not re.fullmatch(r"[A-Za-z0-9_-]{43}", params.get("code_challenge", [""])[0])
