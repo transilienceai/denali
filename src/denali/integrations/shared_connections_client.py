@@ -42,6 +42,21 @@ def shared_callback_origins(broker_origin: str) -> frozenset[str]:
     return frozenset({broker_origin, gateway})
 
 
+def shared_modal_proxy_headers(origin: str, key: str, secret: str) -> dict[str, str]:
+    if origin not in _BROKER_ORIGINS:
+        raise ValueError("shared connections origin must be a reviewed Platform origin")
+    expected = {
+        "denali-prod": "https://transilience-transilience-platform-prod--transilience-pl-8a9ce7.modal.run",
+        "denali-dev": "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run",
+    }.get(os.environ.get("MODAL_ENVIRONMENT", ""))
+    if expected is not None and origin != expected:
+        raise ValueError("shared connections origin differs from the Modal environment")
+    if (not re.fullmatch(r"wk-[A-Za-z0-9_-]{1,256}", key)
+            or not re.fullmatch(r"ws-[A-Za-z0-9_-]{1,256}", secret)):
+        raise ValueError("Denali shared-connections Modal proxy credentials are required")
+    return {"Modal-Key": key, "Modal-Secret": secret}
+
+
 _SETTINGS_LIST_PROVIDERS = {
     "/v1/connections": frozenset({"aws", "github", "gcp", "azure", "entra", "azure_repos"}),
     "/internal/v1/connections/jira": frozenset({"jira"}),
@@ -90,13 +105,10 @@ class SharedConnectionsClient:
             raise ValueError("shared connections origin must be a reviewed Platform origin")
         if not machine_secret_key:
             raise ValueError("Denali shared-connections machine secret is required")
-        if (not re.fullmatch(r"wk-[A-Za-z0-9_-]{1,256}", modal_proxy_key)
-                or not re.fullmatch(r"ws-[A-Za-z0-9_-]{1,256}", modal_proxy_secret)):
-            raise ValueError("Denali shared-connections Modal proxy credentials are required")
         self._origin = origin
-        self._modal_proxy_headers = {
-            "Modal-Key": modal_proxy_key, "Modal-Secret": modal_proxy_secret,
-        }
+        self._modal_proxy_headers = shared_modal_proxy_headers(
+            origin, modal_proxy_key, modal_proxy_secret,
+        )
         self._clerk = Clerk(bearer_auth=machine_secret_key)
         self._allowed_clerk_org_ids = allowed_clerk_org_ids
         self._connection_settings_reader = connection_settings_reader
@@ -150,12 +162,6 @@ class SharedConnectionsClient:
             raise ValueError(
                 "shared connections origin and machine secret must be configured together"
             )
-        expected = {
-            "denali-prod": "https://transilience-transilience-platform-prod--transilience-pl-8a9ce7.modal.run",
-            "denali-dev": "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run",
-        }.get(os.environ.get("MODAL_ENVIRONMENT", ""))
-        if expected is not None and origin.rstrip("/") != expected:
-            raise ValueError("shared connections origin differs from the Modal environment")
         return cls(
             origin,
             key,

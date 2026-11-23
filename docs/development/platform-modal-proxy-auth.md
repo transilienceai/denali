@@ -6,6 +6,10 @@ Platform broker. The proxy token controls transport access; organization
 allowlists, tenant mapping, current broker entitlements and provider leases
 remain authoritative. Native Denali cloud authentication is unchanged.
 
+The same dedicated pair also protects the existing claims-bound resource-write
+lease transport. Its exact receiver, purpose, grant, request digest and reviewer
+checks remain unchanged, and this release does not enable remediation actions.
+
 The environment-local Modal Secret `denali-platform-modal-proxy` contains only
 `DENALI_PLATFORM_MODAL_PROXY_KEY` and `DENALI_PLATFORM_MODAL_PROXY_SECRET`.
 Use a separate token for Denali in each environment. Both fields are required,

@@ -19,6 +19,7 @@ from denali.resource_writes.templates import RemediationError
 
 NOW = 1_800_000_000_000
 RECEIVER = "mch_PlatformReceiver1"
+ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
 INPUT = {
     "organization_id": "org_Test1",
     "grant_id": "00000000-0000-4000-8000-000000000001",
@@ -99,12 +100,13 @@ def bridge(monkeypatch):
         return httpx.Response(200, json={"lease": "synthetic-offline-result"})
 
     def client(**kwargs):
-        assert kwargs == {"timeout": 15, "follow_redirects": False}
+        assert kwargs == {"timeout": 15, "follow_redirects": False, "trust_env": False}
         return OfflineHttpClient(transport=httpx.MockTransport(response), **kwargs)
 
     monkeypatch.setattr(providers.httpx, "Client", client)
     leases = PlatformWriteLeases(
-        "https://platform.example.test", "synthetic-offline-machine-key", RECEIVER
+        ORIGIN, "synthetic-offline-machine-key", RECEIVER,
+        modal_proxy_key="wk-synthetic", modal_proxy_secret="ws-synthetic",
     )
     assert constructed == [
         {
@@ -132,11 +134,13 @@ def test_lease_mints_with_installed_sdk_signature_and_posts_exact_bound_request(
     request = calls[0]
     assert request.method == "POST"
     assert str(request.url) == (
-        "https://platform.example.test/internal/v1/resource-write-grants/"
+        ORIGIN + "/internal/v1/resource-write-grants/"
         + INPUT["grant_id"]
         + "/lease"
     )
     assert request.headers["Authorization"] == "Bearer mt_synthetic_offline_token"
+    assert request.headers["Modal-Key"] == "wk-synthetic"
+    assert request.headers["Modal-Secret"] == "ws-synthetic"
     assert json.loads(request.content) == {
         "clerk_org_id": INPUT["organization_id"],
         "action": INPUT["action"],
@@ -210,6 +214,7 @@ def test_invalid_mint_metadata_never_contacts_platform(bridge, changes):
         leases.lease(**INPUT)
     assert str(caught.value) == "resource_lease_unavailable"
     assert caught.value.__suppress_context__ is True
+    assert caught.value.__context__ is None
     assert len(sdk.calls) == 1
     assert calls == []
 
@@ -247,6 +252,21 @@ def test_fresh_execution_reviewer_and_bounded_clock_skew_are_preserved(bridge):
     leases.lease(**{**INPUT, "mode": "execute", "reviewer": "user_Reviewer1"})
     assert sdk.calls[0]["claims"] == claims
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("origin,key,secret", [
+    (ORIGIN, "", "ws-synthetic"), (ORIGIN, "wk-synthetic", ""),
+    (ORIGIN, "wk-synthetic", "ws-bad\nheader"),
+    ("https://evil.example", "wk-synthetic", "ws-synthetic"),
+])
+def test_resource_lease_proxy_pair_and_destination_fail_before_clerk(
+    monkeypatch, origin, key, secret,
+):
+    monkeypatch.setattr("clerk_backend_api.Clerk", lambda **kw: pytest.fail("Clerk called"))
+    with pytest.raises(ValueError):
+        PlatformWriteLeases(
+            origin, "machine", RECEIVER, modal_proxy_key=key, modal_proxy_secret=secret,
+        )
 
 
 def test_reused_alive_short_token_is_valid_but_never_requested_by_this_client(bridge):
