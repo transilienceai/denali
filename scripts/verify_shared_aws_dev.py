@@ -35,6 +35,9 @@ image = (
     image=image,
     secrets=[
         modal.Secret.from_name("denali-dev"),
+        modal.Secret.from_name("denali-platform-modal-proxy", required_keys=[
+            "DENALI_PLATFORM_MODAL_PROXY_KEY", "DENALI_PLATFORM_MODAL_PROXY_SECRET",
+        ]),
         modal.Secret.from_dict({
             "DENALI_PLATFORM_CONNECTIONS_ORIGIN":
                 "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"

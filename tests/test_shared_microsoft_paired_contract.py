@@ -159,7 +159,10 @@ class Registry:
 
 
 class Provider:
-    config = SimpleNamespace(client_id=APP)
+    config = SimpleNamespace(
+        client_id=APP,
+        callback_url="https://mcp-dev.transilience.cloud/internal/v1/connections/azure/setup/callback",
+    )
 
     def consent_url(self, tenant_or_binding, state):
         tenant = (
@@ -235,8 +238,9 @@ def test_denali_and_platform_router_wire_contract_create_setup_attach_read_and_r
         }
 
     bridge = SharedConnectionsClient(
-        "https://platform.example",
+        "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run",
         "offline-machine",
+        modal_proxy_key="wk-synthetic", modal_proxy_secret="ws-synthetic",
         allowed_clerk_org_ids=frozenset({"org_alpha"}),
     )
     bridge._clerk = SimpleNamespace(
