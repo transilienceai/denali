@@ -18,6 +18,7 @@ def test_shared_proxy_secret_graph_matches_remote_reimport(monkeypatch):
     assert local["runtime_secrets"][-1].name == "denali-platform-modal-proxy"
     monkeypatch.delenv("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
     monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", origin)
+    monkeypatch.setenv("MODAL_IS_REMOTE", "1")
     remote = runpy.run_path(str(ROOT / "modal_app.py"))
     assert len(remote["runtime_secrets"]) == 4
     assert remote["runtime_secrets"][-1].name == "denali-platform-modal-proxy"
@@ -36,8 +37,21 @@ def test_dark_shared_origin_masks_stale_core_value_before_remote_reimport(monkey
     for name, value in local["shared_connections_config"].items():
         if value is not None:
             monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MODAL_IS_REMOTE", "1")
     remote = runpy.run_path(str(ROOT / "modal_app.py"))
     assert len(local["runtime_secrets"]) == len(remote["runtime_secrets"]) == 3
+
+
+def test_local_deployment_cannot_enable_shared_bridge_from_runtime_variable(monkeypatch):
+    monkeypatch.delenv("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN", raising=False)
+    monkeypatch.delenv("MODAL_IS_REMOTE", raising=False)
+    monkeypatch.setenv(
+        "DENALI_PLATFORM_CONNECTIONS_ORIGIN",
+        "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run",
+    )
+    module = runpy.run_path(str(ROOT / "modal_app.py"))
+    assert module["shared_connections_origin"] is None
+    assert len(module["runtime_secrets"]) == 3
 
 
 def test_native_publisher_default_off_with_same_existing_secret_graph(monkeypatch):

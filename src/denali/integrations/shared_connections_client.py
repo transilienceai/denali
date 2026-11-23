@@ -45,10 +45,13 @@ def shared_callback_origins(broker_origin: str) -> frozenset[str]:
 def shared_modal_proxy_headers(origin: str, key: str, secret: str) -> dict[str, str]:
     if origin not in _BROKER_ORIGINS:
         raise ValueError("shared connections origin must be a reviewed Platform origin")
+    environment = os.environ.get("MODAL_ENVIRONMENT", "")
     expected = {
         "denali-prod": "https://transilience-transilience-platform-prod--transilience-pl-8a9ce7.modal.run",
         "denali-dev": "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run",
-    }.get(os.environ.get("MODAL_ENVIRONMENT", ""))
+    }.get(environment)
+    if expected is None and (environment or os.environ.get("MODAL_IS_REMOTE") == "1"):
+        raise ValueError("shared connections require a recognized Modal environment")
     if expected is not None and origin != expected:
         raise ValueError("shared connections origin differs from the Modal environment")
     if (not re.fullmatch(r"wk-[A-Za-z0-9_-]{1,256}", key)

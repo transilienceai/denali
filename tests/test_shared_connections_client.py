@@ -95,6 +95,28 @@ def test_proxy_credentials_cannot_be_sent_to_an_unreviewed_origin(origin):
         )
 
 
+@pytest.mark.parametrize("environment,remote,origin,allowed", [
+    ("denali-dev", "1", _BROKER_ORIGIN, True),
+    ("denali-prod", "1", _BROKER_ORIGIN, False),
+    ("renamed-environment", "1", _BROKER_ORIGIN, False),
+    ("", "1", _BROKER_ORIGIN, False),
+])
+def test_proxy_pin_requires_recognized_remote_environment(
+    monkeypatch, environment, remote, origin, allowed,
+):
+    monkeypatch.setenv("MODAL_ENVIRONMENT", environment)
+    monkeypatch.setenv("MODAL_IS_REMOTE", remote)
+    if allowed:
+        assert shared_connections_client.shared_modal_proxy_headers(
+            origin, "wk-synthetic", "ws-synthetic",
+        )["Modal-Key"] == "wk-synthetic"
+    else:
+        with pytest.raises(ValueError):
+            shared_connections_client.shared_modal_proxy_headers(
+                origin, "wk-synthetic", "ws-synthetic",
+            )
+
+
 def test_environment_client_defaults_to_no_organizations(monkeypatch):
     monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", _BROKER_ORIGIN)
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "test-machine-key")

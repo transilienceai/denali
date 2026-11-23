@@ -76,6 +76,7 @@ def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
     # must still match the deployment-side graph exactly.
     monkeypatch.delenv("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
     monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", origin)
+    monkeypatch.setenv("MODAL_IS_REMOTE", "1")
     monkeypatch.delenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS")
     monkeypatch.delenv("DENALI_MODAL_APP_NAME")
     module = runpy.run_path(str(MODAL_APP))

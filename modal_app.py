@@ -60,10 +60,9 @@ image = (
 # Keep every function's dependency graph identical locally and remotely. Workers
 # also import the API module, so they need this public origin alongside the
 # machine key in the core Modal Secret even though only the API calls it.
-shared_connections_origin = os.environ.get(
-    "DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN",
-    os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN"),
-)
+shared_connections_origin = os.environ.get("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
+if shared_connections_origin is None and os.environ.get("MODAL_IS_REMOTE") == "1":
+    shared_connections_origin = os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN")
 shared_connections_allowed_org_ids = os.environ.get("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS")
 shared_connections_config = {
     # Empty is intentional: Modal omits None, which could leave a stale core
