@@ -26,11 +26,20 @@ image = (
 # also import the API module, so they need this public origin alongside the
 # machine key in the core Modal Secret even though only the API calls it.
 shared_connections_origin = os.environ.get("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
+if shared_connections_origin is None and os.environ.get("MODAL_IS_REMOTE") == "1":
+    shared_connections_origin = os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN")
 runtime_secrets = [
     modal.Secret.from_name(SECRET_NAME),
     modal.Secret.from_name(PROVIDER_SECRET_NAME),
-    modal.Secret.from_dict({"DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin}),
+    # Modal omits None-valued entries. Replay an explicit empty value when dark
+    # so a stale core origin cannot enable the bridge only on remote re-import.
+    modal.Secret.from_dict({"DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin or ""}),
 ]
+if shared_connections_origin:
+    runtime_secrets.append(modal.Secret.from_name(
+        "denali-platform-modal-proxy",
+        required_keys=["DENALI_PLATFORM_MODAL_PROXY_KEY", "DENALI_PLATFORM_MODAL_PROXY_SECRET"],
+    ))
 shared_connections_secrets = runtime_secrets
 shasta_bridge_secrets = [
     *runtime_secrets,

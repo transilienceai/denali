@@ -18,7 +18,10 @@ from denali.integrations.shared_connections_client import SharedConnectionsClien
 
 def test_microsoft_admission_is_empty_by_default_but_legacy_transport_still_runs(monkeypatch):
     monkeypatch.delenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", raising=False)
-    bridge = SharedConnectionsClient("https://platform.example", "synthetic-machine")
+    bridge = SharedConnectionsClient(
+        "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run",
+        "synthetic-machine", modal_proxy_key="wk-synthetic", modal_proxy_secret="ws-synthetic",
+    )
     bridge._clerk = SimpleNamespace(
         m2m=SimpleNamespace(create_token=lambda **kwargs: SimpleNamespace(token="synthetic"))
     )

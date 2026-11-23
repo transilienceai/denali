@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import os
 from typing import Any
-from urllib.parse import urlsplit
 
-import httpx
 import psycopg
-from clerk_backend_api import Clerk
 from psycopg.rows import dict_row
+
+from denali.integrations.shared_connections_client import SharedConnectionsClient
 
 MAX_AWS_CONNECTIONS_PER_ORG = 100
 
@@ -75,34 +74,14 @@ def aws_snapshot(dsn: str, clerk_org_id: str) -> dict[str, Any]:
 def publish_aws_snapshot(clerk_org_id: str) -> dict[str, int]:
     """Run manually after dev platform registration and entitlement are provisioned."""
 
-    origin = os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "").rstrip("/")
-    parsed = urlsplit(origin)
-    if (
-        parsed.scheme != "https"
-        or not parsed.netloc
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("DENALI_PLATFORM_CONNECTIONS_ORIGIN must be an HTTPS origin")
-    machine_key = os.environ.get("DENALI_PLATFORM_MACHINE_SECRET_KEY", "")
-    if not machine_key:
-        raise ValueError("DENALI_PLATFORM_MACHINE_SECRET_KEY is required")
+    client = SharedConnectionsClient.from_environment()
+    if client is None:
+        raise ValueError("shared connections origin is required")
     snapshot = aws_snapshot(os.environ["DENALI_DSN"], clerk_org_id)
-    token = (
-        Clerk(bearer_auth=machine_key)
-        .m2m.create_token(
-            seconds_until_expiration=60,
-            min_remaining_ttl_seconds=20,
-        )
-        .token
+    result = client.request(
+        "PUT", "/internal/v1/connections/aws/legacy/snapshot",
+        clerk_org_id=clerk_org_id, payload=snapshot,
     )
-    with httpx.Client(timeout=15, follow_redirects=False) as client:
-        response = client.put(
-            f"{origin}/internal/v1/connections/aws/legacy/snapshot",
-            json=snapshot,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        response.raise_for_status()
-        result = response.json()
+    if not isinstance(result, dict):
+        raise ValueError("shared AWS snapshot response is invalid")
     return {"imported": int(result["imported"]), "tombstoned": int(result["tombstoned"])}

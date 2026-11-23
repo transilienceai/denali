@@ -5,7 +5,9 @@ from uuid import UUID
 
 import pytest
 
-from denali.integrations import shared_connections
+from denali.integrations import shared_connections, shared_connections_client
+
+ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
 
 
 class FakeCursor:
@@ -102,9 +104,9 @@ def test_publisher_requires_https_and_a_distinct_machine_key(monkeypatch):
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "test-key")
     with pytest.raises(ValueError, match="HTTPS origin"):
         shared_connections.publish_aws_snapshot("org_123")
-    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", ORIGIN)
     monkeypatch.delenv("DENALI_PLATFORM_MACHINE_SECRET_KEY")
-    with pytest.raises(ValueError, match="MACHINE_SECRET_KEY"):
+    with pytest.raises(ValueError, match="configured together"):
         shared_connections.publish_aws_snapshot("org_123")
 
 
@@ -122,8 +124,7 @@ def test_publisher_sends_one_complete_snapshot_with_clerk_m2m(monkeypatch):
             self.m2m = FakeM2m()
 
     class FakeResponse:
-        def raise_for_status(self):
-            return None
+        status_code = 200
 
         def json(self):
             return {"imported": 1, "tombstoned": 0}
@@ -138,15 +139,18 @@ def test_publisher_sends_one_complete_snapshot_with_clerk_m2m(monkeypatch):
         def __exit__(self, *_):
             return None
 
-        def put(self, url, **options):
+        def request(self, method, url, **options):
+            assert method == "PUT"
             sent.update(url=url, **options)
             return FakeResponse()
 
-    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", ORIGIN)
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "machine-test-key")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_KEY", "wk-synthetic")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_SECRET", "ws-synthetic")
     monkeypatch.setenv("DENALI_DSN", "unused-dsn")
-    monkeypatch.setattr(shared_connections, "Clerk", FakeClerk)
-    monkeypatch.setattr(shared_connections.httpx, "Client", FakeClient)
+    monkeypatch.setattr(shared_connections_client, "Clerk", FakeClerk)
+    monkeypatch.setattr(shared_connections_client.httpx, "Client", FakeClient)
     monkeypatch.setattr(
         shared_connections,
         "aws_snapshot",
@@ -156,6 +160,20 @@ def test_publisher_sends_one_complete_snapshot_with_clerk_m2m(monkeypatch):
         "imported": 1,
         "tombstoned": 0,
     }
-    assert sent["url"] == "https://platform.example/internal/v1/connections/aws/legacy/snapshot"
-    assert sent["headers"] == {"Authorization": "Bearer short-lived-test-token"}
+    assert sent["url"] == ORIGIN + "/internal/v1/connections/aws/legacy/snapshot"
+    assert sent["headers"] == {
+        "Authorization": "Bearer short-lived-test-token", "Modal-Key": "wk-synthetic",
+        "Modal-Secret": "ws-synthetic",
+    }
     assert sent["json"]["clerk_org_id"] == "org_123"
+
+
+def test_publisher_refuses_missing_proxy_before_database_or_clerk(monkeypatch):
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", ORIGIN)
+    monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "machine-test-key")
+    monkeypatch.delenv("DENALI_PLATFORM_MODAL_PROXY_KEY", raising=False)
+    monkeypatch.delenv("DENALI_PLATFORM_MODAL_PROXY_SECRET", raising=False)
+    monkeypatch.setattr(shared_connections, "aws_snapshot", lambda *_: pytest.fail("database read"))
+    monkeypatch.setattr(shared_connections_client, "Clerk", lambda **_: pytest.fail("Clerk called"))
+    with pytest.raises(ValueError, match="Modal proxy"):
+        shared_connections.publish_aws_snapshot("org_123")

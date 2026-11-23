@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Backport only the reviewed Modal proxy transport to the existing development shared AWS/GitHub/Microsoft callers, private snapshot publisher and operator, preserving this branch's admission, native provider and callback behavior. Main's Clerk, shared Workspace/Azure Repos and resource-write features are not imported.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {"impact": "none", "reason": "No dev product receiver, tool, typed command, input, OAuth scope or response schema changes."},
+  "gateway": {"impact": "none", "reason": "The existing broker requests retain their machine and org authorization; a dedicated server-held Modal pair supplements the fixed trusted hop."}
+}
