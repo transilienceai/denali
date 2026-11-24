@@ -51,6 +51,8 @@ from denali.integrations.shared_microsoft import (  # noqa: E402
     SharedEntraReader,
 )
 
+_BROKER_ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
+
 
 class Registry:
     def __init__(self, provider):
@@ -171,7 +173,7 @@ class Registry:
 class Provider:
     config = SimpleNamespace(
         client_id=APP,
-        callback_url="https://platform.example/internal/v1/connections/azure/setup/callback",
+        callback_url="https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run/internal/v1/connections/azure/setup/callback",
     )
 
     def consent_url(self, tenant_or_binding, state):
@@ -192,7 +194,7 @@ class Provider:
             {
                 "state": state,
                 "client_id": APP,
-                "redirect_uri": f"https://platform.example/internal/v1/connections/{provider}/setup/callback",
+                "redirect_uri": f"https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run/internal/v1/connections/{provider}/setup/callback",
             }
         )
 
@@ -254,8 +256,8 @@ def test_denali_and_platform_router_wire_contract_create_setup_attach_read_and_r
         }
 
     bridge = SharedConnectionsClient(
-        "https://platform.example",
-        "offline-machine",
+        _BROKER_ORIGIN,
+        "offline-machine", modal_proxy_key="wk-synthetic", modal_proxy_secret="ws-synthetic",
         allowed_clerk_org_ids=frozenset({"org_alpha"}),
     )
     bridge._clerk = SimpleNamespace(
@@ -281,7 +283,7 @@ def test_denali_and_platform_router_wire_contract_create_setup_attach_read_and_r
         assert launch.status_code == 200
         query = parse_qs(urlsplit(launch.json()["consent_url"]).query)
         assert query["redirect_uri"] == [
-            f"https://platform.example/internal/v1/connections/{provider}/setup/callback"
+            f"https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run/internal/v1/connections/{provider}/setup/callback"
         ]
         if provider == "azure":
             assert urlsplit(launch.json()["consent_url"]).path == f"/{TENANT}/v2.0/adminconsent"
@@ -346,7 +348,7 @@ def entra_graph_bridge(monkeypatch, respond):
 
     config = SimpleNamespace(
         client_id=APP,
-        callback_url="https://platform.example/internal/v1/connections/entra/setup/callback",
+        callback_url="https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run/internal/v1/connections/entra/setup/callback",
         cursor_key=b"offline-paired-entra-cursor-fixture",
         token=lambda tenant, scope: "offline-provider-token",
     )
@@ -359,8 +361,8 @@ def entra_graph_bridge(monkeypatch, respond):
 
     register_entra_routes(platform, registry, entitled, provider, None)
     bridge = SharedConnectionsClient(
-        "https://platform.example",
-        "offline-machine",
+        _BROKER_ORIGIN,
+        "offline-machine", modal_proxy_key="wk-synthetic", modal_proxy_secret="ws-synthetic",
         allowed_clerk_org_ids=frozenset({"org_alpha"}),
     )
     bridge._clerk = SimpleNamespace(

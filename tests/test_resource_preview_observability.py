@@ -245,6 +245,7 @@ def test_lease_failure_is_classified_before_existing_sanitized_error(caplog, mon
     calls = []
     provider = PlatformWriteLeases.__new__(PlatformWriteLeases)
     provider._origin = "https://invalid.example"
+    provider._modal_proxy_headers = {"Modal-Key": "wk-synthetic", "Modal-Secret": "ws-synthetic"}
 
     def mint(claims):
         calls.append("mint")
@@ -256,7 +257,7 @@ def test_lease_failure_is_classified_before_existing_sanitized_error(caplog, mon
 
     class Client:
         def __init__(self, **kwargs):
-            assert kwargs == {"timeout": 15, "follow_redirects": False}
+            assert kwargs == {"timeout": 15, "follow_redirects": False, "trust_env": False}
 
         def __enter__(self):
             return self

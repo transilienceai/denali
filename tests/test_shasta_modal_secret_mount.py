@@ -44,14 +44,15 @@ def test_development_bridge_keeps_the_same_dependency_graph(monkeypatch):
 def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
     monkeypatch.setenv("DENALI_MODAL_SECRET_NAME", "test-core")
     monkeypatch.setenv("DENALI_MODAL_PROVIDER_SECRET_NAME", "test-provider")
-    monkeypatch.setenv("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN", "https://platform.example")
+    origin = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
+    monkeypatch.setenv("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN", origin)
     monkeypatch.setenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "org_pilot")
     monkeypatch.setenv("DENALI_ENABLE_SHARED_JIRA_READS", "true")
     monkeypatch.setenv("DENALI_MODAL_APP_NAME", "denali-dev")
 
     module = runpy.run_path(str(MODAL_APP))
 
-    assert module["shared_connections_origin"] == "https://platform.example"
+    assert module["shared_connections_origin"] == origin
     assert module["shared_connections_allowed_org_ids"] == "org_pilot"
     assert module["shared_jira_reads_flag"] == "true"
     assert module["shared_connections_config"]["DENALI_ENABLE_SHARED_JIRA_READS"] == "true"
@@ -59,8 +60,9 @@ def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
         "test-core",
         "test-provider",
     ]
-    assert len(module["runtime_secrets"]) == 3
-    assert len(module["shared_connections_secrets"]) == 3
+    assert len(module["runtime_secrets"]) == 4
+    assert len(module["shared_connections_secrets"]) == 4
+    assert module["runtime_secrets"][3].name == "denali-platform-modal-proxy"
     assert "DENALI_PLATFORM_CONNECTIONS_ORIGIN" in repr(module["shared_connections_secrets"][2])
 
     assert "DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS" in repr(module["shared_connections_secrets"][2])
@@ -68,22 +70,25 @@ def test_shared_connections_origin_has_stable_dependency_graph(monkeypatch):
         "test-core",
         "test-provider",
     ]
-    assert module["shasta_bridge_secrets"][3].name == "shasta-denali-bridge"
+    assert module["shasta_bridge_secrets"][4].name == "shasta-denali-bridge"
 
     # The container import has no deploy-shell variables; its dependencies
     # must still match the deployment-side graph exactly.
     monkeypatch.delenv("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", origin)
+    monkeypatch.setenv("MODAL_IS_REMOTE", "1")
     monkeypatch.delenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS")
     monkeypatch.delenv("DENALI_MODAL_APP_NAME")
     module = runpy.run_path(str(MODAL_APP))
     assert module["shared_jira_reads_flag"] == "true"
     assert module["shared_connections_config"]["DENALI_ENABLE_SHARED_JIRA_READS"] == "true"
-    assert len(module["runtime_secrets"]) == 3
-    assert len(module["shared_connections_secrets"]) == 3
-    assert len(module["shasta_bridge_secrets"]) == 4
+    assert len(module["runtime_secrets"]) == 4
+    assert len(module["shared_connections_secrets"]) == 4
+    assert len(module["shasta_bridge_secrets"]) == 5
 
     # An environment with no selector remains dark without changing any mount.
     monkeypatch.delenv("DENALI_ENABLE_SHARED_JIRA_READS")
+    monkeypatch.delenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN")
     module = runpy.run_path(str(MODAL_APP))
     assert module["shared_connections_origin"] is None
     assert module["shared_connections_allowed_org_ids"] is None

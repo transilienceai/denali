@@ -7,6 +7,8 @@ import pytest
 
 from denali.integrations import shared_connections_client
 
+_BROKER_ORIGIN = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
+
 
 def test_server_org_overrides_request_payload(monkeypatch):
     sent = {}
@@ -44,7 +46,9 @@ def test_server_org_overrides_request_payload(monkeypatch):
     monkeypatch.setattr(shared_connections_client.httpx, "Client", FakeClient)
 
     client = shared_connections_client.SharedConnectionsClient(
-        "https://platform.example", "test-machine-key"
+        _BROKER_ORIGIN, "test-machine-key",
+            modal_proxy_key="wk-synthetic",
+            modal_proxy_secret="ws-synthetic"
     )
     assert client.request(
         "POST",
@@ -56,11 +60,68 @@ def test_server_org_overrides_request_payload(monkeypatch):
         "clerk_org_id": "org_server",
         "external_account_id": "123456789012",
     }
+    assert sent["headers"] == {
+        "Authorization": "Bearer test-token", "Modal-Key": "wk-synthetic",
+        "Modal-Secret": "ws-synthetic",
+    }
+
+
+@pytest.mark.parametrize("key,secret", [
+    ("", ""), ("wk-synthetic", ""), ("", "ws-synthetic"),
+    ("ak-unrelated", "ws-synthetic"), ("wk-synthetic", "ws-bad\nheader"),
+    ("wk-" + "a" * 257, "ws-synthetic"),
+])
+def test_proxy_pair_is_required_before_clerk_or_transport(monkeypatch, key, secret):
+    monkeypatch.setattr(
+        shared_connections_client, "Clerk", lambda **_kwargs: pytest.fail("Clerk called")
+    )
+    with pytest.raises(ValueError, match="Modal proxy"):
+        shared_connections_client.SharedConnectionsClient(
+            _BROKER_ORIGIN,
+            "test-machine", modal_proxy_key=key, modal_proxy_secret=secret,
+        )
+
+
+@pytest.mark.parametrize("origin", [
+    "https://evil.example", "https://transilience-transilience-platform-dev--other.modal.run",
+    "https://transilience-transilience-platform-prod--transilience-pl-8a9ce7.modal.run.evil.example",
+])
+def test_proxy_credentials_cannot_be_sent_to_an_unreviewed_origin(origin):
+    with pytest.raises(ValueError, match="reviewed Platform origin"):
+        shared_connections_client.SharedConnectionsClient(
+            origin, "test-machine",
+                modal_proxy_key="wk-synthetic",
+                modal_proxy_secret="ws-synthetic",
+        )
+
+
+@pytest.mark.parametrize("environment,remote,origin,allowed", [
+    ("denali-dev", "1", _BROKER_ORIGIN, True),
+    ("denali-prod", "1", _BROKER_ORIGIN, False),
+    ("renamed-environment", "1", _BROKER_ORIGIN, False),
+    ("", "1", _BROKER_ORIGIN, False),
+])
+def test_proxy_pin_requires_recognized_remote_environment(
+    monkeypatch, environment, remote, origin, allowed,
+):
+    monkeypatch.setenv("MODAL_ENVIRONMENT", environment)
+    monkeypatch.setenv("MODAL_IS_REMOTE", remote)
+    if allowed:
+        assert shared_connections_client.shared_modal_proxy_headers(
+            origin, "wk-synthetic", "ws-synthetic",
+        )["Modal-Key"] == "wk-synthetic"
+    else:
+        with pytest.raises(ValueError):
+            shared_connections_client.shared_modal_proxy_headers(
+                origin, "wk-synthetic", "ws-synthetic",
+            )
 
 
 def test_environment_client_defaults_to_no_organizations(monkeypatch):
-    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", _BROKER_ORIGIN)
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "test-machine-key")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_KEY", "wk-synthetic")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_SECRET", "ws-synthetic")
     monkeypatch.delenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", raising=False)
     client = shared_connections_client.SharedConnectionsClient.from_environment()
     assert client is not None
@@ -73,17 +134,21 @@ def test_environment_client_defaults_to_no_organizations(monkeypatch):
 def test_preprovisioned_machine_key_does_not_activate_a_dark_bridge(monkeypatch):
     monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "")
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "test-machine-key")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_KEY", "wk-synthetic")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_SECRET", "ws-synthetic")
     assert shared_connections_client.SharedConnectionsClient.from_environment() is None
 
-    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", _BROKER_ORIGIN)
     monkeypatch.delenv("DENALI_PLATFORM_MACHINE_SECRET_KEY")
     with pytest.raises(ValueError, match="machine secret"):
         shared_connections_client.SharedConnectionsClient.from_environment()
 
 
 def test_environment_allowlist_is_exact_and_rejects_invalid_ids(monkeypatch):
-    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", "https://platform.example")
+    monkeypatch.setenv("DENALI_PLATFORM_CONNECTIONS_ORIGIN", _BROKER_ORIGIN)
     monkeypatch.setenv("DENALI_PLATFORM_MACHINE_SECRET_KEY", "test-machine-key")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_KEY", "wk-synthetic")
+    monkeypatch.setenv("DENALI_PLATFORM_MODAL_PROXY_SECRET", "ws-synthetic")
     monkeypatch.setenv("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS", "org_pilot")
     client = shared_connections_client.SharedConnectionsClient.from_environment()
     assert client is not None
@@ -119,7 +184,9 @@ def test_bounded_jira_broker_response_uses_existing_machine_and_rejects_oversize
     monkeypatch.setattr(shared_connections_client, "Clerk", FakeClerk)
     monkeypatch.setattr(shared_connections_client.httpx, "HTTPTransport", transport)
     client = shared_connections_client.SharedConnectionsClient(
-        "https://platform.example", "operator-test-machine",
+        _BROKER_ORIGIN, "operator-test-machine",
+            modal_proxy_key="wk-synthetic",
+            modal_proxy_secret="ws-synthetic",
         allowed_clerk_org_ids=frozenset({"org_server"}),
     )
     path = "/internal/v1/connections/jira/11111111-1111-4111-8111-111111111111/read"
@@ -130,7 +197,7 @@ def test_bounded_jira_broker_response_uses_existing_machine_and_rejects_oversize
     )
     assert result == {"projects": []}
     assert calls[0].method == "POST"
-    assert str(calls[0].url) == "https://platform.example" + path
+    assert str(calls[0].url) == _BROKER_ORIGIN + path
     assert json.loads(calls[0].content) == {
         "clerk_org_id": "org_server", "operation": "projects",
     }

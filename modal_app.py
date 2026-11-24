@@ -61,9 +61,13 @@ image = (
 # also import the API module, so they need this public origin alongside the
 # machine key in the core Modal Secret even though only the API calls it.
 shared_connections_origin = os.environ.get("DENALI_MODAL_SHARED_CONNECTIONS_ORIGIN")
+if shared_connections_origin is None and os.environ.get("MODAL_IS_REMOTE") == "1":
+    shared_connections_origin = os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN")
 shared_connections_allowed_org_ids = os.environ.get("DENALI_PLATFORM_ALLOWED_CLERK_ORG_IDS")
 shared_connections_config = {
-    "DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin,
+    # Empty is intentional: Modal omits None, which could leave a stale core
+    # origin active remotely and change the conditional proxy Secret graph.
+    "DENALI_PLATFORM_CONNECTIONS_ORIGIN": shared_connections_origin or "",
     "DENALI_ENABLE_SHARED_JIRA_READS": shared_jira_reads_flag,
     "DENALI_NATIVE_CONNECTION_SETTINGS_PUBLISH_ENABLED": native_settings_publish_flag,
     # Always pin the validated source, including its database default. A core
@@ -96,6 +100,11 @@ runtime_secrets = [
     modal.Secret.from_name(PROVIDER_SECRET_NAME),
     modal.Secret.from_dict(shared_connections_config),
 ]
+if shared_connections_origin:
+    runtime_secrets.append(modal.Secret.from_name(
+        "denali-platform-modal-proxy",
+        required_keys=["DENALI_PLATFORM_MODAL_PROXY_KEY", "DENALI_PLATFORM_MODAL_PROXY_SECRET"],
+    ))
 shared_connections_secrets = runtime_secrets
 shasta_bridge_secrets = [
     *runtime_secrets,

@@ -104,7 +104,7 @@ class Repository(GitHubRepository):
 
 
 class Platform:
-    origin = "https://connectors.example.test"
+    origin = "https://transilience-transilience-platform-dev--transilience-pla-73050c.modal.run"
 
     def __init__(self):
         self.calls = []
@@ -349,6 +349,22 @@ def rewrite_query(value, **changes):
     query.update({key: [replacement] for key, replacement in changes.items()})
     value["authorize_url"] = urlunsplit(parts._replace(query=urlencode(query, doseq=True)))
     return value
+
+
+@pytest.mark.parametrize("callback,expected_status", [
+    ("https://mcp-dev.transilience.cloud", 201),
+    ("https://mcp.transilience.cloud", 502),
+    ("https://mcp-dev.transilience.cloud.evil.test", 502),
+])
+def test_launch_allows_only_the_same_environment_gateway_callback(callback, expected_status):
+    platform, repo = Platform(), Repository()
+    target = callback + ROOT + "/setup/callback"
+    platform.launch_patch = lambda value: {
+        **rewrite_query(value, redirect_uri=target), "callback_url": target,
+    }
+    with client(platform, repo) as web:
+        response = web.post(BASE + f"/{PLATFORM_ID}/setup", headers=AUTH, json=launch_payload())
+    assert response.status_code == expected_status
 
 
 @pytest.mark.parametrize(

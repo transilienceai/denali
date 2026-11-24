@@ -13,6 +13,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from denali.integrations.shared_connections_client import shared_modal_proxy_headers
 from denali.resource_writes.observability import observe_dependency
 from denali.resource_writes.templates import (
     RemediationError,
@@ -23,7 +24,10 @@ from denali.resource_writes.templates import (
 
 
 class PlatformWriteLeases:
-    def __init__(self, origin: str, key: str, receiver: str):
+    def __init__(
+        self, origin: str, key: str, receiver: str, *,
+        modal_proxy_key: str, modal_proxy_secret: str,
+    ):
         parsed = urlsplit(origin)
         if (
             parsed.scheme != "https"
@@ -33,6 +37,9 @@ class PlatformWriteLeases:
             or (parsed.path or parsed.query or parsed.fragment or not key or not receiver)
         ):
             raise ValueError("resource write lease configuration incomplete")
+        self._modal_proxy_headers = shared_modal_proxy_headers(
+            origin, modal_proxy_key, modal_proxy_secret,
+        )
         from clerk_backend_api import Clerk
 
         self._origin = origin
@@ -45,6 +52,8 @@ class PlatformWriteLeases:
             os.environ.get("DENALI_PLATFORM_CONNECTIONS_ORIGIN", ""),
             os.environ.get("DENALI_PLATFORM_MACHINE_SECRET_KEY", ""),
             os.environ.get("DENALI_PLATFORM_RESOURCE_WRITE_RECEIVER_MACHINE_ID", ""),
+            modal_proxy_key=os.environ.get("DENALI_PLATFORM_MODAL_PROXY_KEY", ""),
+            modal_proxy_secret=os.environ.get("DENALI_PLATFORM_MODAL_PROXY_SECRET", ""),
         )
 
     def _lease_token(self, claims: dict[str, Any]) -> str:
@@ -108,7 +117,7 @@ class PlatformWriteLeases:
         }
         try:
             token = observe_dependency("lease_mint", self._lease_token, claims)
-            with httpx.Client(timeout=15, follow_redirects=False) as client:
+            with httpx.Client(timeout=15, follow_redirects=False, trust_env=False) as client:
 
                 def fetch_lease():
                     response = client.post(
@@ -120,14 +129,15 @@ class PlatformWriteLeases:
                             "request_id": request_id,
                             "request_sha256": request_sha256,
                         },
-                        headers={"Authorization": f"Bearer {token}"},
+                        headers={"Authorization": f"Bearer {token}", **self._modal_proxy_headers},
                     )
                     response.raise_for_status()
                     return response.json()
 
                 return observe_dependency("lease_post", fetch_lease)
         except Exception:
-            raise RemediationError("resource_lease_unavailable") from None
+            pass
+        raise RemediationError("resource_lease_unavailable") from None
 
 
 class GitHubRemediator:

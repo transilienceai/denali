@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Add a dedicated server-held Modal proxy credential alongside the unchanged Clerk machine bearer on fixed Platform broker transports. Existing native cloud authentication, organization allowlists, broker entitlements, product receiver schemas, settings source and jobs are unchanged. Disabled shared bridges require no new Secret.",
+  "capabilities": [], "contract_files": [], "documentation_files": [], "test_files": [],
+  "cli": {"impact": "none", "reason": "No Denali client schema, scope or public tool changes; Modal credentials remain server-side."},
+  "gateway": {"impact": "none", "reason": "The paired Platform edge protection changes internal transport only; the Denali receiver contract and delegated authorization are unchanged."}
+}
