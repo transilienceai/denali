@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "product": "denali",
+  "change": "no_external_change",
+  "reason": "Strengthen internal tenant-owned evidence relationships and SQL joins, and add an aggregate read-only operator retention report. Existing browser and gateway operations, response schemas, tenant resolution, connection identities, selected provider scopes, evidence and public capabilities remain unchanged. No tables or historical rows are removed and no RLS or retention scheduler is activated.",
+  "capabilities": [],
+  "contract_files": [],
+  "documentation_files": [],
+  "test_files": [],
+  "cli": {
+    "impact": "none",
+    "reason": "The database diagnostic is a privileged product-internal module, not a shared CLI command, public tool or new login scope. Existing packaged CLI contracts are preserved."
+  },
+  "gateway": {
+    "impact": "none",
+    "reason": "No Platform adapter, tool schema, onboarding, provider permission or cross-application service behavior changes. A paired Platform PR is unnecessary for these internal Denali database protections."
+  }
+}
